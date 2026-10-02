@@ -385,13 +385,17 @@ private static let renderedPageOverscanViewports: CGFloat = 0.25
     // hosts with native undo or live interaction state remain pinned.
 private static let maximumEagerPageHostCount = 32
     // A page-local stack is necessary because PaperKit resolves undo through
-    // containment. Twelve levels preserves ordinary short-form editing while
-    // making both native and app-owned history finite.
-private static let maximumUndoLevelCountPerPage = 12
-    // At most the focused page plus three recently edited page histories stay
-    // pinned. Authored snapshots remain durable and remountable after an older
+    // containment. Twenty levels covers a paragraph of handwriting corrections
+    // while keeping both native and app-owned history finite.
+private static let maximumUndoLevelCountPerPage = 20
+    // The focused page plus seven recently edited page histories stay pinned,
+    // so scrolling between a few pages while writing doesn't lose undo.
+    // Authored snapshots remain durable and remountable after an older
     // offscreen history is discarded.
-private static let maximumRetainedUndoPageHostCount = 4
+private static let maximumRetainedUndoPageHostCount = 8
+    // Pending app-owned undo registrations share one byte budget per page,
+    // independent of the level count, so deeper undo cannot raise peak memory.
+private static let maximumPendingAppUndoSerializedByteCount = 48 * 1_024 * 1_024
     // Programmatic insertion history retains immutable before/after archives.
     // Admit their combined bytes, not each archive independently.
 private static let maximumAppOwnedUndoActionSerializedByteCount = 4 * 1_024 * 1_024
@@ -1101,6 +1105,9 @@ _ = detachPageHost(id: pageID)
     func setDocumentSynchronizationPending(_ isPending: Bool) {
         guard isDocumentSynchronizationPending != isPending else { return }
         isDocumentSynchronizationPending = isPending
+        // Before the view loads there is nothing to lock yet; the flag is
+        // honored by the first `refreshInteractionPolicy()` after load.
+        guard isViewLoaded else { return }
         refreshInteractionPolicy()
     }
 
@@ -2469,6 +2476,16 @@ _ = detachPageHost(id: pageID)
                 allowsDirectBodyTransform: false,
                 sizeValue: nil
             )
+            return
+        }
+
+        // Scrolling calls this every frame. A notebook with no tables, and no
+        // table state left to clear, has nothing to lay out.
+        if tableAccessibilityElementsByKey.isEmpty,
+            activeTableTarget == nil,
+            activeTableCell == nil,
+            hoveredTableCell == nil,
+            pages.allSatisfy({ $0.tables.isEmpty }) {
             return
         }
 
@@ -5734,14 +5751,7 @@ guard let retainedHost = hostsByPageID[pageID],
             )
             partialResult = overflowed ? Int.max : next
         }
-        let (maximumPendingSerializedByteCount, pendingBudgetOverflowed) =
-            Self.maximumUndoLevelCountPerPage
-            .multipliedReportingOverflow(
-                by: effectiveMaximumAppOwnedUndoActionSerializedByteCount
-            )
-        let pendingSerializedByteBudget = pendingBudgetOverflowed
-            ? Int.max
-            : maximumPendingSerializedByteCount
+        let pendingSerializedByteBudget = Self.maximumPendingAppUndoSerializedByteCount
 
         while registrations.isEmpty == false {
             let (nextByteCount, overflowed) = retainedSerializedByteCount

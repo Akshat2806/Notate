@@ -150,4 +150,72 @@ final class NotateTests: XCTestCase {
         XCTAssertNil(gate.end(releaseVelocity: .zero))
     }
 
+
+    // MARK: - Tool model regression tests
+
+    func testPenFamilyOffersMonolineBallpointAndCalligraphy() {
+        XCTAssertEqual(CanvasTool.pen.toolbarFamilyVariants, [.pen, .ballpoint, .calligraphy])
+        XCTAssertEqual(CanvasTool.ballpoint.toolbarFamilyRoot, .pen)
+        XCTAssertEqual(CanvasTool.calligraphy.toolbarFamilyRoot, .pen)
+        XCTAssertEqual(CanvasTool.pen.title, "Monoline")
+        XCTAssertEqual(CanvasTool.pen.toolbarFamilyTitle, "Pen")
+    }
+
+    func testBrushFamilyOffersFountainWatercolorAndCrayon() {
+        XCTAssertEqual(
+            CanvasTool.fountainPen.toolbarFamilyVariants,
+            [.fountainPen, .watercolor, .crayon]
+        )
+        XCTAssertEqual(CanvasTool.crayon.toolbarFamilyRoot, .fountainPen)
+        XCTAssertEqual(CanvasTool.fountainPen.toolbarFamilyTitle, "Brush")
+    }
+
+    func testEveryDrawingToolHasDefaultConfigurationAndSixWidths() {
+        let drawingTools: [CanvasTool] = [
+            .pen, .ballpoint, .calligraphy, .pencil,
+            .fountainPen, .watercolor, .crayon, .highlighter,
+        ]
+        for tool in drawingTools {
+            XCTAssertNotNil(CanvasToolState.defaults[tool], "\(tool) lacks defaults")
+            XCTAssertEqual(CanvasToolState.widthPresets(for: tool).count, 6, "\(tool)")
+        }
+        XCTAssertNotNil(CanvasToolState.defaults[.eraser])
+        XCTAssertNotNil(CanvasToolState.defaults[.laserPointer])
+    }
+
+    func testToolStateFromBeforeBallpointAndLaserColorStillDecodes() throws {
+        var legacy = CanvasToolState.defaults
+        legacy.removeValue(forKey: .ballpoint)
+        legacy.removeValue(forKey: .laserPointer)
+        let state = CanvasToolState(configurations: legacy)
+
+        let decoded = try JSONDecoder().decode(
+            CanvasToolState.self,
+            from: JSONEncoder().encode(state)
+        )
+
+        XCTAssertNotNil(decoded.configuration(for: .ballpoint))
+        XCTAssertNotNil(decoded.configuration(for: .laserPointer))
+        XCTAssertTrue(decoded.hasValidConfigurations)
+    }
+
+    func testPreferredPenAndBrushFollowTheActiveVariant() {
+        var state = CanvasToolState()
+        state.activeTool = .ballpoint
+        XCTAssertEqual(state.preferredPenTool, .ballpoint)
+        state.activeTool = .watercolor
+        XCTAssertEqual(state.preferredBrushTool, .watercolor)
+        XCTAssertEqual(state.preferredPenTool, .ballpoint)
+    }
+
+    func testQuickPalettesAreFiveSwatches() {
+        XCTAssertEqual(RGBAColor.quickInkPalette.count, 5)
+        XCTAssertGreaterThanOrEqual(RGBAColor.highlighterPalette.count, 5)
+    }
+
+    @MainActor
+    func testPickerPillWidthIsPositiveAndGroupedWiderThanHistory() {
+        XCTAssertGreaterThan(CanvasToolPicker.preferredPillWidth, CanvasToolPicker.preferredHistoryWidth)
+    }
+
 }
