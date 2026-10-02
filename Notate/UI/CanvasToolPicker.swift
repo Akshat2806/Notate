@@ -651,22 +651,40 @@ public struct CanvasToolPicker: View {
         .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 
-    private func quickPalette(for tool: CanvasTool) -> [RGBAColor] {
-        tool == .highlighter
-            ? Array(RGBAColor.highlighterPalette.prefix(5))
-            : RGBAColor.quickInkPalette
+    /// Every swatch the tool offers, shown directly: no spectrum, sliders or
+    /// system colour picker.
+    private func palette(for tool: CanvasTool) -> [RGBAColor] {
+        switch tool {
+        case .highlighter:
+            RGBAColor.highlighterPalette
+        case .laserPointer:
+            [
+                .laserRed, .orange, .yellow, .green, .teal, .cyan,
+                .blue, .violet, .rose, .white, .slate, .black,
+            ]
+        default:
+            RGBAColor.inkPalette
+        }
     }
 
     private func colourLine(for tool: CanvasTool) -> some View {
         let current = toolState.configuration(for: tool)?.color ?? .black
-
-        return HStack(spacing: 0) {
-            ForEach(quickPalette(for: tool), id: \.self) { swatch in
-                colourCell(swatch, current: current, for: tool)
-            }
-            customColorPicker(current: current, for: tool)
+        let swatches = palette(for: tool)
+        let columns = PanelMetrics.columns
+        let rows = stride(from: 0, to: swatches.count, by: columns).map {
+            Array(swatches[$0..<min($0 + columns, swatches.count)])
         }
-        .frame(height: PanelMetrics.lineHeight)
+
+        return VStack(spacing: 0) {
+            ForEach(rows.indices, id: \.self) { index in
+                HStack(spacing: 0) {
+                    ForEach(rows[index], id: \.self) { swatch in
+                        colourCell(swatch, current: current, for: tool)
+                    }
+                }
+                .frame(height: PanelMetrics.lineHeight)
+            }
+        }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Colour")
     }
@@ -697,20 +715,6 @@ public struct CanvasToolPicker: View {
         .buttonStyle(CanvasCrispToolButtonStyle(reduceMotion: reduceMotion))
         .accessibilityLabel(colorName(for: swatch, tool: tool))
         .accessibilityAddTraits(isSelected ? .isSelected : [])
-    }
-
-    private func customColorPicker(current: RGBAColor, for tool: CanvasTool) -> some View {
-        ColorPicker(
-            "",
-            selection: Binding(
-                get: { Color(rgba: current) },
-                set: { updateCustomColor($0, for: tool) }
-            ),
-            supportsOpacity: false
-        )
-        .labelsHidden()
-        .frame(width: PanelMetrics.column, height: PanelMetrics.lineHeight)
-        .accessibilityLabel("Custom color")
     }
 
     private var eraserModeLine: some View {
