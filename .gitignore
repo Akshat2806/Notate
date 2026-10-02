@@ -1,0 +1,39 @@
+# Build artifacts
+build/
+.build/
+*.xcarchive
+
+# Xcode
+xcuserdata/
+*.xcworkspace/xcuserdata/
+*.playground
+*.xcconfig
+
+# Dependencies
+Pods/
+Carthage/Build/
+
+# OS
+.DS_Store
+*.swp
+*.swo
+*~
+.vscode/
+
+# Temporary files
+out.txt
+out2.txt
+tesseract_out.txt
+tesseract_out2.txt
+
+# OCR processing directory (large binary files)
+.ocr/
+
+# Derived data
+DerivedData/
+
+# Local environment
+.env
+.env.local
+*.pem
+*.key
