@@ -2036,14 +2036,9 @@ public extension PaperCanvasCommanding {
     func navigateToPageRegion(pageID: UUID, pageBounds: CGRect, animated: Bool) {
         scrollToPage(id: pageID, animated: animated)
     }
-    func snapshotDocument() -> CanvasDocumentSnapshot? { nil }
-    func setDocumentSynchronizationPending(_ isPending: Bool) {}
-    @discardableResult
-    func synchronizeDocumentAfterAttachment(
-        snapshot: CanvasDocumentSnapshot
-    ) -> Bool { false }
-    func beginImageWandSelection(checkpointGeneration: Int64) {}
-    func cancelImageWandSelection() {}
+    // No defaults for snapshotting, synchronization, or Wand: a silent no-op
+    // here once hid an unimplemented Wand. The compiler should insist that a
+    // conformer implements these.
 }
 
 public enum CanvasConstants {

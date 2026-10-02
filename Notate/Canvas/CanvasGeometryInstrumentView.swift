@@ -125,6 +125,8 @@ final class CanvasGeometryInstrumentView: UIView {
         constrainProtractorCenter(to: safeRect)
         constrainCompassCenter(to: safeRect)
         positionInteractiveElements()
+        // Handles have moved with the new bounds; redraw the instrument to match.
+        setNeedsDisplay()
     }
 
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
@@ -167,7 +169,7 @@ final class CanvasGeometryInstrumentView: UIView {
             isUserInteractionEnabled = true
             moveHandle.isHidden = false
             adjustmentHandle.isHidden = false
-            insertCircleButton.isHidden = false
+            insertCircleButton.isHidden = true
             accessibilityLabel = "Protractor"
             moveHandle.accessibilityLabel = "Move protractor"
             moveHandle.accessibilityHint = "Use the custom actions to move the protractor."

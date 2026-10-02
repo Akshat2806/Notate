@@ -321,7 +321,7 @@ private var retainedProgrammaticInsertionImageCount = 0
 private var retainedProgrammaticInsertionImageBytes = 0
 private var retainedProgrammaticInsertionTextBytes = 0
 private var pagesPreparingInsertionHistory: Set<UUID> = []
-private var documentSynchronizationInteractionWasEnabled: Bool?
+private var isDocumentSynchronizationPending = false
 private var hasAppliedInitialViewport = false
 private var isApplyingGeometry = false
 private var isDirectInteractionActive = false
@@ -906,6 +906,12 @@ view.setNeedsLayout()
 override func didReceiveMemoryWarning() {
 super.didReceiveMemoryWarning()
 isUnderMemoryPressure = true
+// Pressure is transient. Leaving the flag set would disable prefetch and
+// discard undo history on every eviction for the rest of the session.
+Task { @MainActor [weak self] in
+try? await Task.sleep(for: .seconds(10))
+self?.isUnderMemoryPressure = false
+}
 cancelProgrammaticFreeformZoomSettlement()
 endInteractiveZoomPresentation()
     guard hasActiveContact == false,
@@ -1048,6 +1054,7 @@ _ = detachPageHost(id: pageID)
         let pageInteractionIsEnabled = isReaderModeEnabled == false
             && laserIsActive == false
             && regionSelectionIsActive == false
+            && isDocumentSynchronizationPending == false
 
         contactMonitor.isEnabled = isReaderModeEnabled == false
         threeFingerUndoSwipeGestureRecognizer.isEnabled = isReaderModeEnabled == false
@@ -1086,6 +1093,15 @@ _ = detachPageHost(id: pageID)
         synchronizeRulerState()
         configureOuterPanForInputMode()
         refreshTableAccessibilityElements()
+    }
+
+    /// A replacement controller must not accept edits until it has adopted the
+    /// model's authoritative snapshot; strokes drawn earlier would be
+    /// overwritten by the synchronization.
+    func setDocumentSynchronizationPending(_ isPending: Bool) {
+        guard isDocumentSynchronizationPending != isPending else { return }
+        isDocumentSynchronizationPending = isPending
+        refreshInteractionPolicy()
     }
 
     func applyToolState(_ state: CanvasToolState) {
@@ -1442,6 +1458,13 @@ _ = detachPageHost(id: pageID)
             zoomScale: effectiveZoomScale,
             normalizedCenterX: bounds.midX / page.displaySize.width,
             normalizedCenterY: bounds.midY / page.displaySize.height
+        )
+        setFocusedPage(pageID, fromDirectInteraction: false)
+        applyViewport(
+            restoredViewportForCurrentPageMode(viewport),
+            focusedOn: pageID,
+            preserveFocusedPage: true,
+            animated: animated
         )
     }
 
@@ -4156,7 +4179,7 @@ private static func prepareImagePlaygroundSource(_ image: CGImage) -> CGImage? {
             pageID != focusedPageID,
             pageID != programmaticNavigationPageID,
             hasActiveContact == false,
-            documentSynchronizationInteractionWasEnabled == nil,
+            isDocumentSynchronizationPending == false,
             pendingPaperTemplates[pageID] == nil,
             queuedInsertionCountByPageID[pageID, default: 0] == 0,
             pagesPreparingInsertionHistory.contains(pageID) == false,
@@ -5109,9 +5132,8 @@ layer.shouldRasterize = false
 if documentMode == .freeform {
 host.decorationView.setOverlayPresentationActive(true)
 } else {
-host.decorationView.superview == documentView
-if host.decorationView.superview == documentView {
-host.undoController.view.superview === documentView
+if host.decorationView.superview == documentView,
+host.undoController.view.superview === documentView {
 documentView.insertSubview(
 host.decorationView,
 belowSubview: host.undoController.view

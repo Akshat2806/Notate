@@ -161,7 +161,7 @@ final class CanvasRegionSelectionView: UIView, UIGestureRecognizerDelegate {
         cursorGlyph.contentMode = .center
         cursorGlyph.frame = cursorView.bounds
         cursorGlyph.isAccessibilityElement = false
-        addSubview(cursorGlyph)
+        cursorView.addSubview(cursorGlyph)
     }
 
     private func configureGesture() {
