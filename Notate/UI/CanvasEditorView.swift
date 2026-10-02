@@ -5,17 +5,15 @@ import UniformTypeIdentifiers
 import UIKit
 
 /// Keeps the canvas picker and the two editor action clusters in separate
-/// layout corridors. When the canvas becomes narrower (for example beside the
-/// assistant rail or in iPad multitasking), the chrome moves to two rows before
+/// layout corridors. When the canvas becomes narrower (for example in iPad
+/// multitasking), the chrome moves to two rows before
 /// those corridors can overlap.
 enum CanvasEditorChromeLayout {
-    static let assistantActionTrailingClearance = NotateDesign.Spacing.control
-
     private static let outerHorizontalPadding: CGFloat = 16
     private static let pickerToActionsGap = NotateDesign.Spacing.content
-    /// Reader, Assist, and More form the larger trailing cluster. Reserving the
+    /// Reader and More form the larger trailing cluster. Reserving the
     /// larger side symmetrically keeps the centered picker clear in LTR and RTL.
-    private static let actionCountPerSide: CGFloat = 3
+    private static let actionCountPerSide: CGFloat = 2
 
     /// Undo, redo, one visible scrolling tool, Add, the picker divider, and
     /// the picker's own tight horizontal padding.
@@ -27,34 +25,21 @@ enum CanvasEditorChromeLayout {
 
     static func usesStackedLayout(
         availableWidth: CGFloat,
-        isAccessibilitySize: Bool,
-        isAssistantRailPresented: Bool
+        isAccessibilitySize: Bool
     ) -> Bool {
-        isAccessibilitySize
-            || availableWidth < minimumSingleRowWidth(
-                isAssistantRailPresented: isAssistantRailPresented
-            )
+        isAccessibilitySize || availableWidth < minimumSingleRowWidth
     }
 
-    static func minimumSingleRowWidth(
-        isAssistantRailPresented: Bool
-    ) -> CGFloat {
+    static var minimumSingleRowWidth: CGFloat {
         minimumPickerWidth
-            + (2 * pickerHorizontalClearance(
-                isAssistantRailPresented: isAssistantRailPresented
-            ))
+            + (2 * pickerHorizontalClearance)
             + (2 * outerHorizontalPadding)
     }
 
-    static func pickerHorizontalClearance(
-        isAssistantRailPresented: Bool
-    ) -> CGFloat {
+    static var pickerHorizontalClearance: CGFloat {
         let actionWidths = actionCountPerSide * NotateDesign.Control.minimumHitTarget
         let actionSpacing = (actionCountPerSide - 1) * NotateDesign.Spacing.compact
-        return actionWidths
-            + actionSpacing
-            + (isAssistantRailPresented ? assistantActionTrailingClearance : 0)
-            + pickerToActionsGap
+        return actionWidths + actionSpacing + pickerToActionsGap
     }
 }
 
@@ -101,12 +86,9 @@ final class CanvasEditorMediaTaskGate {
 struct CanvasEditorView: View {
     private enum AccessibilityFocus: Hashable {
         case recoveryFailure
-        case assistantPanel
-        case assistantButton
     }
 
     @Bindable var model: CanvasEditorModel
-    @Bindable var assistant: AssistantPresentationModel
     let item: LibraryItemRecord
     let onRename: @MainActor (String) throws -> Void
     let onClose: (@MainActor () -> Void)?
@@ -148,7 +130,6 @@ struct CanvasEditorView: View {
 
     init(
         model: CanvasEditorModel,
-        assistant: AssistantPresentationModel,
         item: LibraryItemRecord,
         onRename: @escaping @MainActor (String) throws -> Void,
         onClose: (@MainActor () -> Void)? = nil,
@@ -156,7 +137,6 @@ struct CanvasEditorView: View {
         flushesOnDisappear: Bool = true
     ) {
         self.model = model
-        self.assistant = assistant
         self.item = item
         self.onRename = onRename
         self.onClose = onClose
@@ -166,66 +146,18 @@ struct CanvasEditorView: View {
 
     var body: some View {
         GeometryReader { geometry in
-            let usesRail = usesAssistantRail(width: geometry.size.width)
-            let isAssistantRailPresented = assistant.isPresented && usesRail
-            let assistantRailWidth = isAssistantRailPresented
-                ? min(360, geometry.size.width * 0.4)
-                : 0
-            let canvasWidth = max(
-                0,
-                geometry.size.width
-                    - assistantRailWidth
-                    - (isAssistantRailPresented
-                        ? NotateDesign.Hairline.standardWidth
-                        : 0)
-            )
-
-            HStack(spacing: 0) {
-                canvasSurface(
-                    isAssistantRailPresented: isAssistantRailPresented,
-                    availableSize: CGSize(
-                        width: canvasWidth,
-                        height: geometry.size.height
-                    )
-                )
-
-                if isAssistantRailPresented {
-                    Rectangle()
-                        .fill(Color.primary.opacity(NotateDesign.Hairline.subtleOpacity))
-                        .frame(width: NotateDesign.Hairline.standardWidth)
-                        .accessibilityHidden(true)
-                    assistantPanel
-                        .frame(width: assistantRailWidth)
-                        .transition(.move(edge: .trailing).combined(with: .opacity))
-                }
-            }
-            .animation(
-                reduceMotion ? nil : NotateDesign.Motion.presentation,
-                value: assistant.isPresented
+            canvasSurface(
+                availableSize: geometry.size
             )
             .onAppear {
-                model.setReaderViewportSize(
-                    CGSize(width: canvasWidth, height: geometry.size.height)
-                )
+                model.setReaderViewportSize(geometry.size)
             }
-            .onChange(of: CGSize(width: canvasWidth, height: geometry.size.height)) {
-                _, size in
+            .onChange(of: geometry.size) { _, size in
                 model.setReaderViewportSize(size)
-            }
-            .sheet(isPresented: compactAssistantBinding(width: geometry.size.width)) {
-                assistantPanel
-                    .presentationDetents([.height(330), .medium, .large])
-                    .presentationDragIndicator(.visible)
-                    .presentationBackground(workspaceColor)
-                    .presentationBackgroundInteraction(.enabled(upThrough: .height(330)))
             }
         }
         .task {
-            // Canvas restoration owns the opening critical path. Foundation
-            // Models warmup begins only when the user opens Notate, so model
-            // preparation cannot compete with the first editable frame.
             await model.start()
-            assistant.updateCurrentPage(model.currentPageIDForAssistant)
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .inactive || phase == .background {
@@ -238,14 +170,7 @@ struct CanvasEditorView: View {
             guard newGeneration > oldGeneration else { return }
             if let onVerifiedCheckpoint {
                 Task { await onVerifiedCheckpoint() }
-            } else {
-                // Standalone previews/tests have no application coordinator to
-                // publish the verified snapshot into the shared index.
-                assistant.invalidateIndex(for: item.id)
             }
-        }
-        .onChange(of: model.currentPageNumber) { _, _ in
-            assistant.updateCurrentPage(model.currentPageIDForAssistant)
         }
         .onChange(of: model.imageWandRequest?.id) { _, requestID in
             guard let request = model.imageWandRequest,
@@ -253,25 +178,10 @@ struct CanvasEditorView: View {
             imageWandSelection = request.selection
             isImageWandPresented = true
         }
-        .onChange(of: assistant.isPresented) { _, isPresented in
-            if UIAccessibility.isVoiceOverRunning {
-                accessibilityFocus = isPresented ? .assistantPanel : .assistantButton
-            }
-        }
         .onChange(of: model.launchState) { _, state in
             handleLaunchAccessibility(state)
-            if state == .ready {
-                assistant.updateCurrentPage(model.currentPageIDForAssistant)
-            }
         }
-        .onChange(of: model.saveState) { oldState, state in
-            // `markDocumentChanged` enters `.saving` synchronously, well
-            // before the trailing checkpoint is verified. An assistant
-            // request always begins after its preparation checkpoint, so the
-            // first subsequent authored edit is this saved-to-saving edge.
-            if oldState != .saving, state == .saving {
-                assistant.noteContentDidChange()
-            }
+        .onChange(of: model.saveState) { _, state in
             announceSaveFailureIfNeeded(state)
         }
         .onDisappear {
@@ -331,7 +241,6 @@ struct CanvasEditorView: View {
     }
 
     private func canvasSurface(
-        isAssistantRailPresented: Bool,
         availableSize: CGSize
     ) -> some View {
         ZStack {
@@ -392,10 +301,7 @@ struct CanvasEditorView: View {
             value: model.boundaryPagePull != nil
         )
         .overlay(alignment: .top) {
-            topChrome(
-                isAssistantRailPresented: isAssistantRailPresented,
-                availableWidth: availableSize.width
-            )
+            topChrome(availableWidth: availableSize.width)
             .disabled(
                 model.launchState != .ready || model.isReaderModeTransitioning
             )
@@ -415,42 +321,14 @@ struct CanvasEditorView: View {
         }
     }
 
-    private func usesAssistantRail(width: CGFloat) -> Bool {
-        width >= 700
-    }
-
-    private func compactAssistantBinding(width: CGFloat) -> Binding<Bool> {
-        Binding(
-            get: { assistant.isPresented && usesAssistantRail(width: width) == false },
-            set: { isPresented in
-                if isPresented == false { closeAssistant() }
-            }
-        )
-    }
-
-    private var assistantPanel: some View {
-        AssistantPanelView(
-            assistant: assistant,
-            surfaceColor: workspaceColor,
-            onDismiss: closeAssistant,
-            onInsertText: model.insertAssistantText,
-            allowsInsertion: model.allowsAuthoring
-        )
-        .accessibilityFocused($accessibilityFocus, equals: .assistantPanel)
-    }
-
     @ViewBuilder
-    private func topChrome(
-        isAssistantRailPresented: Bool,
-        availableWidth: CGFloat
-    ) -> some View {
+    private func topChrome(availableWidth: CGFloat) -> some View {
         Group {
             if model.isReaderMode {
                 editorIdentityAndActions
             } else if CanvasEditorChromeLayout.usesStackedLayout(
                 availableWidth: availableWidth,
-                isAccessibilitySize: dynamicTypeSize.isAccessibilitySize,
-                isAssistantRailPresented: isAssistantRailPresented
+                isAccessibilitySize: dynamicTypeSize.isAccessibilitySize
             ) {
                 VStack(spacing: NotateDesign.Spacing.compact) {
                     editorIdentityAndActions
@@ -461,17 +339,9 @@ struct CanvasEditorView: View {
                     editorPicker
                         .padding(
                             .horizontal,
-                            CanvasEditorChromeLayout.pickerHorizontalClearance(
-                                isAssistantRailPresented: isAssistantRailPresented
-                            )
+                            CanvasEditorChromeLayout.pickerHorizontalClearance
                         )
                     editorIdentityAndActions
-                        .padding(
-                            .trailing,
-                            isAssistantRailPresented
-                                ? CanvasEditorChromeLayout.assistantActionTrailingClearance
-                                : 0
-                        )
                 }
             }
         }
@@ -518,7 +388,6 @@ struct CanvasEditorView: View {
                 if model.supportsPageStack {
                     readerButton
                 }
-                assistantButton
                 CanvasMoreButton(
                     model: model,
                     item: item,
@@ -547,29 +416,6 @@ struct CanvasEditorView: View {
                 ? "Returns to editing on the current page"
                 : "Opens a read-only view of this note"
         )
-    }
-
-    private var assistantButton: some View {
-        Button {
-            if assistant.isPresented {
-                closeAssistant()
-            } else {
-                assistant.open()
-            }
-        } label: {
-            NotateCompactGlassButtonLabel {
-                NotateAssistantIdentityMark(size: 25)
-                    .opacity(assistant.isPresented ? 1 : 0.90)
-            }
-        }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier("canvas.assist")
-        .accessibilityLabel(assistant.isPresented ? "Close Notate" : "Open Notate")
-        .accessibilityFocused($accessibilityFocus, equals: .assistantButton)
-    }
-
-    private func closeAssistant() {
-        assistant.close()
     }
 
     private var workspaceColor: Color {
@@ -742,7 +588,6 @@ struct CanvasEditorView: View {
             imageWandError = "Image Playground requires a compatible iPad with image generation enabled in Apple Intelligence settings."
             return
         }
-        closeAssistant()
         model.beginImageWandSelection()
         UIAccessibility.post(
             notification: .announcement,

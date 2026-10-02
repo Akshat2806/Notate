@@ -1684,12 +1684,6 @@ _ = detachPageHost(id: pageID)
                     imageBytes: decodedBytes,
                     textBytes: 0
                 )
-            case let .assistantText(text, _):
-                return ProgrammaticInsertionRetentionCost(
-                    imageCount: 0,
-                    imageBytes: 0,
-                    textBytes: text.utf8.count
-                )
             case .text, .shape, .table, .circle:
                 return ProgrammaticInsertionRetentionCost(
                     imageCount: 0,
@@ -5630,31 +5624,6 @@ guard let retainedHost = hostsByPageID[pageID],
                 image,
                 frame: paperController.suggestedFrameForInserting(contentInFrame: requested)
             )
-
-        case let .assistantText(text, requestedFrame):
-            let normalizedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard normalizedText.isEmpty == false else { return }
-            let defaultHeight = min(
-                max(CGFloat(normalizedText.count / 34 + 1) * 24 + 36, 96),
-                320
-            )
-            let requested = requestedFrame.map {
-                constrainedFrame($0, to: markup.bounds)
-            } ?? centeredFrame(
-                size: CGSize(width: min(320, markup.bounds.width * 0.72), height: defaultHeight),
-                in: insertionBounds,
-                constrainedTo: markup.bounds
-            )
-            guard requested.width >= 24, requested.height >= 24 else { return }
-            let frame = paperController.suggestedFrameForInserting(contentInFrame: requested)
-            let attributedText = NSAttributedString(
-                string: normalizedText,
-                attributes: [
-                    .font: UIFont.systemFont(ofSize: 18),
-                    .foregroundColor: RGBAColor.graphite.uiColor,
-                ]
-            )
-            inserted.insertNewTextbox(attributedText: attributedText, frame: frame)
 
         case let .positionedImage(image, requestedFrame):
             let availableFrame = constrainedFrame(requestedFrame, to: markup.bounds)

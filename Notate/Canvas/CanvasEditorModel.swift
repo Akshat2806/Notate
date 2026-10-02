@@ -152,7 +152,7 @@ public final class CanvasEditorModel {
     public private(set) var latestVerifiedIndexDelta: CanvasVerifiedIndexDelta?
     /// The immutable snapshot at `verifiedCheckpointGeneration`. A pristine
     /// generation-zero document is a valid baseline even though it has no
-    /// delta. Keeping this handoff in memory lets the assistant index update as
+    /// delta. Keeping this handoff in memory lets verified-index consumers update as
     /// soon as the note opens or autosave verifies, without reopening storage.
     @ObservationIgnored public private(set) var latestVerifiedIndexSnapshot: CanvasCoreSnapshot?
     public let documentKind: LibraryItemKind
@@ -445,8 +445,6 @@ public final class CanvasEditorModel {
         }
         return pages[index].displaySize
     }
-
-    public var currentPageIDForAssistant: UUID { currentPageID }
 
     public var callbacks: PaperCanvasCallbacks {
         PaperCanvasCallbacks(
@@ -767,36 +765,6 @@ public final class CanvasEditorModel {
         imageWandRequest = nil
     }
 
-    public func navigateToAssistantSource(pageID: UUID?, pageBounds: CGRect?) {
-        guard launchState == .ready, isReaderModeTransitioning == false else { return }
-        let targetPageID = pageID ?? currentPageID
-        guard pages.contains(where: { $0.id == targetPageID }) else { return }
-        if isReaderMode {
-            readerDidNavigate(to: targetPageID)
-            return
-        }
-        if currentPageID != targetPageID {
-            setFocusedPage(targetPageID, documentDidChange: false)
-            pendingProgrammaticFocusPageID = targetPageID
-        }
-        if let pageBounds {
-            canvasController?.navigateToPageRegion(
-                pageID: targetPageID,
-                pageBounds: pageBounds,
-                animated: true
-            )
-        } else {
-            canvasController?.scrollToPage(id: targetPageID, animated: true)
-        }
-    }
-
-    public func insertAssistantText(_ text: String) {
-        let normalizedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard allowsAuthoring,
-            normalizedText.isEmpty == false else { return }
-        submitProgrammaticInsertion(.assistantText(normalizedText, frame: nil))
-    }
-
     @discardableResult
     public func insertImage(
         _ image: CGImage,
@@ -1015,7 +983,7 @@ public final class CanvasEditorModel {
         switch insertion {
         case let .image(value), let .positionedImage(value, _):
             image = value
-        case .text, .shape, .table, .circle, .assistantText:
+        case .text, .shape, .table, .circle:
             return 0
         }
         let (byteCount, overflowed) = image.bytesPerRow.multipliedReportingOverflow(
@@ -1645,7 +1613,7 @@ public final class CanvasEditorModel {
     }
 
     /// Establishes an insertion boundary before export so a toolbar, import,
-    /// assistant, or drop insertion accepted just before the tap cannot be
+    /// or drop insertion accepted just before the tap cannot be
     /// silently omitted from the immutable export document.
     public func prepareExportDocumentWhenReady() async -> CanvasExportDocument? {
         guard launchState == .ready,
@@ -1670,25 +1638,6 @@ public final class CanvasEditorModel {
             return
         }
         await checkpointLatest()
-    }
-
-    /// Captures the live PaperKit hosts and waits for an atomically verified
-    /// checkpoint before an assistant request reads the note. Returning false
-    /// prevents the assistant from answering against an older durable revision.
-    public func prepareForAssistantRequest() async -> Bool {
-        guard launchState == .ready,
-            isReaderModeTransitioning == false else { return false }
-        await checkpointLatest()
-        guard detachedControllerDrainTask == nil,
-            deferredControllerInsertions.isEmpty,
-            canvasControllerIsSnapshotReady,
-            canvasController?.hasPendingProgrammaticInsertions != true,
-            generation <= committedGeneration,
-            verifiedCheckpointGeneration >= committedGeneration else {
-            return false
-        }
-        if case let .failed = saveState { return false }
-        return true
     }
 
     public func flushForLifecycle() async {
@@ -2561,7 +2510,7 @@ public final class CanvasEditorModel {
         lastVerifiedIndexGeneration = snapshot.generation
     }
 
-    /// Matches the inputs currently used to produce an assistant source and
+    /// Matches the inputs currently used to produce a search-index source and
     /// its locator. Viewport, paper styling, and focus are intentionally not
     /// included because they do not change searchable content or page bounds.
     private static func hasEquivalentIndexContent(

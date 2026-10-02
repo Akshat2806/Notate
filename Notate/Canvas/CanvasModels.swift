@@ -1648,7 +1648,6 @@ public struct CanvasPreferences: Codable, Equatable, Sendable {
         case table(CanvasTableSize)
         case circle(frame: CGRect)
         case image(CGImage)
-        case assistantText(String, frame: CGRect?)
         case positionedImage(CGImage, frame: CGRect)
 
         public var historyActionName: String {
@@ -1658,7 +1657,6 @@ public struct CanvasPreferences: Codable, Equatable, Sendable {
                 case .table: "Insert Table"
                 case .circle: "Insert Circle"
                 case .image: "Insert Image"
-                case .assistantText: "Insert Assistant Text"
                 case .positionedImage: "Insert Image"
             }
         }

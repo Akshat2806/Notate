@@ -24,15 +24,6 @@ enum NotateDesign {
         static let warning = Color.orange
         /// Keeps the laser pointer's conventional red identity centralized.
         static let laser = Color.red
-        /// A focused, original spectrum for active assistant work. These are
-        /// intentionally separate from the app accent: the blend communicates
-        /// work in progress without making every assistant control loud.
-        static let assistantCyan = Color(red: 0.18, green: 0.78, blue: 0.96)
-        static let assistantBlue = Color(red: 0.27, green: 0.49, blue: 0.98)
-        static let assistantViolet = Color(red: 0.49, green: 0.31, blue: 0.96)
-        static let assistantPink = Color(red: 0.93, green: 0.27, blue: 0.70)
-        static let assistantCoral = Color(red: 1.00, green: 0.43, blue: 0.35)
-        static let assistantAmber = Color(red: 1.00, green: 0.70, blue: 0.24)
         static let background = Color(uiColor: .systemBackground)
         static let cardBackground = Color(uiColor: .secondarySystemGroupedBackground)
 
