@@ -472,19 +472,11 @@ public struct CanvasToolPicker: View {
 
     // MARK: Panel
 
-    /// Centred under the control that opened it and clamped to the window.
-    /// Only the horizontal position is decided here; the editor places the
-    /// panel's top edge just below the top row.
+    /// The panel's own content. The editor centres it under the toolbar and
+    /// places it just below the top row.
     @ViewBuilder private var panel: some View {
         panelContent
             .fixedSize()
-            .alignmentGuide(.leading) { dimensions in
-                let margin = PanelMetrics.edgeMargin
-                let width = dimensions.width
-                let mid = panelAnchorMidX ?? (panelContainerWidth / 2)
-                let upper = max(panelContainerWidth - margin - width, margin)
-                return -min(max(mid - width / 2, margin), upper)
-            }
     }
 
     @ViewBuilder private var panelContent: some View {

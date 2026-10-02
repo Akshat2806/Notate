@@ -346,19 +346,21 @@ struct CanvasEditorView: View {
                 toolFrames = frames
             }
             .overlay(alignment: .topLeading) {
-                // The panel's top edge sits just under the top row, whatever
-                // its height: the overlay is exactly as tall as the row.
+                // Centred under the toolbar, top edge just below the top row.
+                // (Alignment guides can't do this: they only shift a view
+                // relative to a sibling, and the panel has none.)
                 GeometryReader { proxy in
                     if model.isReaderMode == false, model.overlay != .none {
-                        ZStack(alignment: .topLeading) {
-                            toolPicker(placement: .panel, availableWidth: availableWidth)
-                        }
-                        .frame(
-                            width: proxy.size.width,
-                            height: proxy.size.height,
-                            alignment: .topLeading
-                        )
-                        .offset(y: proxy.size.height + CanvasToolPicker.PanelMetrics.gapBelowBar)
+                        let barMidX = toolFrames["bar"]?.midX ?? proxy.size.width / 2
+                        let limit = max(proxy.size.width / 2 - 150, 0)
+                        let shift = min(max(barMidX - proxy.size.width / 2, -limit), limit)
+
+                        toolPicker(placement: .panel, availableWidth: availableWidth)
+                            .frame(width: proxy.size.width, alignment: .center)
+                            .offset(
+                                x: shift,
+                                y: proxy.size.height + CanvasToolPicker.PanelMetrics.gapBelowBar
+                            )
                     }
                 }
             }
