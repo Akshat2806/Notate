@@ -1060,7 +1060,10 @@ _ = detachPageHost(id: pageID)
 
         if laserIsActive, let appliedToolState {
             laserPointerGestureRecognizer.isEnabled = true
-            laserPointerView.activate(style: appliedToolState.laserPointerStyle)
+            laserPointerView.activate(
+                style: appliedToolState.laserPointerStyle,
+                color: appliedToolState.configuration(for: .laserPointer)?.color.uiColor
+            )
         } else {
             laserPointerGestureRecognizer.isEnabled = false
             laserPointerView.cancel()
@@ -1110,7 +1113,10 @@ _ = detachPageHost(id: pageID)
         appliedToolState = state
         if isLaserPointerActive {
             laserPointerGestureRecognizer.isEnabled = true
-            laserPointerView.activate(style: state.laserPointerStyle)
+            laserPointerView.activate(
+                style: state.laserPointerStyle,
+                color: state.configuration(for: .laserPointer)?.color.uiColor
+            )
         } else {
             laserPointerGestureRecognizer.isEnabled = false
             laserPointerView.deactivate()
@@ -3211,7 +3217,10 @@ private func configureLaserPointer() {
     let state = appliedToolState
     laserPointerGestureRecognizer.isEnabled = state?.activeTool == .laserPointer
     if let state, state.activeTool == .laserPointer {
-        laserPointerView.activate(style: state.laserPointerStyle)
+        laserPointerView.activate(
+                style: state.laserPointerStyle,
+                color: state.configuration(for: .laserPointer)?.color.uiColor
+            )
     } else {
         laserPointerView.deactivate()
     }

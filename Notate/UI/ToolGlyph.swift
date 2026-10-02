@@ -50,6 +50,8 @@ public struct ToolGlyph: View {
                 drawLasso(in: &context)
             case .pen:
                 drawPen(in: &context)
+            case .ballpoint:
+                drawBallpoint(in: &context)
             case .calligraphy:
                 drawCalligraphy(in: &context)
             case .pencil:
@@ -142,6 +144,44 @@ public struct ToolGlyph: View {
         var highlight = Path()
         highlight.move(to: CGPoint(x: 10, y: 5))
         highlight.addLine(to: CGPoint(x: 10, y: 18))
+        context.stroke(
+            highlight,
+            with: .color(Color.white.opacity(0.62)),
+            lineWidth: ToolGlyphKeyline.detail
+        )
+    }
+
+    private func drawBallpoint(in context: inout GraphicsContext) {
+        let barrel = Path(roundedRect: CGRect(x: 7.5, y: 2, width: 7, height: 20), cornerRadius: 3.5)
+        context.fill(barrel, with: .color(bodyTint))
+        context.stroke(barrel, with: .color(outline), lineWidth: ToolGlyphKeyline.primary)
+
+        var clip = Path()
+        clip.move(to: CGPoint(x: 15.5, y: 5))
+        clip.addLine(to: CGPoint(x: 15.5, y: 13))
+        context.stroke(
+            clip,
+            with: .color(outline),
+            style: StrokeStyle(lineWidth: ToolGlyphKeyline.primary, lineCap: .round)
+        )
+
+        var cone = Path()
+        cone.move(to: CGPoint(x: 8.5, y: 21.5))
+        cone.addLine(to: CGPoint(x: 13.5, y: 21.5))
+        cone.addLine(to: CGPoint(x: 11.8, y: 30))
+        cone.addLine(to: CGPoint(x: 10.2, y: 30))
+        cone.closeSubpath()
+        context.fill(cone, with: .color(outline.opacity(0.16)))
+        context.stroke(cone, with: .color(outline), lineWidth: ToolGlyphKeyline.primary)
+
+        context.fill(
+            Path(ellipseIn: CGRect(x: 9.9, y: 29.6, width: 2.2, height: 2.2)),
+            with: .color(inkColor)
+        )
+
+        var highlight = Path()
+        highlight.move(to: CGPoint(x: 10.2, y: 5))
+        highlight.addLine(to: CGPoint(x: 10.2, y: 17))
         context.stroke(
             highlight,
             with: .color(Color.white.opacity(0.62)),

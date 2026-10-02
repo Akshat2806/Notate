@@ -622,7 +622,10 @@ public final class CanvasEditorModel {
                 toggleOptions(for: tool)
             } else {
                 select(tool)
-                overlay = .none
+                // Choosing a tool reveals its style, thickness, and color
+                // strip in place; the strip follows style changes within a
+                // family because each style is its own tool.
+                overlay = tool.supportsOptions ? .toolOptions(tool) : .none
             }
 
         case let .showOptions(tool):
@@ -646,7 +649,7 @@ public final class CanvasEditorModel {
             persistPreferencesSoon()
 
         case let .setColor(tool, color):
-            guard tool != .lasso, tool != .eraser, tool != .laserPointer,
+            guard tool != .lasso, tool != .eraser,
                 color.isValid,
                 var configuration = toolState.configuration(for: tool) else { return }
             var normalizedColor = color
@@ -671,19 +674,21 @@ public final class CanvasEditorModel {
 
         case .toggleInsert:
             overlay = overlay == .insert
-                || overlay == .geometryTools
                 || overlay == .shapes
                 || overlay == .tableSizePicker
                 ? .none
                 : .insert
 
         case .tapGeometryToolSlot:
+            // First tap selects the preferred instrument (the ruler by
+            // default) and reveals its siblings; later taps collapse or
+            // re-expand the strip without changing the selection.
             if activeGeometryTool == nil {
                 activeGeometryTool = preferredGeometryTool
-                overlay = .insert
+                overlay = .geometryTools
                 canvasController?.setGeometryTool(activeGeometryTool)
             } else {
-                overlay = .geometryTools
+                overlay = overlay == .geometryTools ? .none : .geometryTools
             }
 
         case let .toggleGeometryTool(tool):
@@ -1016,10 +1021,10 @@ public final class CanvasEditorModel {
     }
 
     private func toggleGeometryTool(_ tool: CanvasGeometryTool) {
-        let keepsInsertTrayPresented = overlay == .geometryTools
+        let keepsGeometryStripPresented = overlay == .geometryTools
         preferredGeometryTool = tool
         activeGeometryTool = activeGeometryTool == tool ? nil : tool
-        overlay = keepsInsertTrayPresented ? .insert : .none
+        overlay = keepsGeometryStripPresented ? .geometryTools : .none
         canvasController?.setGeometryTool(activeGeometryTool)
     }
 

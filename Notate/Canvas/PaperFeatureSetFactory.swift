@@ -58,6 +58,7 @@ public enum PaperFeatureSetFactory {
         ]
         features.inks = [
             .monoline,
+            .pen,
             .pencil,
             .fountainPen,
             .marker,

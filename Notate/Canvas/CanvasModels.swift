@@ -20,6 +20,7 @@ enum CanvasPaperRenderingEnvironment {
 public enum CanvasTool: String, CaseIterable, Codable, Sendable {
     case lasso
     case pen
+    case ballpoint
     case calligraphy
     case pencil
     case fountainPen
@@ -32,7 +33,8 @@ public enum CanvasTool: String, CaseIterable, Codable, Sendable {
     public var title: String {
         switch self {
             case .lasso: "Lasso"
-            case .pen: "Pen"
+            case .pen: "Monoline"
+            case .ballpoint: "Ballpoint"
             case .calligraphy: "Calligraphy"
             case .pencil: "Pencil"
             case .fountainPen: "Fountain Pen"
@@ -52,7 +54,7 @@ public enum CanvasTool: String, CaseIterable, Codable, Sendable {
     /// its current width, spacing, and five-writing-tool rhythm.
     public var toolbarFamilyRoot: CanvasTool {
         switch self {
-        case .calligraphy:
+        case .ballpoint, .calligraphy:
             .pen
         case .watercolor, .crayon:
             .fountainPen
@@ -64,7 +66,7 @@ public enum CanvasTool: String, CaseIterable, Codable, Sendable {
     public var toolbarFamilyVariants: [CanvasTool] {
         switch toolbarFamilyRoot {
         case .pen:
-            [.pen, .calligraphy]
+            [.pen, .ballpoint, .calligraphy]
         case .fountainPen:
             [.fountainPen, .watercolor, .crayon]
         default:
@@ -74,6 +76,7 @@ public enum CanvasTool: String, CaseIterable, Codable, Sendable {
 
     public var toolbarFamilyTitle: String {
         switch toolbarFamilyRoot {
+            case .pen: "Pen"
             case .fountainPen: "Brush"
             default: toolbarFamilyRoot.title
         }
@@ -1066,6 +1069,7 @@ public struct RGBAColor: Codable, Equatable, Hashable, Sendable {
     public static let black = RGBAColor(red: 0, green: 0, blue: 0)
     public static let graphite = RGBAColor(red: 32 / 255, green: 32 / 255, blue: 32 / 255)
     public static let white = RGBAColor(red: 1, green: 1, blue: 1)
+    public static let laserRed = RGBAColor(red: 1, green: 45 / 255, blue: 38 / 255)
     public static let slate = RGBAColor(red: 95 / 255, green: 99 / 255, blue: 104 / 255)
     public static let blue = RGBAColor(red: 47 / 255, green: 111 / 255, blue: 235 / 255)
     public static let cyan = RGBAColor(red: 22 / 255, green: 156 / 255, blue: 191 / 255)
@@ -1080,6 +1084,12 @@ public struct RGBAColor: Codable, Equatable, Hashable, Sendable {
     public static let inkPalette: [RGBAColor] = [
         .black, .white, .slate, .blue, .cyan, .teal,
         .green, .yellow, .orange, .red, .rose, .violet,
+    ]
+
+    /// The five swatches shown inline in the compact picker; the remaining
+    /// palette stays reachable through the system color picker.
+    public static let quickInkPalette: [RGBAColor] = [
+        .black, .blue, .red, .green, .orange,
     ]
 
     public static let highlighterPalette: [RGBAColor] = [
@@ -1157,6 +1167,7 @@ public struct CanvasToolState: Codable, Equatable, Sendable {
 
     public static let defaults: [CanvasTool: CanvasToolConfiguration] = [
         .pen: .init(width: 2, color: .black),
+        .ballpoint: .init(width: 2, color: .black),
         .calligraphy: .init(width: 29, color: .black),
         .pencil: .init(width: 2.5, color: .black),
         .fountainPen: .init(width: 4, color: .black),
@@ -1164,6 +1175,7 @@ public struct CanvasToolState: Codable, Equatable, Sendable {
         .crayon: .init(width: 30, color: .black),
         .highlighter: .init(width: 12, color: .highlighterPalette[0]),
         .eraser: .init(width: 16, color: .graphite),
+        .laserPointer: .init(width: 4, color: .laserRed),
     ]
 
     public func configuration(for tool: CanvasTool) -> CanvasToolConfiguration? {
@@ -1173,6 +1185,7 @@ public struct CanvasToolState: Codable, Equatable, Sendable {
     public static func widthPresets(for tool: CanvasTool) -> [Double] {
         switch tool {
             case .pen: [0.5, 1, 2, 3, 4, 6]
+            case .ballpoint: [0.5, 1, 2, 3, 4, 6]
             case .calligraphy: [5, 10, 18, 24, 29, 40]
             case .pencil: [2.5, 4, 6, 8, 12, 16]
             case .fountainPen: [1, 2, 4, 6, 8, 12]
@@ -2141,6 +2154,8 @@ public enum CanvasNativeToolMapper {
             PKLassoTool()
         case .pen:
             inkingTool(.monoline, state: state, tool: .pen)
+        case .ballpoint:
+            inkingTool(.pen, state: state, tool: .ballpoint)
         case .calligraphy:
             inkingTool(.reed, state: state, tool: .calligraphy)
         case .pencil:

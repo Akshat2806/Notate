@@ -18,10 +18,10 @@ private struct CanvasChromeHeightPreferenceKey: PreferenceKey {
 /// those corridors can overlap.
 enum CanvasEditorChromeLayout {
     private static let outerHorizontalPadding: CGFloat = 16
-    private static let minimumPickerWidth =
-        (10 * NotateDesign.Control.standard)
-        + (9 * 2)
-        + (2 * 8)
+    /// Back, pages, reader, and more share the row with the tool pill.
+    private static let navigationClusterWidth =
+        (4 * NotateDesign.Control.minimumHitTarget)
+        + (5 * NotateDesign.Spacing.compact)
 
     static func usesStackedLayout(
         availableWidth: CGFloat,
@@ -31,7 +31,8 @@ enum CanvasEditorChromeLayout {
     }
 
     static var minimumSingleRowWidth: CGFloat {
-        minimumPickerWidth
+        CanvasToolPicker.preferredPillWidth
+            + navigationClusterWidth
             + (2 * outerHorizontalPadding)
     }
 }
@@ -324,10 +325,20 @@ struct CanvasEditorView: View {
 
     @ViewBuilder
     private func topChrome(availableWidth: CGFloat) -> some View {
+        let isStacked = CanvasEditorChromeLayout.usesStackedLayout(
+            availableWidth: availableWidth,
+            isAccessibilitySize: dynamicTypeSize.isAccessibilitySize
+        )
+
         VStack(spacing: NotateDesign.Spacing.compact) {
-            editorIdentityAndActions
+            editorIdentityAndActions(isStacked: isStacked)
             if model.isReaderMode == false {
-                editorPicker(availableWidth: availableWidth)
+                if isStacked {
+                    toolPicker(placement: .pill, isStacked: true)
+                }
+                if model.overlay != .none {
+                    toolPicker(placement: .options, isStacked: isStacked)
+                }
             }
         }
         .padding(.horizontal, 16)
@@ -344,7 +355,10 @@ struct CanvasEditorView: View {
         .accessibilityIdentifier("canvas.top.chrome")
     }
 
-    private func editorPicker(availableWidth: CGFloat) -> some View {
+    private func toolPicker(
+        placement: CanvasToolPicker.Placement,
+        isStacked: Bool
+    ) -> some View {
         CanvasToolPicker(
             toolState: model.toolState,
             overlay: model.overlay,
@@ -352,15 +366,13 @@ struct CanvasEditorView: View {
             activeGeometryTool: model.activeGeometryTool,
             canUndo: model.canUndo,
             canRedo: model.canRedo,
-            usesCompactLayout: CanvasEditorChromeLayout.usesStackedLayout(
-                availableWidth: availableWidth,
-                isAccessibilitySize: dynamicTypeSize.isAccessibilitySize
-            ),
+            usesCompactLayout: isStacked,
+            placement: placement,
             onIntent: handleToolbarIntent
         )
     }
 
-    private var editorIdentityAndActions: some View {
+    private func editorIdentityAndActions(isStacked: Bool) -> some View {
         GlassEffectContainer(spacing: NotateDesign.Spacing.compact) {
             HStack(spacing: NotateDesign.Spacing.compact) {
                 if let onClose {
@@ -382,7 +394,11 @@ struct CanvasEditorView: View {
                         CanvasPageOverviewButton(model: model)
                     }
                 }
-                Spacer()
+                Spacer(minLength: NotateDesign.Spacing.compact)
+                if model.isReaderMode == false, isStacked == false {
+                    toolPicker(placement: .pill, isStacked: false)
+                    Spacer(minLength: NotateDesign.Spacing.compact)
+                }
                 if model.supportsPageStack {
                     readerButton
                 }
