@@ -475,8 +475,9 @@ public struct CanvasToolPicker: View {
 
     // MARK: Panel
 
-    /// Floats under the bar, centred under the control that opened it and
-    /// clamped to the window, so the page underneath never moves.
+    /// Centred under the control that opened it and clamped to the window.
+    /// Only the horizontal position is decided here; the editor places the
+    /// panel's top edge just below the top row.
     @ViewBuilder private var panel: some View {
         panelContent
             .fixedSize()
@@ -487,7 +488,6 @@ public struct CanvasToolPicker: View {
                 let upper = max(panelContainerWidth - margin - width, margin)
                 return -min(max(mid - width / 2, margin), upper)
             }
-            .alignmentGuide(.bottom) { _ in -PanelMetrics.gapBelowBar }
     }
 
     @ViewBuilder private var panelContent: some View {

@@ -345,9 +345,21 @@ struct CanvasEditorView: View {
             .onPreferenceChange(CanvasToolFramesKey.self) { frames in
                 toolFrames = frames
             }
-            .overlay(alignment: .bottomLeading) {
-                if model.isReaderMode == false, model.overlay != .none {
-                    toolPicker(placement: .panel, availableWidth: availableWidth)
+            .overlay(alignment: .topLeading) {
+                // The panel's top edge sits just under the top row, whatever
+                // its height: the overlay is exactly as tall as the row.
+                GeometryReader { proxy in
+                    if model.isReaderMode == false, model.overlay != .none {
+                        ZStack(alignment: .topLeading) {
+                            toolPicker(placement: .panel, availableWidth: availableWidth)
+                        }
+                        .frame(
+                            width: proxy.size.width,
+                            height: proxy.size.height,
+                            alignment: .topLeading
+                        )
+                        .offset(y: proxy.size.height + CanvasToolPicker.PanelMetrics.gapBelowBar)
+                    }
                 }
             }
             .animation(
