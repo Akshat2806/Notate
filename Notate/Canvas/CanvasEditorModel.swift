@@ -362,6 +362,9 @@ public final class CanvasEditorModel {
         var initiallyLockedController: (any PaperCanvasCommanding)?
         var entryCommitted = false
         isReaderModeTransitioning = true
+        // Reader is read-only: close any open tool panel and Add button.
+        overlay = .none
+        hideAddPageAffordance()
         defer {
             isReaderModeTransitioning = false
             if entryCommitted == false {

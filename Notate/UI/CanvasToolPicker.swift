@@ -243,25 +243,38 @@ public struct CanvasToolPicker: View {
         usesCompactLayout || dynamicTypeSize.isAccessibilitySize
     }
 
+    // A view builder holds at most ten views, so the bar is built from groups.
     @ViewBuilder private var barItems: some View {
+        historyItems
+        barPipe
+        penItems
+        barPipe
+        aidItems
+        barPipe
+        addButton
+    }
+
+    @ViewBuilder private var historyItems: some View {
         utilityButton(title: "Undo", systemImage: "arrow.uturn.backward", isEnabled: canUndo) {
             onIntent(.undo)
         }
         utilityButton(title: "Redo", systemImage: "arrow.uturn.forward", isEnabled: canRedo) {
             onIntent(.redo)
         }
-        barPipe
+    }
+
+    @ViewBuilder private var penItems: some View {
         toolButton(.lasso)
         toolButton(.pen)
         toolButton(.pencil)
         toolButton(.fountainPen)
         toolButton(.highlighter)
-        barPipe
+    }
+
+    @ViewBuilder private var aidItems: some View {
         toolButton(.eraser)
         rulerButton
         toolButton(.laserPointer)
-        barPipe
-        addButton
     }
 
     /// Visible only in the one-row bar; the stacked grid has no room for it.
