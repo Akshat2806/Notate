@@ -3038,6 +3038,22 @@ private func drainPendingHistoryCommandsIfPossible() {
     }
 }
 
+/// The whole stack, read from the live PaperKit hosts. Returning nil while an
+/// insertion is mid-transaction makes the model retry rather than save a
+/// half-committed page.
+func snapshotDocument() -> CanvasDocumentSnapshot? {
+    guard pagesPreparingInsertionHistory.isEmpty,
+        pages.contains(where: { $0.id == focusedPageID }) else { return nil }
+    for page in pages {
+        deliverMarkupIfChanged(pageID: page.id)
+    }
+    return CanvasDocumentSnapshot(
+        pages: pages,
+        currentPageID: focusedPageID,
+        viewport: currentViewportState()
+    )
+}
+
 func snapshotActivePage() -> CanvasActivePageSnapshot? {
     deliverMarkupIfChanged(pageID: focusedPageID)
     guard let page = pages.first(where: { $0.id == focusedPageID }) else { return nil }
