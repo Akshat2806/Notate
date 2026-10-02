@@ -224,6 +224,11 @@ public final class CanvasEditorModel {
     /// closed boundary explicit so cancelling the ordinary timers never turns
     /// into a permanent loss of the last generation.
     @ObservationIgnored private var requiresDeferredCheckpointRetry = false
+    /// One fully-armed pull-to-add-page release that arrived while the canvas
+    /// was briefly busy (for example the scrolling finger still counted as
+    /// contact in Draw-with-Finger mode). It is applied at most once, and only
+    /// if the person is still at that edge and has not started drawing.
+    @ObservationIgnored private var pendingBoundaryInsertion: CanvasPageBoundary?
 
     public static func live() -> CanvasEditorModel {
         do {
@@ -1880,6 +1885,8 @@ public final class CanvasEditorModel {
         // PaperKit calls this after it has accepted Pencil-down. Dismissing the
         // overlay here cannot steal or shorten the first stroke.
         overlay = .none
+        // Starting to write cancels any remembered pull-to-add-page release.
+        pendingBoundaryInsertion = nil
         pendingProgrammaticFocusPageID = nil
         setFocusedPage(pageID, documentDidChange: true)
     }
@@ -1962,6 +1969,7 @@ public final class CanvasEditorModel {
     }
 
     private func snapshotContactDidEnd() {
+        applyPendingBoundaryInsertion()
         guard requiresDeferredCheckpointRetry || generation > committedGeneration else {
             return
         }
@@ -2129,8 +2137,51 @@ public final class CanvasEditorModel {
               isReaderMode == false,
               isReaderModeTransitioning == false else { return }
         boundaryPagePull = nil
+        pendingBoundaryInsertion = nil
+        if canvasIsBusyForBoundaryInsertion {
+            // The pull itself was deliberate (it passed every gate in the
+            // controller); only the canvas is momentarily busy. Remember the
+            // request once and apply it as soon as the canvas settles.
+            pendingBoundaryInsertion = boundary
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .milliseconds(300))
+                self?.applyPendingBoundaryInsertion()
+            }
+            return
+        }
+        performBoundaryInsertion(at: boundary)
+    }
+
+    /// Transient reasons `addPage` would silently decline. Permanent refusals
+    /// (read-only, page limit) are not retried.
+    private var canvasIsBusyForBoundaryInsertion: Bool {
+        guard allowsAuthoring else { return false }
+        return isDurableInsertionInFlight
+            || pageTrashMutationsInFlight.isEmpty == false
+            || detachedControllerDrainTask != nil
+            || canvasControllerIsSnapshotReady == false
+            || canvasController?.hasActiveSnapshotContact == true
+    }
+
+    private func performBoundaryInsertion(at boundary: CanvasPageBoundary) {
         let position: CanvasPageInsertionPosition = boundary == .start ? .start : .end
         addPage(at: position, boundarySource: boundary, animated: true)
+    }
+
+    /// Applies the remembered release exactly once, or discards it. It never
+    /// creates a page unless the person is still on the first/last page the
+    /// pull started from and nothing else has taken over the canvas.
+    private func applyPendingBoundaryInsertion() {
+        guard let boundary = pendingBoundaryInsertion else { return }
+        pendingBoundaryInsertion = nil
+        let isStillAtBoundary = boundary == .start
+            ? currentPageNumber == 1
+            : currentPageNumber == pageCount
+        guard isReaderMode == false,
+              isReaderModeTransitioning == false,
+              isStillAtBoundary,
+              canvasIsBusyForBoundaryInsertion == false else { return }
+        performBoundaryInsertion(at: boundary)
     }
 
     /// SwiftUI dismantling is synchronous, while PaperKit insertion history is

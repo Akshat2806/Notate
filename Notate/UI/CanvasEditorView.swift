@@ -820,9 +820,30 @@ private struct CanvasBoundaryPageIndicator: View {
     let pull: CanvasBoundaryPagePull
 
     var body: some View {
+        HStack(spacing: NotateDesign.Spacing.compact) {
+            ring
+            // Words make the gesture self-explanatory; they change no
+            // thresholds and are hidden from VoiceOver (Add Page is the
+            // accessible route).
+            Text(pull.isArmed ? "Release to add page" : "Pull to add page")
+                .font(.footnote.weight(.medium))
+                .foregroundStyle(pull.isArmed ? Color.primary : Color.secondary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .notateGlassSurface(shape: Capsule())
+                .contentTransition(.opacity)
+        }
+        .animation(
+            reduceMotion ? nil : NotateDesign.Motion.feedback,
+            value: pull.isArmed
+        )
+        .accessibilityHidden(true)
+    }
+
+    private var ring: some View {
         let circle = Circle()
 
-        ZStack {
+        return ZStack {
             circle
                 .fill(pull.isArmed ? NotateDesign.Palette.accent : Color.clear)
 

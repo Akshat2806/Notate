@@ -218,4 +218,125 @@ final class NotateTests: XCTestCase {
         XCTAssertGreaterThan(CanvasToolPicker.preferredPillWidth, CanvasToolPicker.preferredHistoryWidth)
     }
 
+
+    // MARK: - Pull-to-add-page must never trigger during normal scrolling
+
+    func testPullBetweenRevealAndArmNeverInsertsOnRelease() {
+        var gate = CanvasBoundaryPullGate()
+        gate.begin(eligibleBoundaries: [.start])
+        let partial = gate.update(
+            measuredPull: CanvasBoundaryPagePull(boundary: .start, progress: 0.5),
+            now: 1
+        )
+
+        XCTAssertEqual(partial?.progress, 0.5)
+        XCTAssertNil(gate.end(releaseVelocity: .zero))
+    }
+
+    func testArmedPullReleasedWithAFlickDoesNotInsert() {
+        var gate = CanvasBoundaryPullGate()
+        let pull = CanvasBoundaryPagePull(boundary: .end, progress: 1)
+        gate.begin(eligibleBoundaries: [.end])
+        _ = gate.update(measuredPull: pull, now: 10)
+        _ = gate.completeHold(now: 10.5, panVelocity: .zero, isDragging: true)
+
+        XCTAssertNil(gate.end(releaseVelocity: CGPoint(x: 0, y: -900)))
+    }
+
+    func testDragThatDidNotStartAtAnEdgeNeverPulls() {
+        var gate = CanvasBoundaryPullGate()
+        let pull = CanvasBoundaryPagePull(boundary: .start, progress: 1)
+        gate.begin(eligibleBoundaries: [])
+
+        XCTAssertNil(gate.update(measuredPull: pull, now: 1))
+        XCTAssertNil(gate.completeHold(now: 2, panVelocity: .zero, isDragging: true))
+        XCTAssertNil(gate.end(releaseVelocity: .zero))
+    }
+
+    func testPullTowardTheOtherEdgeIsIgnored() {
+        var gate = CanvasBoundaryPullGate()
+        gate.begin(eligibleBoundaries: [.start])
+
+        XCTAssertNil(gate.update(
+            measuredPull: CanvasBoundaryPagePull(boundary: .end, progress: 1),
+            now: 1
+        ))
+        XCTAssertNil(gate.end(releaseVelocity: .zero))
+    }
+
+    func testHoldCompletedAfterTheFingerLeavesDoesNotArm() {
+        var gate = CanvasBoundaryPullGate()
+        gate.begin(eligibleBoundaries: [.start])
+        _ = gate.update(
+            measuredPull: CanvasBoundaryPagePull(boundary: .start, progress: 1),
+            now: 1
+        )
+
+        XCTAssertNil(gate.completeHold(now: 2, panVelocity: .zero, isDragging: false))
+        XCTAssertNil(gate.end(releaseVelocity: .zero))
+    }
+
+    func testAValidPullInsertsExactlyOnePage() {
+        var gate = CanvasBoundaryPullGate()
+        gate.begin(eligibleBoundaries: [.end])
+        _ = gate.update(
+            measuredPull: CanvasBoundaryPagePull(boundary: .end, progress: 1),
+            now: 5
+        )
+        XCTAssertNotNil(gate.completeHold(now: 5.5, panVelocity: .zero, isDragging: true))
+        XCTAssertEqual(gate.end(releaseVelocity: .zero), .end)
+        XCTAssertNil(gate.end(releaseVelocity: .zero))
+    }
+
+    func testArmedPullDoesNotNeedAnotherHoldTimer() {
+        var gate = CanvasBoundaryPullGate()
+        gate.begin(eligibleBoundaries: [.start])
+        _ = gate.update(
+            measuredPull: CanvasBoundaryPagePull(boundary: .start, progress: 1),
+            now: 1
+        )
+        XCTAssertTrue(gate.needsHoldTimer)
+        _ = gate.completeHold(now: 1.5, panVelocity: .zero, isDragging: true)
+
+        // The controller must not re-arm its timer once armed: a second
+        // completeHold in the armed phase cancels the whole gesture.
+        XCTAssertFalse(gate.needsHoldTimer)
+    }
+
+    @MainActor
+    func testSidewaysOrShortDragsAtTheEdgeDoNotPull() {
+        let insets = UIEdgeInsets(top: 80, left: 20, bottom: 20, right: 20)
+        let size = CGSize(width: 500, height: 700)
+        let content = CGSize(width: 500, height: 1_000)
+
+        let mostlySideways = CanvasStackLayout.boundaryPagePull(
+            contentOffset: CGPoint(x: 0, y: -150),
+            panTranslation: CGPoint(x: 120, y: 60),
+            viewportSize: size,
+            contentSize: content,
+            contentInset: insets,
+            zoomScale: 1
+        )
+        let belowReveal = CanvasStackLayout.boundaryPagePull(
+            contentOffset: CGPoint(x: 0, y: -100),
+            panTranslation: CGPoint(x: 0, y: 40),
+            viewportSize: size,
+            contentSize: content,
+            contentInset: insets,
+            zoomScale: 1
+        )
+        let scrollingUpInTheMiddle = CanvasStackLayout.boundaryPagePull(
+            contentOffset: CGPoint(x: 0, y: 300),
+            panTranslation: CGPoint(x: 0, y: -80),
+            viewportSize: size,
+            contentSize: content,
+            contentInset: insets,
+            zoomScale: 1
+        )
+
+        XCTAssertNil(mostlySideways)
+        XCTAssertNil(belowReveal)
+        XCTAssertNil(scrollingUpInTheMiddle)
+    }
+
 }
