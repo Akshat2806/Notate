@@ -121,14 +121,10 @@ public struct CanvasToolPicker: View {
             + 2 * BarMetrics.horizontalPadding
     }
 
-    /// Which bar control a panel for `overlay` hangs from.
+    /// Panels are centred under the toolbar itself, whichever control opened
+    /// them.
     static func anchorKey(for overlay: CanvasOverlay, activeTool: CanvasTool) -> String? {
-        switch overlay {
-        case let .toolOptions(tool): tool.toolbarFamilyRoot.rawValue
-        case .geometryTools: "ruler"
-        case .insert, .shapes, .tableSizePicker: "add"
-        case .none: nil
-        }
+        overlay == .none ? nil : "bar"
     }
 
     public let toolState: CanvasToolState
@@ -230,6 +226,7 @@ public struct CanvasToolPicker: View {
                 style: .continuous
             )
         )
+        .reportsToolFrame("bar")
         .accessibilityIdentifier("canvas.tool.strip")
     }
 
@@ -484,7 +481,7 @@ public struct CanvasToolPicker: View {
             .alignmentGuide(.leading) { dimensions in
                 let margin = PanelMetrics.edgeMargin
                 let width = dimensions.width
-                let mid = panelAnchorMidX ?? (margin + width / 2)
+                let mid = panelAnchorMidX ?? (panelContainerWidth / 2)
                 let upper = max(panelContainerWidth - margin - width, margin)
                 return -min(max(mid - width / 2, margin), upper)
             }

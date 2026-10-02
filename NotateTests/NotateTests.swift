@@ -207,17 +207,13 @@ final class NotateTests: XCTestCase {
     }
 
     @MainActor
-    func testPanelAnchorsFollowTheControlThatOpenedThem() {
+    func testPanelsAreCentredUnderTheToolbar() {
         XCTAssertEqual(
             CanvasToolPicker.anchorKey(for: .toolOptions(.calligraphy), activeTool: .calligraphy),
-            "pen"
+            "bar"
         )
-        XCTAssertEqual(
-            CanvasToolPicker.anchorKey(for: .toolOptions(.crayon), activeTool: .crayon),
-            "fountainPen"
-        )
-        XCTAssertEqual(CanvasToolPicker.anchorKey(for: .geometryTools, activeTool: .pen), "ruler")
-        XCTAssertEqual(CanvasToolPicker.anchorKey(for: .insert, activeTool: .pen), "add")
+        XCTAssertEqual(CanvasToolPicker.anchorKey(for: .geometryTools, activeTool: .pen), "bar")
+        XCTAssertEqual(CanvasToolPicker.anchorKey(for: .insert, activeTool: .pen), "bar")
         XCTAssertNil(CanvasToolPicker.anchorKey(for: .none, activeTool: .pen))
     }
 
