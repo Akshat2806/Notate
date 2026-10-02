@@ -7,6 +7,7 @@ struct LibraryBrowserView: View {
 
     @Namespace private var folderNavigationNamespace
     @State private var shouldRestoreAddFocus = false
+    @State private var confirmsEmptyTrash = false
     @State private var isAddPanelLaunchingDestination = false
     @AccessibilityFocusState private var isAddButtonAccessibilityFocused: Bool
 
@@ -98,11 +99,20 @@ struct LibraryBrowserView: View {
             LibraryEmptyStateView(
                 scope: session.scope,
                 searchQuery: session.searchQuery,
-                onPrimaryAction: primaryEmptyAction
+                onPrimaryAction: primaryEmptyAction,
+                onNewNotebook: session.canCreateContent
+                    ? { session.sheet = .newNotebook(parentID: session.parentID) }
+                    : nil,
+                onImportDocument: session.canCreateContent
+                    ? { session.actions.importDocuments(session.parentID) }
+                    : nil
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if session.scope == .trash {
-            trashContent
+            VStack(spacing: 0) {
+                trashBanner
+                trashContent
+            }
         } else {
             switch session.viewStyle {
             case .grid:
@@ -114,6 +124,35 @@ struct LibraryBrowserView: View {
             case .list:
                 list
             }
+        }
+    }
+
+    private var trashBanner: some View {
+        HStack(spacing: NotateDesign.Spacing.control) {
+            Text("Items in Trash are deleted after 30 days.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 0)
+            if session.visibleItems.isEmpty == false {
+                Button("Empty Trash", role: .destructive) {
+                    confirmsEmptyTrash = true
+                }
+                .font(.footnote.weight(.semibold))
+                .accessibilityIdentifier("library.trash.empty")
+            }
+        }
+        .padding(.horizontal, NotateDesign.Spacing.page)
+        .padding(.vertical, NotateDesign.Spacing.compact)
+        .confirmationDialog(
+            "Permanently delete everything in Trash?",
+            isPresented: $confirmsEmptyTrash,
+            titleVisibility: .visible
+        ) {
+            Button("Empty Trash", role: .destructive) {
+                session.actions.deletePermanently(Set(session.visibleItems.map(\.id)))
+            }
+        } message: {
+            Text("This can't be undone.")
         }
     }
 
@@ -839,7 +878,7 @@ private struct LibraryBrowserHeader: View {
                     get: { session.sortField },
                     set: { session.sortField = $0 }
                 )) {
-                    LibraryMenuActionLabel(title: "Recent", systemImage: "clock")
+                    LibraryMenuActionLabel(title: "Date Modified", systemImage: "clock")
                         .tag(LibrarySortField.activity)
                     LibraryMenuActionLabel(title: "Name", systemImage: "textformat")
                         .tag(LibrarySortField.name)
@@ -1021,7 +1060,7 @@ private struct LibraryBrowserHeader: View {
 
     private var sortTitle: String {
         switch session.sortField {
-        case .activity: "Last modified"
+        case .activity: "Date Modified"
         case .name: "Name"
         case .created: "Created"
         case .type: "Type"
@@ -1031,7 +1070,7 @@ private struct LibraryBrowserHeader: View {
     private var sortAccessibilityValue: String {
         let field: String
         switch session.sortField {
-        case .activity: field = "Recent"
+        case .activity: field = "Date Modified"
         case .name: field = "Name"
         case .created: field = "Created"
         case .type: field = "Type"

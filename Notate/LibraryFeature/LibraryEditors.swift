@@ -64,7 +64,7 @@ struct LibraryTagEditor: View {
                     Button("Cancel", role: .cancel) { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Create", action: commit)
+                    Button(title.hasPrefix("Edit") ? "Save" : "Create", action: commit)
                         .disabled(trimmedName.isEmpty)
                 }
             }

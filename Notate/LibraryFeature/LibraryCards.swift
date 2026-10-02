@@ -405,7 +405,7 @@ struct LibraryGridCard: View {
             parts.append("\(pageCount) \(pageCount == 1 ? "page" : "pages")")
         }
         parts.append(modifiedAtDescription)
-        return parts.joined(separator: " . ")
+        return parts.joined(separator: " · ")
     }
 
     private var favoriteBadgeXRatio: CGFloat {
