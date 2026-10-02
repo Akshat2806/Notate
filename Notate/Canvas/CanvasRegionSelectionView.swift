@@ -43,8 +43,9 @@ final class CanvasRegionSelectionView: UIView, UIGestureRecognizerDelegate {
         configureCursor()
         configureGesture()
         applyAppearance()
-        registerForTraitChanges([UITraitUserInterfaceStyle.self]) { [weak self] in
-            self?.applyAppearance()
+        registerForTraitChanges([UITraitUserInterfaceStyle.self]) {
+            (view: CanvasRegionSelectionView, _: UITraitCollection) in
+            view.applyAppearance()
         }
         updatePresentation()
         isHidden = true
@@ -160,7 +161,7 @@ final class CanvasRegionSelectionView: UIView, UIGestureRecognizerDelegate {
         cursorGlyph.contentMode = .center
         cursorGlyph.frame = cursorView.bounds
         cursorGlyph.isAccessibilityElement = false
-        addSubview(cursorGlyph)
+        cursorView.addSubview(cursorGlyph)
     }
 
     private func configureGesture() {
@@ -217,65 +218,6 @@ final class CanvasRegionSelectionView: UIView, UIGestureRecognizerDelegate {
 
     private func stopProcessingAnimation() {
         outlineLayer.removeAnimation(forKey: "image-wand-selection-dash")
-    }
-
-    private func configureSelectionLayers() {
-        haloLayer.lineWidth = 6
-        haloLayer.lineJoin = .round
-        haloLayer.lineCap = .round
-        layer.addSublayer(haloLayer)
-
-        outlineLayer.lineWidth = 2
-        outlineLayer.lineJoin = .round
-        outlineLayer.lineCap = .round
-        layer.addSublayer(outlineLayer)
-    }
-
-    private func configureCursor() {
-        cursorView.frame = CGRect(x: 0, y: 0, width: 28, height: 28)
-        cursorView.layer.cornerRadius = 14
-        cursorView.layer.borderWidth = 1.5
-        cursorView.layer.shadowOpacity = 0.12
-        cursorView.layer.shadowRadius = 4
-        cursorView.layer.shadowOffset = CGSize(width: 0, height: 2)
-        cursorView.isUserInteractionEnabled = false
-        cursorView.isAccessibilityElement = false
-        cursorView.isHidden = true
-        addSubview(cursorView)
-
-        cursorGlyph.image = UIImage(systemName: "wand.and.stars")
-        cursorGlyph.contentMode = .center
-        cursorGlyph.frame = cursorView.bounds
-        cursorGlyph.isAccessibilityElement = false
-        addSubview(cursorGlyph)
-    }
-
-    private func configureGesture() {
-        selectionGesture.cancelsTouchesInView = true
-        selectionGesture.minimumNumberOfTouches = 1
-        selectionGesture.maximumNumberOfTouches = 1
-        selectionGesture.allowedTouchTypes = [
-            NSNumber(value: UITouch.TouchType.direct.rawValue),
-            NSNumber(value: UITouch.TouchType.pencil.rawValue),
-        ]
-        selectionGesture.delegate = self
-        addGestureRecognizer(selectionGesture)
-    }
-
-    private func applyAppearance() {
-        let accent = tintColor ?? .systemIndigo
-        let resolvedWorkspace = workspaceColor.resolvedColor(with: traitCollection)
-        let resolvedAccent = accent.resolvedColor(with: traitCollection)
-
-        haloLayer.fillColor = resolvedAccent.withAlphaComponent(0.635).cgColor
-        haloLayer.strokeColor = resolvedWorkspace.withAlphaComponent(0.96).cgColor
-        outlineLayer.fillColor = resolvedAccent.withAlphaComponent(0.025).cgColor
-        outlineLayer.strokeColor = resolvedAccent.withAlphaComponent(0.9).cgColor
-
-        cursorView.backgroundColor = workspaceColor
-        cursorView.layer.borderColor = resolvedAccent.withAlphaComponent(0.9).cgColor
-        cursorView.layer.shadowColor = UIColor.black.cgColor
-        cursorGlyph.tintColor = accent
     }
 
     // MARK: - Gesture Recognition
@@ -352,7 +294,7 @@ final class CanvasRegionSelectionView: UIView, UIGestureRecognizerDelegate {
         cursorView.isHidden = true
         updatePresentation()
         setNeedsLayout()
-        onRegionConfirmed?(path.cgPath, copy() ?? path.cgPath)
+        onRegionConfirmed?(path.cgPath)
     }
 
     private func resetDrawingPath() {

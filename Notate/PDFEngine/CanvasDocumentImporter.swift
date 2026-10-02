@@ -800,7 +800,7 @@ enum CanvasDocumentSearchIndexer {
             if case let .pdfPage(source, _, _) = page.background,
                 indexedPDFSources.insert(source.relativePath).inserted,
                 let documentData = source.documentData {
-                let document = PDFDocument(data: documentData)
+                guard let document = PDFDocument(data: documentData) else { continue }
                 for pageIndex in 0..<document.pageCount {
                     guard !Task.isCancelled else { return result }
                     guard let pdfPage = document.page(at: pageIndex) else {

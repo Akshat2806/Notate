@@ -20,6 +20,7 @@ enum CanvasPaperRenderingEnvironment {
 public enum CanvasTool: String, CaseIterable, Codable, Sendable {
     case lasso
     case pen
+    case ballpoint
     case calligraphy
     case pencil
     case fountainPen
@@ -32,7 +33,8 @@ public enum CanvasTool: String, CaseIterable, Codable, Sendable {
     public var title: String {
         switch self {
             case .lasso: "Lasso"
-            case .pen: "Pen"
+            case .pen: "Monoline"
+            case .ballpoint: "Ballpoint"
             case .calligraphy: "Calligraphy"
             case .pencil: "Pencil"
             case .fountainPen: "Fountain Pen"
@@ -52,7 +54,7 @@ public enum CanvasTool: String, CaseIterable, Codable, Sendable {
     /// its current width, spacing, and five-writing-tool rhythm.
     public var toolbarFamilyRoot: CanvasTool {
         switch self {
-        case .calligraphy:
+        case .ballpoint, .calligraphy:
             .pen
         case .watercolor, .crayon:
             .fountainPen
@@ -64,7 +66,7 @@ public enum CanvasTool: String, CaseIterable, Codable, Sendable {
     public var toolbarFamilyVariants: [CanvasTool] {
         switch toolbarFamilyRoot {
         case .pen:
-            [.pen, .calligraphy]
+            [.pen, .ballpoint, .calligraphy]
         case .fountainPen:
             [.fountainPen, .watercolor, .crayon]
         default:
@@ -74,6 +76,7 @@ public enum CanvasTool: String, CaseIterable, Codable, Sendable {
 
     public var toolbarFamilyTitle: String {
         switch toolbarFamilyRoot {
+            case .pen: "Pen"
             case .fountainPen: "Brush"
             default: toolbarFamilyRoot.title
         }
@@ -1066,6 +1069,7 @@ public struct RGBAColor: Codable, Equatable, Hashable, Sendable {
     public static let black = RGBAColor(red: 0, green: 0, blue: 0)
     public static let graphite = RGBAColor(red: 32 / 255, green: 32 / 255, blue: 32 / 255)
     public static let white = RGBAColor(red: 1, green: 1, blue: 1)
+    public static let laserRed = RGBAColor(red: 1, green: 45 / 255, blue: 38 / 255)
     public static let slate = RGBAColor(red: 95 / 255, green: 99 / 255, blue: 104 / 255)
     public static let blue = RGBAColor(red: 47 / 255, green: 111 / 255, blue: 235 / 255)
     public static let cyan = RGBAColor(red: 22 / 255, green: 156 / 255, blue: 191 / 255)
@@ -1080,6 +1084,12 @@ public struct RGBAColor: Codable, Equatable, Hashable, Sendable {
     public static let inkPalette: [RGBAColor] = [
         .black, .white, .slate, .blue, .cyan, .teal,
         .green, .yellow, .orange, .red, .rose, .violet,
+    ]
+
+    /// The five swatches shown inline in the compact picker; the remaining
+    /// palette stays reachable through the system color picker.
+    public static let quickInkPalette: [RGBAColor] = [
+        .black, .blue, .red, .green, .orange,
     ]
 
     public static let highlighterPalette: [RGBAColor] = [
@@ -1157,6 +1167,7 @@ public struct CanvasToolState: Codable, Equatable, Sendable {
 
     public static let defaults: [CanvasTool: CanvasToolConfiguration] = [
         .pen: .init(width: 2, color: .black),
+        .ballpoint: .init(width: 2, color: .black),
         .calligraphy: .init(width: 29, color: .black),
         .pencil: .init(width: 2.5, color: .black),
         .fountainPen: .init(width: 4, color: .black),
@@ -1164,6 +1175,7 @@ public struct CanvasToolState: Codable, Equatable, Sendable {
         .crayon: .init(width: 30, color: .black),
         .highlighter: .init(width: 12, color: .highlighterPalette[0]),
         .eraser: .init(width: 16, color: .graphite),
+        .laserPointer: .init(width: 4, color: .laserRed),
     ]
 
     public func configuration(for tool: CanvasTool) -> CanvasToolConfiguration? {
@@ -1173,6 +1185,7 @@ public struct CanvasToolState: Codable, Equatable, Sendable {
     public static func widthPresets(for tool: CanvasTool) -> [Double] {
         switch tool {
             case .pen: [0.5, 1, 2, 3, 4, 6]
+            case .ballpoint: [0.5, 1, 2, 3, 4, 6]
             case .calligraphy: [5, 10, 18, 24, 29, 40]
             case .pencil: [2.5, 4, 6, 8, 12, 16]
             case .fountainPen: [1, 2, 4, 6, 8, 12]
@@ -1648,7 +1661,6 @@ public struct CanvasPreferences: Codable, Equatable, Sendable {
         case table(CanvasTableSize)
         case circle(frame: CGRect)
         case image(CGImage)
-        case assistantText(String, frame: CGRect?)
         case positionedImage(CGImage, frame: CGRect)
 
         public var historyActionName: String {
@@ -1658,7 +1670,6 @@ public struct CanvasPreferences: Codable, Equatable, Sendable {
                 case .table: "Insert Table"
                 case .circle: "Insert Circle"
                 case .image: "Insert Image"
-                case .assistantText: "Insert Assistant Text"
                 case .positionedImage: "Insert Image"
             }
         }
@@ -1764,6 +1775,7 @@ public struct PaperCanvasCallbacks {
     ) {
         self.init(
             markupChanged: markupChanged,
+            pageReplaced: { _ in },
             paperTemplateChanged: { _, _ in },
             interactionBegan: { _ in interactionBegan() },
             undoAvailabilityChanged: { _, canUndo, canRedo in
@@ -2023,14 +2035,9 @@ public extension PaperCanvasCommanding {
     func navigateToPageRegion(pageID: UUID, pageBounds: CGRect, animated: Bool) {
         scrollToPage(id: pageID, animated: animated)
     }
-    func snapshotDocument() -> CanvasDocumentSnapshot? { nil }
-    func setDocumentSynchronizationPending(_ isPending: Bool) {}
-    @discardableResult
-    func synchronizeDocumentAfterAttachment(
-        snapshot: CanvasDocumentSnapshot
-    ) -> Bool { false }
-    func beginImageWandSelection(checkpointGeneration: Int64) {}
-    func cancelImageWandSelection() {}
+    // No defaults for snapshotting, synchronization, or Wand: a silent no-op
+    // here once hid an unimplemented Wand. The compiler should insist that a
+    // conformer implements these.
 }
 
 public enum CanvasConstants {
@@ -2063,16 +2070,13 @@ public enum CanvasConstants {
     public static let boundaryPullStartSlop: CGFloat = 10
     /// The 42-point affordance is not shown until it has 12 points of clear
     /// workspace between it and the page edge.
-    public static let boundaryPullRevealDistance: CGFloat = 54
-    public static let boundaryPullArmDistance: CGFloat = 96
+    public static let boundaryPullRevealDistance: CGFloat = 24
+    public static let boundaryPullArmDistance: CGFloat = 56
     /// Once armed, a little reversal is tolerated so the ready state does not
     /// chatter around the arming threshold.
-    public static let boundaryPullDisarmDistance: CGFloat = 78
-    public static let boundaryPullHoldMilliseconds: Int64 = 200
-    public static let boundaryPullMaximumHoldVelocityPointsPerSecond: CGFloat = 350
+    public static let boundaryPullDisarmDistance: CGFloat = 46
     public static let boundaryPullMaximumReleaseVelocityPointsPerSecond: CGFloat = 450
     public static let boundaryPullVerticalDominance: CGFloat = 1.25
-    public static let boundaryPullHoldingProgress: CGFloat = 0.98
     /// The neutral editing workspace behind authored notebook pages. This is
     /// deliberately close to paper in Light Mode; page elevation and the
     /// hairline carry the hierarchy without turning most of the editor into a
@@ -2142,6 +2146,8 @@ public enum CanvasNativeToolMapper {
             PKLassoTool()
         case .pen:
             inkingTool(.monoline, state: state, tool: .pen)
+        case .ballpoint:
+            inkingTool(.pen, state: state, tool: .ballpoint)
         case .calligraphy:
             inkingTool(.reed, state: state, tool: .calligraphy)
         case .pencil:
@@ -2172,7 +2178,7 @@ public enum CanvasNativeToolMapper {
     private static func inkingTool(
         _ ink: PKInkingTool.InkType,
         state: CanvasToolState,
-        tool: CanvasTool,
+        tool: CanvasTool
     ) -> PKInkingTool {
         guard let configuration = state.configuration(for: tool)
             ?? CanvasToolState.defaults[tool] else {

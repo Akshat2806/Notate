@@ -1,0 +1,1 @@
+xcrun: error: missing DEVELOPER_DIR path: /Applications/Xcode-beta.app/Contents/Developer

@@ -102,6 +102,15 @@ public final class CanvasEditorModel {
     private static let maximumDeferredControllerImageCount = 1
     private static let maximumDeferredControllerImageBytes = 128 * 1_024 * 1_024
 
+    /// Mirrors the Canvas Core persistence limits. A mutation that would
+    /// exceed them is refused up front; once accepted it could never be saved.
+    private static let maximumPageCount = 1_000
+    private static let maximumImagePageCount = 60
+
+    /// A short, user-facing reason an action was declined. The editor shows it
+    /// in an alert and clears it.
+    public var actionNotice: String?
+
     public enum LaunchState: Equatable {
         case loading
         case ready
@@ -139,6 +148,7 @@ public final class CanvasEditorModel {
     public private(set) var isZoomInteractionActive = false
     public private(set) var boundaryPagePull: CanvasBoundaryPagePull?
     public private(set) var imageWandRequest: CanvasImageWandRequest?
+    public private(set) var isImageWandSelectionActive = false
     /// True while a one-shot generated image is being serialized and then
     /// committed to Canvas Core. Page topology/rotation controls use this to
     /// avoid building replacements from a pre-insertion snapshot.
@@ -152,7 +162,7 @@ public final class CanvasEditorModel {
     public private(set) var latestVerifiedIndexDelta: CanvasVerifiedIndexDelta?
     /// The immutable snapshot at `verifiedCheckpointGeneration`. A pristine
     /// generation-zero document is a valid baseline even though it has no
-    /// delta. Keeping this handoff in memory lets the assistant index update as
+    /// delta. Keeping this handoff in memory lets verified-index consumers update as
     /// soon as the note opens or autosave verifies, without reopening storage.
     @ObservationIgnored public private(set) var latestVerifiedIndexSnapshot: CanvasCoreSnapshot?
     public let documentKind: LibraryItemKind
@@ -191,7 +201,7 @@ public final class CanvasEditorModel {
     @ObservationIgnored private var inFlightGenerations: Set<Int64> = []
     @ObservationIgnored private var checkpointCompletionWaiters: [
         Int64: [CheckedContinuation<Void, Never>]
-    ] = []
+    ] = [:]
     @ObservationIgnored private var detachedControllerDrainTask: Task<Bool, Never>?
     @ObservationIgnored private var detachedControllerDrainSequence: UInt64 = 0
     @ObservationIgnored private var canvasControllerIsSnapshotReady = true
@@ -214,6 +224,19 @@ public final class CanvasEditorModel {
     /// closed boundary explicit so cancelling the ordinary timers never turns
     /// into a permanent loss of the last generation.
     @ObservationIgnored private var requiresDeferredCheckpointRetry = false
+    /// One fully-armed pull-to-add-page release that arrived while the canvas
+    /// was briefly busy (for example the scrolling finger still counted as
+    /// contact in Draw-with-Finger mode). It is applied at most once, and only
+    /// if the person is still at that edge and has not started drawing.
+    @ObservationIgnored private var pendingBoundaryInsertion: CanvasPageBoundary?
+
+    /// A deliberate, zero-pull way to add a page: after you scroll while on the
+    /// last page, an "Add Page" button appears for a few seconds. It is never
+    /// shown while writing, so a resting palm can't reach it.
+    public private(set) var showsAddPageAffordance = false
+    @ObservationIgnored private var addPageAffordanceDeadline = Date.distantPast
+    @ObservationIgnored private var addPageAffordanceTask: Task<Void, Never>?
+    @ObservationIgnored private var lastAddPageAt = Date.distantPast
 
     public static func live() -> CanvasEditorModel {
         do {
@@ -339,6 +362,9 @@ public final class CanvasEditorModel {
         var initiallyLockedController: (any PaperCanvasCommanding)?
         var entryCommitted = false
         isReaderModeTransitioning = true
+        // Reader is read-only: close any open tool panel and Add button.
+        overlay = .none
+        hideAddPageAffordance()
         defer {
             isReaderModeTransitioning = false
             if entryCommitted == false {
@@ -446,8 +472,6 @@ public final class CanvasEditorModel {
         return pages[index].displaySize
     }
 
-    public var currentPageIDForAssistant: UUID { currentPageID }
-
     public var callbacks: PaperCanvasCallbacks {
         PaperCanvasCallbacks(
             markupChanged: { [weak self] pageID, markup in
@@ -476,7 +500,7 @@ public final class CanvasEditorModel {
             snapshotContactEnded: { [weak self] in
                 self?.snapshotContactDidEnd()
             },
-            programmacticInsertionFailed: { [weak self] error in
+            programmaticInsertionFailed: { [weak self] error in
                 self?.programmaticInsertionDidFail(error)
             },
             presentationInteractionBegan: { [weak self] in
@@ -619,6 +643,8 @@ public final class CanvasEditorModel {
             canvasController?.redo()
 
         case let .tapTool(tool):
+            // First tap selects; tapping the selected tool again opens its
+            // panel. (Style changes inside the panel use `.showOptions`.)
             if toolState.activeTool == tool {
                 toggleOptions(for: tool)
             } else {
@@ -647,7 +673,7 @@ public final class CanvasEditorModel {
             persistPreferencesSoon()
 
         case let .setColor(tool, color):
-            guard tool != .lasso, tool != .eraser, tool != .laserPointer,
+            guard tool != .lasso, tool != .eraser,
                 color.isValid,
                 var configuration = toolState.configuration(for: tool) else { return }
             var normalizedColor = color
@@ -672,19 +698,21 @@ public final class CanvasEditorModel {
 
         case .toggleInsert:
             overlay = overlay == .insert
-                || overlay == .geometryTools
                 || overlay == .shapes
                 || overlay == .tableSizePicker
                 ? .none
                 : .insert
 
         case .tapGeometryToolSlot:
+            // First tap turns the preferred instrument on (no panel); tapping
+            // again opens the Ruler / Protractor / Compass panel. Turning an
+            // instrument off is done from that panel.
             if activeGeometryTool == nil {
                 activeGeometryTool = preferredGeometryTool
-                overlay = .insert
+                overlay = .none
                 canvasController?.setGeometryTool(activeGeometryTool)
             } else {
-                overlay = .geometryTools
+                overlay = overlay == .geometryTools ? .none : .geometryTools
             }
 
         case let .toggleGeometryTool(tool):
@@ -765,36 +793,6 @@ public final class CanvasEditorModel {
     public func consumeImageWandRequest(id: UUID) {
         guard imageWandRequest?.id == id else { return }
         imageWandRequest = nil
-    }
-
-    public func navigateToAssistantSource(pageID: UUID?, pageBounds: CGRect?) {
-        guard launchState == .ready, isReaderModeTransitioning == false else { return }
-        let targetPageID = pageID ?? currentPageID
-        guard pages.contains(where: { $0.id == targetPageID }) else { return }
-        if isReaderMode {
-            readerDidNavigate(to: targetPageID)
-            return
-        }
-        if currentPageID != targetPageID {
-            setFocusedPage(targetPageID, documentDidChange: false)
-            pendingProgrammaticFocusPageID = targetPageID
-        }
-        if let pageBounds {
-            canvasController?.navigateToPageRegion(
-                pageID: targetPageID,
-                pageBounds: pageBounds,
-                animated: true
-            )
-        } else {
-            canvasController?.scrollToPage(id: targetPageID, animated: true)
-        }
-    }
-
-    public func insertAssistantText(_ text: String) {
-        let normalizedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard allowsAuthoring,
-            normalizedText.isEmpty == false else { return }
-        submitProgrammaticInsertion(.assistantText(normalizedText, frame: nil))
     }
 
     @discardableResult
@@ -1015,7 +1013,7 @@ public final class CanvasEditorModel {
         switch insertion {
         case let .image(value), let .positionedImage(value, _):
             image = value
-        case .text, .shape, .table, .circle, .assistantText:
+        case .text, .shape, .table, .circle:
             return 0
         }
         let (byteCount, overflowed) = image.bytesPerRow.multipliedReportingOverflow(
@@ -1047,10 +1045,10 @@ public final class CanvasEditorModel {
     }
 
     private func toggleGeometryTool(_ tool: CanvasGeometryTool) {
-        let keepsInsertTrayPresented = overlay == .geometryTools
+        let keepsGeometryStripPresented = overlay == .geometryTools
         preferredGeometryTool = tool
         activeGeometryTool = activeGeometryTool == tool ? nil : tool
-        overlay = keepsInsertTrayPresented ? .insert : .none
+        overlay = keepsGeometryStripPresented ? .geometryTools : .none
         canvasController?.setGeometryTool(activeGeometryTool)
     }
 
@@ -1137,6 +1135,24 @@ public final class CanvasEditorModel {
         markDocumentChanged()
     }
 
+    private func declineIfPageLimitReached(addingImagePage: Bool = false) -> Bool {
+        if pages.count >= Self.maximumPageCount {
+            actionNotice = "This notebook has reached its limit of \(Self.maximumPageCount) pages."
+            return true
+        }
+        if addingImagePage {
+            let imagePages = pages.filter {
+                if case .image = $0.background { return true }
+                return false
+            }.count
+            if imagePages >= Self.maximumImagePageCount {
+                actionNotice = "This notebook has reached its limit of \(Self.maximumImagePageCount) photo pages."
+                return true
+            }
+        }
+        return false
+    }
+
     public func addPage(at position: CanvasPageInsertionPosition) {
         guard supportsPageStack,
               isReaderMode == false,
@@ -1158,6 +1174,7 @@ public final class CanvasEditorModel {
               allowsAuthoring,
               isDurableInsertionInFlight == false,
               pageTrashMutationsInFlight.isEmpty,
+              declineIfPageLimitReached(addingImagePage: true) == false,
               captureLatestControllerDocumentIfNeeded() else { return nil }
         let imageDocument = try CanvasDocumentImporter.makeImageSnapshot(
             data: data,
@@ -1195,6 +1212,7 @@ public final class CanvasEditorModel {
         guard allowsAuthoring,
               isDurableInsertionInFlight == false,
               pageTrashMutationsInFlight.isEmpty,
+              declineIfPageLimitReached() == false,
               captureLatestControllerDocumentIfNeeded(),
               let currentIndex = indexOfCurrentPage else { return }
 
@@ -1218,8 +1236,15 @@ public final class CanvasEditorModel {
             inheritedPaperTemplate = currentPaperTemplate
         }
 
+        // A new page matches the page it is added beside (an imported Letter
+        // or landscape page keeps its size) instead of snapping back to A4.
+        let newPageSize = documentKind == .canvas
+            ? nil
+            : pages[currentIndex].displaySize
         let page = CanvasPageSnapshot(
-            markup: Self.blankMarkup(for: documentKind),
+            markup: newPageSize.map {
+                PaperMarkup(bounds: CGRect(origin: .zero, size: $0))
+            } ?? Self.blankMarkup(for: documentKind),
             viewport: viewport,
             paperTemplate: inheritedPaperTemplate
         )
@@ -1306,6 +1331,7 @@ public final class CanvasEditorModel {
               allowsAuthoring,
               isDurableInsertionInFlight == false,
               pageTrashMutationsInFlight.isEmpty,
+              declineIfPageLimitReached() == false,
               captureLatestControllerDocumentIfNeeded(),
               let sourceIndex = pages.firstIndex(where: { $0.id == id }) else { return nil }
 
@@ -1645,7 +1671,7 @@ public final class CanvasEditorModel {
     }
 
     /// Establishes an insertion boundary before export so a toolbar, import,
-    /// assistant, or drop insertion accepted just before the tap cannot be
+    /// or drop insertion accepted just before the tap cannot be
     /// silently omitted from the immutable export document.
     public func prepareExportDocumentWhenReady() async -> CanvasExportDocument? {
         guard launchState == .ready,
@@ -1672,25 +1698,6 @@ public final class CanvasEditorModel {
         await checkpointLatest()
     }
 
-    /// Captures the live PaperKit hosts and waits for an atomically verified
-    /// checkpoint before an assistant request reads the note. Returning false
-    /// prevents the assistant from answering against an older durable revision.
-    public func prepareForAssistantRequest() async -> Bool {
-        guard launchState == .ready,
-            isReaderModeTransitioning == false else { return false }
-        await checkpointLatest()
-        guard detachedControllerDrainTask == nil,
-            deferredControllerInsertions.isEmpty,
-            canvasControllerIsSnapshotReady,
-            canvasController?.hasPendingProgrammaticInsertions != true,
-            generation <= committedGeneration,
-            verifiedCheckpointGeneration >= committedGeneration else {
-            return false
-        }
-        if case let .failed = saveState { return false }
-        return true
-    }
-
     public func flushForLifecycle() async {
         cancelSaveTimers()
         preferencesSaveTask?.cancel()
@@ -1704,11 +1711,9 @@ public final class CanvasEditorModel {
         }
 
         await checkpointLatest()
-        let existingFailure: String?
+        var existingFailure: String?
         if case let .failed(description) = saveState {
             existingFailure = description
-        } else {
-            existingFailure = nil
         }
 
         let terminalHandoffFailure = closeDeferredControllerHandoffIfNeeded()
@@ -1718,6 +1723,12 @@ public final class CanvasEditorModel {
             // those commands explicitly, persist any settled retiring-controller
             // insertion without pretending the rejected commands were saved.
             await checkpointLatest()
+            // A successful second checkpoint supersedes the first failure.
+            if case let .failed(description) = saveState {
+                existingFailure = description
+            } else {
+                existingFailure = nil
+            }
         }
         await savePreferencesNow()
 
@@ -1878,6 +1889,10 @@ public final class CanvasEditorModel {
         // PaperKit calls this after it has accepted Pencil-down. Dismissing the
         // overlay here cannot steal or shorten the first stroke.
         overlay = .none
+        // Starting to write cancels any remembered pull-to-add-page release
+        // and hides the Add Page button.
+        pendingBoundaryInsertion = nil
+        hideAddPageAffordance()
         pendingProgrammaticFocusPageID = nil
         setFocusedPage(pageID, documentDidChange: true)
     }
@@ -1960,6 +1975,7 @@ public final class CanvasEditorModel {
     }
 
     private func snapshotContactDidEnd() {
+        applyPendingBoundaryInsertion()
         guard requiresDeferredCheckpointRetry || generation > committedGeneration else {
             return
         }
@@ -1974,7 +1990,9 @@ public final class CanvasEditorModel {
     private func programmaticInsertionDidFail(
         _ error: PaperCanvasInsertionCommitError
     ) {
-        saveState = .failed(error.localizedDescription)
+        // The insertion was rolled back, so nothing is unsaved. Tell the person
+        // once instead of leaving a sticky "not safely stored" banner.
+        actionNotice = error.localizedDescription
     }
 
     private static func blankMarkup(for kind: LibraryItemKind) -> PaperMarkup {
@@ -2082,7 +2100,43 @@ public final class CanvasEditorModel {
                 markFreeformViewportChanged()
             }
             persistPreferencesSoon()
+            revealAddPageAffordanceIfAtEnd()
         }
+    }
+
+    private func revealAddPageAffordanceIfAtEnd() {
+        guard supportsPageStack,
+              isReaderMode == false,
+              currentPageNumber == pageCount,
+              Date().timeIntervalSince(lastAddPageAt) > 1.5 else { return }
+        addPageAffordanceDeadline = Date().addingTimeInterval(3)
+        if showsAddPageAffordance == false { showsAddPageAffordance = true }
+        guard addPageAffordanceTask == nil else { return }
+        addPageAffordanceTask = Task { @MainActor [weak self] in
+            while let self, Date() < self.addPageAffordanceDeadline {
+                try? await Task.sleep(for: .milliseconds(250))
+                if Task.isCancelled { return }
+            }
+            self?.showsAddPageAffordance = false
+            self?.addPageAffordanceTask = nil
+        }
+    }
+
+    private func hideAddPageAffordance() {
+        addPageAffordanceDeadline = .distantPast
+        if showsAddPageAffordance { showsAddPageAffordance = false }
+    }
+
+    /// Tapping the Add Page button that appears at the end of the note.
+    public func addPageAtEndFromAffordance() {
+        hideAddPageAffordance()
+        lastAddPageAt = Date()
+        guard supportsPageStack,
+              isReaderMode == false,
+              isReaderModeTransitioning == false,
+              isDurableInsertionInFlight == false,
+              pageTrashMutationsInFlight.isEmpty else { return }
+        addPage(at: .end, boundarySource: nil, animated: true)
     }
 
     /// A freeform viewport is part of the board snapshot because it defines
@@ -2091,7 +2145,7 @@ public final class CanvasEditorModel {
     /// existing trailing task are reused until the next checkpoint captures
     /// the latest settled viewport.
     private func markFreeformViewportChanged() {
-        if generation <= committedGeneration || inflightGenerations.contains(generation) {
+        if generation <= committedGeneration || inFlightGenerations.contains(generation) {
             generation += 1
         }
         saveState = .saving
@@ -2125,8 +2179,53 @@ public final class CanvasEditorModel {
               isReaderMode == false,
               isReaderModeTransitioning == false else { return }
         boundaryPagePull = nil
+        pendingBoundaryInsertion = nil
+        if canvasIsBusyForBoundaryInsertion {
+            // The pull itself was deliberate (it passed every gate in the
+            // controller); only the canvas is momentarily busy. Remember the
+            // request once and apply it as soon as the canvas settles.
+            pendingBoundaryInsertion = boundary
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .milliseconds(300))
+                self?.applyPendingBoundaryInsertion()
+            }
+            return
+        }
+        performBoundaryInsertion(at: boundary)
+    }
+
+    /// Transient reasons `addPage` would silently decline. Permanent refusals
+    /// (read-only, page limit) are not retried.
+    private var canvasIsBusyForBoundaryInsertion: Bool {
+        guard allowsAuthoring else { return false }
+        return isDurableInsertionInFlight
+            || pageTrashMutationsInFlight.isEmpty == false
+            || detachedControllerDrainTask != nil
+            || canvasControllerIsSnapshotReady == false
+            || canvasController?.hasActiveSnapshotContact == true
+    }
+
+    private func performBoundaryInsertion(at boundary: CanvasPageBoundary) {
+        lastAddPageAt = Date()
+        hideAddPageAffordance()
         let position: CanvasPageInsertionPosition = boundary == .start ? .start : .end
         addPage(at: position, boundarySource: boundary, animated: true)
+    }
+
+    /// Applies the remembered release exactly once, or discards it. It never
+    /// creates a page unless the person is still on the first/last page the
+    /// pull started from and nothing else has taken over the canvas.
+    private func applyPendingBoundaryInsertion() {
+        guard let boundary = pendingBoundaryInsertion else { return }
+        pendingBoundaryInsertion = nil
+        let isStillAtBoundary = boundary == .start
+            ? currentPageNumber == 1
+            : currentPageNumber == pageCount
+        guard isReaderMode == false,
+              isReaderModeTransitioning == false,
+              isStillAtBoundary,
+              canvasIsBusyForBoundaryInsertion == false else { return }
+        performBoundaryInsertion(at: boundary)
     }
 
     /// SwiftUI dismantling is synchronous, while PaperKit insertion history is
@@ -2430,6 +2529,11 @@ public final class CanvasEditorModel {
         guard token == forcedSaveToken else { return }
         forcedSaveTask = nil
         await checkpointLatest()
+        // A failed save is not retried on a timer: a deterministic failure
+        // (limits, invalid snapshot) would re-encode the whole document every
+        // few seconds and make the banner flicker. The next edit, the Retry
+        // button, and lifecycle flushes all re-attempt.
+        if case .failed = saveState { return }
         if generation > committedGeneration {
             ensureForcedSave()
         }
@@ -2561,7 +2665,7 @@ public final class CanvasEditorModel {
         lastVerifiedIndexGeneration = snapshot.generation
     }
 
-    /// Matches the inputs currently used to produce an assistant source and
+    /// Matches the inputs currently used to produce a search-index source and
     /// its locator. Viewport, paper styling, and focus are intentionally not
     /// included because they do not change searchable content or page bounds.
     private static func hasEquivalentIndexContent(

@@ -389,10 +389,10 @@ private struct CanvasNoteSettingsSheet: View {
 
     private var readerPageDisplayBinding: Binding<CanvasPageDisplayMode> {
         Binding(
-            get: { model.readerPreferences.landscapePageDisplayMode },
+            get: { model.readerPreferences.landscapeDisplayMode },
             set: { displayMode in
                 var preferences = model.readerPreferences
-                preferences.landscapePageDisplayMode = displayMode
+                preferences.landscapeDisplayMode = displayMode
                 model.setReaderPreferences(preferences)
             }
         )

@@ -546,7 +546,7 @@ public final class LibraryRepository {
                 record.searchableText = searchableTextProjection
             }
             if let previewGeneration {
-                record.previewGeneration = max(previewGeneration, 0) }
+                record.previewGeneration = max(previewGeneration, 0)
             }
             record.modifiedAt = now
         }
@@ -825,7 +825,6 @@ public final class LibraryRepository {
                 record.payloadFailureDescription = finalState == .failed
                     ? plan.finalFailureDescriptions[duplicateID]
                     : nil
-                    : nil
                 record.pendingDuplicationID = nil
                 record.modifiedAt = now
             }
@@ -911,12 +910,11 @@ public final class LibraryRepository {
         }
         let originalIDs = Set(originals.map(\.id))
         try validateTagAssignmentCapacityForClone(itemIDs: originalIDs)
-        let rootName = uniqueCopyName(source.name,
+        let rootName = uniqueCopyName(
             for: try validatedName(source.name),
             parentID: parentID
         )
         let operationID = UUID()
-        )
         var clonesByOriginalID: [UUID: LibraryItemRecord] = [:]
         var finalPayloadStates: [UUID: LibraryPayloadState] = [:]
         var finalFailureDescriptions: [UUID: String] = [:]
@@ -947,8 +945,6 @@ public final class LibraryRepository {
                     coverChoice: original.coverChoice,
                     payloadState: stagedForAssetCopy ? .creating : original.payloadState,
                     payloadFailureDescription: stagedForAssetCopy ? nil : original.payloadFailureDescription,
-                    ? nil
-                    : original.payloadFailureDescription,
                     folderSettings: original.folderSettings,
                     createdAt: now,
                     modifiedAt: now,
@@ -991,9 +987,6 @@ public final class LibraryRepository {
                 finalFailureDescriptions: finalFailureDescriptions
             )
         )
-    }
-
-
     }
 
     public func setFavorite(
@@ -1045,7 +1038,6 @@ public final class LibraryRepository {
         let normalizedName = LibraryItemRecord.normalize(resolvedName)
         guard !tags.contains(where: { $0.normalizedName == normalizedName })
             else { throw LibraryRepositoryError.duplicateTagName(resolvedName) }
-        throw LibraryRepositoryError.duplicateTagName(resolvedName)
         let record = TagRecord(name: resolvedName, color: color, createdAt: now)
         return try mutate {
             modelContext.insert(record)
@@ -2050,4 +2042,3 @@ private extension DeletedPageRecord {
         )
     }
 }
-

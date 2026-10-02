@@ -398,7 +398,14 @@ final class LibraryAppSession {
     var sortField: LibrarySortField = .activity
     var sortOrder: LibrarySortDirection = .descending
     var recentPeriod: LibraryRecentPeriod = .thirtyDays
-    var searchQuery = ""
+    var searchQuery = "" {
+        didSet {
+            // Items filtered out by a new search must not stay selected, or a
+            // bulk Trash/Move would act on notes the person can no longer see.
+            guard isSelectionMode, selectedItemIDs.isEmpty == false else { return }
+            selectedItemIDs.formIntersection(selectableItemIDs)
+        }
+    }
     var isSearchExpanded = false
     var isAddPanelPresented = false
     var isSelectionMode = false
@@ -410,13 +417,13 @@ final class LibraryAppSession {
 
     init(
         repository: LibraryRepository,
-        actions: LibraryUIActions = LibraryUIActions(),
-        thumbnailStore: LibraryAutomaticThumbnailStore = .shared,
+        actions: LibraryUIActions? = nil,
+        thumbnailStore: LibraryAutomaticThumbnailStore? = nil,
         currentDate: @escaping () -> Date = { .now }
     ) {
         self.repository = repository
-        self.actions = actions
-        self.thumbnailStore = thumbnailStore
+        self.actions = actions ?? LibraryUIActions()
+        self.thumbnailStore = thumbnailStore ?? .shared
         self.currentDate = currentDate
     }
 

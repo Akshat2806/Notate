@@ -1,10 +1,15 @@
 import SwiftUI
 
+@MainActor
 struct LibraryShellView: View {
     @State private var session: LibraryAppSession
     private let itemTransitionNamespace: Namespace.ID?
     @State private var splitVisibility: NavigationSplitViewVisibility = .automatic
     @State private var prefersCollapsedSidebar = false
+    /// Which column a collapsed (compact-width) split view shows. Without
+    /// binding this, choosing a scope in the sidebar never revealed it, and
+    /// the sidebar was only reachable by an invisible edge swipe.
+    @State private var compactColumn: NavigationSplitViewColumn = .detail
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -12,10 +17,12 @@ struct LibraryShellView: View {
 
     init(
         repository: LibraryRepository,
-        actions: LibraryUIActions = LibraryUIActions(),
+        actions: LibraryUIActions? = nil,
         itemTransitionNamespace: Namespace.ID? = nil
     ) {
-        _session = State(initialValue: LibraryAppSession(repository: repository, actions: actions))
+        _session = State(
+            initialValue: LibraryAppSession(repository: repository, actions: actions)
+        )
         self.itemTransitionNamespace = itemTransitionNamespace
     }
 
@@ -49,6 +56,12 @@ struct LibraryShellView: View {
             splitVisibility = newValue == .compact
                 ? .automatic
                 : (prefersCollapsedSidebar ? .detailOnly : .all)
+            if newValue == .compact { compactColumn = .detail }
+        }
+        .onChange(of: session.scope) { _, _ in
+            // Picking Home, Favorites, Trash, Settings, a tag or a folder
+            // should show it, not leave the person on the scope list.
+            compactColumn = .detail
         }
         .tint(NotateLibraryDesign.accent)
         .sheet(item: $session.sheet) { destination in
@@ -127,7 +140,10 @@ struct LibraryShellView: View {
     @ViewBuilder
     private var shellContent: some View {
         if horizontalSizeClass == .compact {
-            NavigationSplitView(columnVisibility: $splitVisibility) {
+            NavigationSplitView(
+                columnVisibility: $splitVisibility,
+                preferredCompactColumn: $compactColumn
+            ) {
                 LibrarySidebar(
                     session: session,
                     presentation: .expanded,
@@ -136,6 +152,7 @@ struct LibraryShellView: View {
                 )
             } detail: {
                 detailContent
+                    .environment(\.libraryRevealSidebar, { compactColumn = .sidebar })
             }
             .navigationSplitViewStyle(.balanced)
         } else {
@@ -739,5 +756,45 @@ private struct LibrarySidebarSelectionModifier: ViewModifier {
                     lineWidth: NotateDesign.Hairline.width(for: contrast)
                 )
             }
+    }
+}
+
+
+// MARK: - Compact-width scope access
+
+private struct LibraryRevealSidebarKey: EnvironmentKey {
+    static let defaultValue: (() -> Void)? = nil
+}
+
+extension EnvironmentValues {
+    /// Non-nil only where the scope list is hidden behind a collapsed split
+    /// view (compact width, Slide Over, narrow Split View).
+    var libraryRevealSidebar: (() -> Void)? {
+        get { self[LibraryRevealSidebarKey.self] }
+        set { self[LibraryRevealSidebarKey.self] = newValue }
+    }
+}
+
+/// A visible way back to Home, Favorites, Recent, Tags, Trash and Settings
+/// when the sidebar is collapsed. Renders nothing at regular width.
+struct LibraryRevealSidebarButton: View {
+    @Environment(\.libraryRevealSidebar) private var reveal
+
+    var body: some View {
+        if let reveal {
+            Button(action: reveal) {
+                Image(systemName: "sidebar.left")
+                    .font(.system(size: 17, weight: .medium))
+                    .frame(
+                        width: NotateDesign.Control.minimumHitTarget,
+                        height: NotateDesign.Control.minimumHitTarget
+                    )
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Library")
+            .accessibilityHint("Shows Home, Favorites, Recent, Tags, Trash and Settings")
+            .accessibilityIdentifier("library.header.scopes")
+        }
     }
 }

@@ -1,3 +1,4 @@
+import CoreGraphics
 import CryptoKit
 import Foundation
 import PaperKit
@@ -402,7 +403,7 @@ public actor CanvasCoreStore: CanvasCoreCheckpointing {
     /// PaperKit payload coding is CPU-heavy for large notebooks. A small bound
     /// shortens multi-page restores and checkpoints without allowing a large
     /// document to create an unbounded burst of memory or executor work.
-    private static let maximumConcurrentPageCodeds = 2
+    private static let maximumConcurrentPageCodecs = 2
     private static let envelopeVersion = 6
     private static let semanticTableEnvelopeVersion = 6
     private static let sourceReferencedEnvelopeVersion = 5
@@ -455,7 +456,7 @@ public actor CanvasCoreStore: CanvasCoreCheckpointing {
         try validate(
             CanvasCoreSnapshot(generation: 1, pages: [page], currentPageID: page.id)
         )
-        try materializeArchiveSourcesIfNeeded(
+        try materializeArchiveSourceIfNeeded(
             page.background,
             sourceRootURL: sourceRootURL
         )
@@ -864,8 +865,7 @@ public actor CanvasCoreStore: CanvasCoreCheckpointing {
                     )
                 }
             }
-        }
-        var nextIndex = initialCount
+            var nextIndex = initialCount
         while let (index, storedPage) = try await group.next() {
             try assertLatestRequest(
                 generation: snapshot.generation,
@@ -898,6 +898,7 @@ public actor CanvasCoreStore: CanvasCoreCheckpointing {
                     )
                 }
             }
+        }
         }
 
         try assertLatestRequest(generation: snapshot.generation, token: requestToken)
@@ -1541,7 +1542,7 @@ private func prepareImportedSources(for pages: [CanvasPageSnapshot]) throws -> I
             try Self.accumulateImportedSource(
                 data,
                 relativePath: relativePath,
-                aggregateSourceByteCount: &aggregateSourceByteCount,
+                aggregateByteCount: &aggregateSourceByteCount,
                 uniqueSourceCount: fingerprintByPath.count + 1,
                 limits: resourceLimits,
                 error: { CanvasCoreStoreError.invalidSnapshot($0) }
@@ -1563,7 +1564,7 @@ private func prepareImportedSources(for pages: [CanvasPageSnapshot]) throws -> I
             try Self.accumulateImportedSource(
                 existing,
                 relativePath: relativePath,
-                aggregateSourceByteCount: &aggregateSourceByteCount,
+                aggregateByteCount: &aggregateSourceByteCount,
                 uniqueSourceCount: fingerprintByPath.count + 1,
                 limits: resourceLimits,
             error: { CanvasCoreStoreError.invalidSnapshot($0) }
@@ -1662,7 +1663,7 @@ private func resolvedImportedSourceData(
         try Self.accumulateImportedSource(
             embeddedData,
             relativePath: relativePath,
-            aggregateSourceByteCount: &aggregateSourceByteCount,
+            aggregateByteCount: &aggregateSourceByteCount,
             uniqueSourceCount: cache.count + 1,
             limits: resourceLimits,
             error: { CanvasCoreStoreError.invalidEnvelope($0) }
@@ -1677,7 +1678,7 @@ private func resolvedImportedSourceData(
         try Self.persistImportedSource(
             embeddedData,
             relativePath: relativePath,
-            sourceRootURL: sourceRootURL,
+            sourceRootURL: sourcesRootURL,
             limits: resourceLimits
         )
         guard expectedChecksum == nil || Self.sha256(embeddedData) == expectedChecksum else {
@@ -1690,7 +1691,7 @@ private func resolvedImportedSourceData(
     }
     let loaded = try Self.readImportedSource(
         relativePath: relativePath,
-        sourceRootURL: sourceRootURL,
+        sourceRootURL: sourcesRootURL,
         limits: resourceLimits,
         maximumAllowedByteCount: Self.remainingSerializedWorkingSetByteCount(
             checkpointByteCount: checkpointByteCount,
@@ -1702,7 +1703,7 @@ private func resolvedImportedSourceData(
     try Self.accumulateImportedSource(
         loaded,
         relativePath: relativePath,
-        aggregateSourceByteCount: aggregateSourceByteCount,
+        aggregateByteCount: &aggregateSourceByteCount,
         uniqueSourceCount: cache.count + 1,
         limits: resourceLimits,
         error: { CanvasCoreStoreError.invalidEnvelope($0) }
@@ -2019,7 +2020,7 @@ private func validatePublicationImportedSources(
         } else {
             data = try Self.readImportedSource(
                 relativePath: relativePath,
-                sourceRootURL: sourceRootURL,
+                sourceRootURL: sourcesRootURL,
                 limits: resourceLimits,
                 maximumAllowedByteCount: Self.remainingSerializedWorkingSetByteCount(
                     checkpointByteCount: checkpointByteCount,
@@ -2032,7 +2033,7 @@ private func validatePublicationImportedSources(
         try Self.accumulateImportedSource(
             data,
             relativePath: relativePath,
-            aggregateSourceByteCount: &aggregateSourceByteCount,
+            aggregateByteCount: &aggregateSourceByteCount,
             uniqueSourceCount: fingerprintByPath.count + 1,
             limits: resourceLimits,
             error: { CanvasCoreStoreError.invalidEnvelope($0) }
@@ -2054,7 +2055,7 @@ private func validatePublicationImportedSources(
             try Self.persistImportedSource(
                 data,
                 relativePath: relativePath,
-                sourceRootURL: sourceRootURL,
+                sourceRootURL: sourcesRootURL,
                 limits: resourceLimits
             )
         }
@@ -2210,7 +2211,7 @@ private nonisolated static func decodePages(
         count: storedPages.count
     )
     try await withThrowingTaskGroup(of: (Int, CanvasPageSnapshot).self) { group in
-        let initialCount = min(maximumConcurrentPageCodes, storedPages.count)
+        let initialCount = min(maximumConcurrentPageCodecs, storedPages.count)
         for index in 0..<initialCount {
             let storedPage = storedPages[index]
             group.addTask {
@@ -2354,7 +2355,7 @@ private nonisolated static func legacyBackground(
         .image(
             source: CanvasImageSourceReference(
                 relativePath: legacyImageSourcePath(
-                    data: data,
+                    data,
                     suggestedName: suggestedName
                 ),
                 imageData: data,
@@ -3893,4 +3894,3 @@ private struct StoredEnvelopeV6: Codable, Sendable {
     let currentPageID: UUID
     let checksum: String
 }
-

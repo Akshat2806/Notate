@@ -32,8 +32,6 @@ enum LibraryEmptyArtworkKind: Hashable, Sendable {
         }
     }
 
-    }
-
     /// These stable names let the illustration set evolve independently from
     /// the empty-state layout. Missing assets fall back gracefully at runtime.
     var preferredAssetName: String? {
@@ -83,6 +81,10 @@ struct LibraryEmptyStateView: View {
     let scope: LibraryScope
     let searchQuery: String
     let onPrimaryAction: () -> Void
+    /// Offered on Home and in folders, where creating something is the
+    /// obvious next step. Nil hides the buttons.
+    var onNewNotebook: (() -> Void)? = nil
+    var onImportDocument: (() -> Void)? = nil
 
     private var artworkKind: LibraryEmptyArtworkKind {
         .resolve(scope: scope, searchQuery: searchQuery)
@@ -90,6 +92,16 @@ struct LibraryEmptyStateView: View {
 
     private var isSearching: Bool {
         searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+    }
+
+    private var offersCreation: Bool {
+        if case .folder = scope { return true }
+        return scope == .home
+    }
+
+    private var scopeIsTag: Bool {
+        if case .tag = scope { return true }
+        return false
     }
 
     var body: some View {
@@ -120,6 +132,25 @@ struct LibraryEmptyStateView: View {
 
             if isSearching {
                 Button("Clear Search", action: onPrimaryAction)
+                    .buttonStyle(.bordered)
+            } else if let onNewNotebook, offersCreation {
+                HStack(spacing: 12) {
+                    Button(action: onNewNotebook) {
+                        Label("New Notebook", systemImage: "plus")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .accessibilityIdentifier("library.empty.new-notebook")
+                    if let onImportDocument {
+                        Button(action: onImportDocument) {
+                            Label("Import PDF", systemImage: "square.and.arrow.down")
+                        }
+                        .buttonStyle(.bordered)
+                        .accessibilityIdentifier("library.empty.import")
+                    }
+                }
+                .padding(.top, 4)
+            } else if scope == .favorites || scope == .recent || scopeIsTag {
+                Button("Open Home", action: onPrimaryAction)
                     .buttonStyle(.bordered)
             }
         }

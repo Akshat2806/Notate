@@ -391,12 +391,16 @@ struct CanvasLaserPointerTrace {
 
 @MainActor
 final class CanvasLaserPointerView: UIView {
-    private static let laserRed = UIColor(
+    static let defaultTint = UIColor(
         red: 1,
         green: 45 / 255,
         blue: 38 / 255,
         alpha: 1
     )
+
+    /// The person-chosen laser color. Display code reads this instead of a
+    /// fixed red so the picker's color row recolors dot and trail live.
+    private var tint = CanvasLaserPointerView.defaultTint
 
     private var trace = CanvasLaserPointerTrace()
     private var displayLink: CADisplayLink?
@@ -425,8 +429,9 @@ final class CanvasLaserPointerView: UIView {
         }
     }
 
-    func activate(style: CanvasLaserPointerStyle) {
+    func activate(style: CanvasLaserPointerStyle, color: UIColor? = nil) {
         trace.setStyle(style)
+        tint = color ?? Self.defaultTint
         isHidden = false
         setNeedsDisplay()
     }
@@ -491,13 +496,13 @@ final class CanvasLaserPointerView: UIView {
             drawRibbon(
                 vertices,
                 maximumRadius: 7,
-                color: Self.laserRed.withAlphaComponent(endpointStrength * 0.14),
+                color: tint.withAlphaComponent(endpointStrength * 0.14),
                 in: context
             )
             drawRibbon(
                 vertices,
                 maximumRadius: 3,
-                color: Self.laserRed.withAlphaComponent(endpointStrength * 0.86),
+                color: tint.withAlphaComponent(endpointStrength * 0.86),
                 in: context
             )
             drawRibbon(
@@ -541,7 +546,7 @@ final class CanvasLaserPointerView: UIView {
         let glowRadius: CGFloat = compact ? 10 : 14
         let coreRadius: CGFloat = compact ? 4.5 : 6
 
-        context.setFillColor(Self.laserRed.withAlphaComponent(opacity * 0.18).cgColor)
+        context.setFillColor(tint.withAlphaComponent(opacity * 0.18).cgColor)
         context.fillEllipse(in: CGRect(
             x: point.x - glowRadius,
             y: point.y - glowRadius,
@@ -552,9 +557,9 @@ final class CanvasLaserPointerView: UIView {
         context.setShadow(
             offset: .zero,
             blur: compact ? 5 : 7,
-            color: Self.laserRed.withAlphaComponent(opacity * 0.72).cgColor
+            color: tint.withAlphaComponent(opacity * 0.72).cgColor
         )
-        context.setFillColor(Self.laserRed.withAlphaComponent(opacity).cgColor)
+        context.setFillColor(tint.withAlphaComponent(opacity).cgColor)
         context.fillEllipse(in: CGRect(
             x: point.x - coreRadius,
             y: point.y - coreRadius,

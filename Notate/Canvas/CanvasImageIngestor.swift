@@ -1,4 +1,6 @@
 import CoreGraphics
+import CoreTransferable
+import Foundation
 import ImageIO
 import UniformTypeIdentifiers
 
@@ -41,13 +43,54 @@ struct CanvasIngestedImage: @unchecked Sendable {
   let wasDownsampled: Bool
 }
 
+/// File-backed transfer used by PhotosPicker. The provider-owned URL is
+/// copied while the transfer callback is active, then removed by the caller
+/// after image decoding finishes.
+struct CanvasImageTransfer: Transferable, Sendable {
+  let fileURL: URL
+
+  static var transferRepresentation: some TransferRepresentation {
+    FileRepresentation(importedContentType: .image) { received in
+      let fileExtension = received.file.pathExtension
+      let destination = FileManager.default.temporaryDirectory
+        .appendingPathComponent("Notate-Import-\(UUID().uuidString)")
+        .appendingPathExtension(fileExtension)
+      try FileManager.default.copyItem(at: received.file, to: destination)
+      return CanvasImageTransfer(fileURL: destination)
+    }
+  }
+
+  func discard() {
+    try? FileManager.default.removeItem(at: fileURL)
+  }
+}
+
 // MARK: - Ingestion error domain
 
-enum CanvasImageIngestionError: Error, Sendable {
+enum CanvasImageIngestionError: Error, LocalizedError, Sendable {
   case unreadableSource
   case sourceFileTooLarge(actualBytes: Int, maximumBytes: Int)
+  case sourcePixelBudgetExceeded(actualPixels: Int, maximumPixels: Int)
   case decodedPixelBudgetExceeded(height: Int, maximumPixels: Int)
   case invalidDimensions(width: Int, height: Int)
+  case decodeFailed
+
+  var errorDescription: String? {
+    switch self {
+    case .unreadableSource:
+      "This image could not be read. Try another photo or file."
+    case .sourceFileTooLarge:
+      "This image file is too large to add."
+    case .sourcePixelBudgetExceeded:
+      "This image has too many pixels to add. Try a smaller version."
+    case .decodedPixelBudgetExceeded:
+      "This image is too large to add, even after shrinking it."
+    case .invalidDimensions:
+      "This image has invalid dimensions."
+    case .decodeFailed:
+      "This image could not be decoded. It may be damaged or in an unsupported format."
+    }
+  }
 }
 
 // MARK: - Metadata / validator
@@ -65,7 +108,7 @@ enum CanvasImageSourceValidator {
   static func integerProperty(_ dictionary: [CFString: Any]?,
                                 _ key: CFString) -> Int? {
     guard let value = dictionary?[key] else { return nil }
-    return (value as? Int) ?? (value as? CFNumber)?.intValue
+    return (value as? Int) ?? (value as? NSNumber)?.intValue
   }
 
   /// Reads the pixel width/height from the image source properties.
@@ -87,22 +130,113 @@ enum CanvasImageSourceValidator {
         width: 0, height: 0)
     }
   }
+
+  /// Builds the full metadata payload for raw encoded image bytes, throwing
+  /// when the data is not a decodable image or exceeds the policy budgets.
+  static func metadata(
+    for data: Data,
+    policy: CanvasImageIngestionPolicy
+  ) throws -> CanvasImageSourceMetadata {
+    guard data.isEmpty == false else {
+      throw CanvasImageIngestionError.unreadableSource
+    }
+    guard data.count <= policy.maximumEncodedByteCount else {
+      throw CanvasImageIngestionError.sourceFileTooLarge(
+        actualBytes: data.count,
+        maximumBytes: policy.maximumEncodedByteCount)
+    }
+    guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
+      throw CanvasImageIngestionError.unreadableSource
+    }
+    guard CGImageSourceGetCount(source) > 0 else {
+      throw CanvasImageIngestionError.unreadableSource
+    }
+    let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil)
+      as? [CFString: Any] ?? [:]
+    guard let size = sizeProperties(properties) else {
+      throw CanvasImageIngestionError.invalidDimensions(width: 0, height: 0)
+    }
+    guard size.width > 0, size.height > 0 else {
+      throw CanvasImageIngestionError.invalidDimensions(
+        width: size.width,
+        height: size.height
+      )
+    }
+    let (pixelCount, overflow) = size.width.multipliedReportingOverflow(by: size.height)
+    guard overflow == false else {
+      throw CanvasImageIngestionError.sourcePixelBudgetExceeded(
+        actualPixels: Int.max,
+        maximumPixels: policy.maximumSourcePixelCount
+      )
+    }
+    guard pixelCount <= policy.maximumSourcePixelCount else {
+      throw CanvasImageIngestionError.sourcePixelBudgetExceeded(
+        actualPixels: pixelCount,
+        maximumPixels: policy.maximumSourcePixelCount)
+    }
+    let orientationValue = integerProperty(properties, kCGImagePropertyOrientation) ?? 1
+    let orientation = CGImagePropertyOrientation(
+      rawValue: UInt32(exactly: orientationValue) ?? 1
+    ) ?? .up
+    let orientedPixelSize: CGSize
+    switch orientation {
+    case .left, .right, .leftMirrored, .rightMirrored:
+      orientedPixelSize = CGSize(width: size.height, height: size.width)
+    default:
+      orientedPixelSize = CGSize(width: size.width, height: size.height)
+    }
+    return CanvasImageSourceMetadata(
+      encodedByteCount: data.count,
+      rawPixelSize: CGSize(width: size.width, height: size.height),
+      orientedPixelSize: orientedPixelSize,
+      orientation: orientation)
+  }
 }
 
-// MARK: - File reader for bounded byte extraction
+// MARK: - Ingestion actor
 
-/// Reads up-to `maximumByteCount` bytes from a file URL, returning the data
-/// along with the exact byte count that was consumed.
-enum CanvasBoundedFileReader {
-  static func read(
-    from fileURL: URL,
-    maximumByteCount: Int
-  ) throws (CanvasImageIngestionError, data: Data, actualByteCount: Int) {
-    var actualByteCount = 0
-    let fileBytes = try Data(contentsOf: fileURL)
-    actualByteCount = min(fileBytes.count, maximumByteCount)
-    let data = fileBytes.prefix(upTo: actualByteCount)
-    return (data: Data(data), actualByteCount: actualByteCount)
+/// Serializes all ImageIO decode work for canvas imports off the main actor.
+/// Limits are derived from a base policy so narrower contexts (cover art,
+/// page thumbnails) can reuse the same pipeline with tighter budgets.
+actor CanvasImageIngestor {
+  /// Shared pipeline used by photo pickers and file-import panels.
+  static let shared = CanvasImageIngestor()
+
+  private let policy: CanvasImageIngestionPolicy
+
+  init(
+    policy basePolicy: CanvasImageIngestionPolicy = .canvasDefault,
+    maximumEncodedByteCount: Int? = nil,
+    maximumSourcePixelCount: Int? = nil,
+    maximumDecodedPixelCount: Int? = nil,
+    maximumDecodedDimension: Int? = nil
+  ) {
+    self.policy = CanvasImageIngestionPolicy(
+      maximumEncodedByteCount:
+        maximumEncodedByteCount ?? basePolicy.maximumEncodedByteCount,
+      maximumSourcePixelCount:
+        maximumSourcePixelCount ?? basePolicy.maximumSourcePixelCount,
+      maximumDecodedPixelCount:
+        maximumDecodedPixelCount ?? basePolicy.maximumDecodedPixelCount,
+      maximumDecodedDimension:
+        maximumDecodedDimension ?? basePolicy.maximumDecodedDimension
+    )
+  }
+
+  /// Returns the immutable original bytes after validating them as a
+  /// readable, in-budget image, so importers can preserve the source file.
+  func validatedOriginalData(fileURL: URL) async throws -> Data {
+    let data = try CanvasBoundedFileReader.read(
+      from: fileURL,
+      maximumByteCount: policy.maximumEncodedByteCount
+    )
+    _ = try CanvasImageSourceValidator.metadata(for: data, policy: policy)
+    return data
+  }
+
+  /// Ingests a single image file into a normalized, downsampled decode.
+  func ingest(fileURL: URL) async throws -> CanvasIngestedImage {
+    try await ingestImage(from: fileURL, policy: policy)
   }
 }
 
@@ -115,7 +249,7 @@ func ingestImage(
   policy: CanvasImageIngestionPolicy = .canvasDefault
 ) async throws -> CanvasIngestedImage {
   // --- 1. Bounded byte read ------------------------------------------------
-  let (data, actualByteCount) = try CanvasBoundedFileReader.read(
+  let data = try CanvasBoundedFileReader.read(
     from: fileURL,
     maximumByteCount: policy.maximumEncodedByteCount)
 
@@ -128,68 +262,81 @@ func ingestImage(
   else { throw CanvasImageIngestionError.unreadableSource }
 
   // --- 3. Basic metadata (oriented size, orientation) -----------------------
-  var metadataOptions: [CFString: Any] = [
-    kCGImageSourceCreateThumbnailWithTransform: true,
-    kCGImageSourceShouldCacheImmediately: true,
-  ]
-  var rawWidth = 0, rawHeight = 0
-  let sourceProperties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] ?? [:]
-  CanvasImageSourceValidator.validate(properties: sourceProperties)
+  let sourceProperties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil)
+    as? [CFString: Any] ?? [:]
+  try CanvasImageSourceValidator.validate(properties: sourceProperties)
 
-  rawWidth = CanvasImageSourceValidator.integerProperty(sourceProperties, kCGImagePropertyPixelWidth)  ?? 0
-  rawHeight = CanvasImageSourceValidator.integerProperty(sourceProperties, kCGImagePropertyPixelHeight) ?? 0
+  let rawWidth = CanvasImageSourceValidator.integerProperty(
+    sourceProperties,
+    kCGImagePropertyPixelWidth
+  ) ?? 0
+  let rawHeight = CanvasImageSourceValidator.integerProperty(
+    sourceProperties,
+    kCGImagePropertyPixelHeight
+  ) ?? 0
 
   // Read orientation once (cached per source)
   let orientationValue = CanvasImageSourceValidator.integerProperty(
     sourceProperties, kCGImagePropertyOrientation) ?? 1
-  let sourceOrientation = CGImagePropertyOrientation(rawValue: orientationValue) ?? .up
+  let sourceOrientation = CGImagePropertyOrientation(
+    rawValue: UInt32(exactly: orientationValue) ?? 1
+  ) ?? .up
 
   // --- 4. Dimension budget check against source pixel count -----------------
-  let sourcePixelCount = rawWidth * rawHeight
+  let (sourcePixelCount, pixelCountOverflow) = rawWidth.multipliedReportingOverflow(
+    by: rawHeight
+  )
+  guard pixelCountOverflow == false else {
+    throw CanvasImageIngestionError.sourcePixelBudgetExceeded(
+      actualPixels: Int.max,
+      maximumPixels: policy.maximumSourcePixelCount
+    )
+  }
   guard sourcePixelCount <= policy.maximumSourcePixelCount else {
-    throw CanvasImageIngestionError.sourceFileTooLarge(
-      actualBytes: actualByteCount,
-      maximumBytes: policy.maximumEncodedByteCount)
+    throw CanvasImageIngestionError.sourcePixelBudgetExceeded(
+      actualPixels: sourcePixelCount,
+      maximumPixels: policy.maximumSourcePixelCount)
   }
 
   // --- 5. Binary‑search downsample to fit decoded pixel budget --------------
   let decodedBudget = policy.maximumDecodedPixelCount
   let maxDim = policy.maximumDecodedDimension
 
-  // Compute initial half‑open interval [1 , min(longestEdge, maxDim)]
+  // The thumbnail API takes a maximum *edge length*, so scale the longest
+  // edge by sqrt(budget / pixels) to land under the decoded pixel budget.
   let longestEdge = max(rawWidth, rawHeight)
-  var lowerBound = 1
-  var upperBound = min(longestEdge, maxDim)
-
-  // Binary search for the largest scale whose short‑edge-squared stays under budget
-  while lowerBound < upperBound {
-    let candidate = lowerBound + (upperBound - lowerBound + 1) / 2
-    let scaledShortEdge = max(1, min(rawWidth, rawHeight) / candidate)
-    let scaledPixelCount = rawWidth / candidate * (rawHeight / candidate)
-    if scaledPixelCount <= decodedBudget {
-      lowerBound = candidate
-    } else {
-      upperBound = candidate - 1
-    }
-  }
-  let scale = Double(maxDim) / Double(max(lowerBound, 1))
+  let areaScale = rawWidth > 0 && rawHeight > 0
+    ? min(1, (Double(decodedBudget) / (Double(rawWidth) * Double(rawHeight))).squareRoot())
+    : 1
+  // Shave 1% so rounding in ImageIO cannot tip the result over budget.
+  let budgetEdge = Int((Double(longestEdge) * areaScale * 0.99).rounded(.down))
+  let lowerBound = max(1, min(budgetEdge, min(longestEdge, maxDim)))
 
   // --- 6. Generate thumbnail (oriented, decoded) ---------------------------
   let decodeOptions: [CFString: Any] = [
+    kCGImageSourceCreateThumbnailFromImageAlways: true,
     kCGImageSourceCreateThumbnailWithTransform: true,
     kCGImageSourceShouldCacheImmediately: true,
     kCGImageSourceThumbnailMaxPixelSize: lowerBound,
   ]
   guard let decodedImage = CGImageSourceCreateThumbnailAtIndex(
-    source, decodeOptions as CFDictionary)
+    source, 0, decodeOptions as CFDictionary)
   else { throw CanvasImageIngestionError.decodeFailed }
 
-  let decodedPixelCount = decodedImage.width * decodedImage.height
+  let (decodedPixelCount, decodedPixelCountOverflow) = decodedImage.width
+    .multipliedReportingOverflow(by: decodedImage.height)
+  guard decodedPixelCountOverflow == false,
+    decodedPixelCount <= policy.maximumDecodedPixelCount else {
+    throw CanvasImageIngestionError.decodedPixelBudgetExceeded(
+      height: decodedImage.height,
+      maximumPixels: policy.maximumDecodedPixelCount
+    )
+  }
   let wasDownsampled = decodedPixelCount < sourcePixelCount
 
   // --- 7. Return normalized ingestion result --------------------------------
   let fileMetadata = CanvasImageSourceMetadata(
-    encodedByteCount: actualByteCount,
+    encodedByteCount: data.count,
     rawPixelSize: CGSize(width: rawWidth, height: rawHeight),
     orientedPixelSize: CGSize(width: decodedImage.width, height: decodedImage.height),
     orientation: sourceOrientation)
@@ -197,29 +344,6 @@ func ingestImage(
   return CanvasIngestedImage(
     image: decodedImage,
     sourcePixelSize: fileMetadata.orientedPixelSize,
-    sourceOrientation: fileMetadata.sourceOrientation,
+    sourceOrientation: fileMetadata.orientation,
     wasDownsampled: wasDownsampled)
-}
-
-// MARK: - Convenient caller for the canvas importer actor
-
-/// Public entry point used by the canvas import actor.  Delegates to the
-/// async `ingestImage` after performing a small amount of bridge checking.
-func ingestFileRepresentation(
-  from fileURL: URL,
-  policy: CanvasImageIngestionPolicy = .canvasDefault
-) async throws -> some ViewRepresentable {
-  let ingested = try await ingestImage(from: fileURL, policy: policy)
-  return FileRepresentation(importedContentType: .image) { received in
-    received(ingested.image)
-  }
-}
-
-// MARK: - Preview / temporary bridge until the full View type is wired in
-
-/// Minimal placeholder conformance so the ingestion function can return
-/// something the SwiftUI ecosystem accepts without a full `View` definition.
-struct FileRepresentation: Sendable {
-  let importedContentType: UTType
-  let receiveHandler: (CGImage) -> Void
 }

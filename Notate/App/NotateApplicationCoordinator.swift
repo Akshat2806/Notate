@@ -132,11 +132,6 @@ final class NotateApplicationCoordinator {
         let canvasSourceRelativePath: String
     }
 
-    private struct AssistantSourceNavigationRequest: Sendable {
-        let id: UUID
-        let anchor: AssistantSourceAnchor
-    }
-
     private enum NotebookCoverError: LocalizedError {
         case missingCustomImage
         case renderingFailed
@@ -161,7 +156,6 @@ final class NotateApplicationCoordinator {
     struct ActiveEditor {
         let item: LibraryItemRecord
         let model: CanvasEditorModel
-        let assistant: AssistantPresentationModel
 
         var itemID: UUID { item.id }
     }
@@ -176,21 +170,6 @@ final class NotateApplicationCoordinator {
     let repository: LibraryRepository
 
     @ObservationIgnored let assetStore: LibraryAssetStore
-    /// One process-wide retrieval index backs every assistant panel. Production
-    /// uses a protected, on-device Core Spotlight index; UI tests keep the
-    /// deterministic in-memory implementation.
-    @ObservationIgnored private let assistantIndex: NotebookIndex
-    /// A single process-wide client owns Foundation Models sessions and keeps
-    /// every editor on the same serialized on-device model lane.
-    @ObservationIgnored private let assistantModelClient: any AssistantModelClient
-    /// One serialized, protected store is shared by every editor so artifact
-    /// LRU order and invalidation remain coherent across document switches.
-    @ObservationIgnored private var assistantArtifactCache: AssistantArtifactCache?
-    /// Owns process-wide foreground admission and the sequenced lifecycle
-    /// stream shared by every editor assistant.
-    @ObservationIgnored private let assistantPipelineCoordinator: AssistantPipelineCoordinator
-    @ObservationIgnored private let assistantCPUWorker: AssistantCPUWorker
-    @ObservationIgnored private let assistantMaintenanceCoordinator: AssistantMaintenanceCoordinator
     @ObservationIgnored private let migrationCoordinator: LegacyCanvasMigrationCoordinator?
     @ObservationIgnored private let deletedPageAcknowledgement: (
         LibraryRepository,
@@ -237,13 +216,6 @@ final class NotateApplicationCoordinator {
     var startupNotice: String?
 
     @ObservationIgnored private var didStart = false
-    @ObservationIgnored private var assistantLibraryPreparationTask: Task<Void, Never>?
-    /// Correctness-critical item mutations are serialized independently from
-    /// cancellable startup/OCR maintenance. Opening an editor must never cancel
-    /// a pending trash, restore, rename, move, cover, or duplication update.
-    @ObservationIgnored private var assistantCatalogMutationTask: Task<Void, Never>?
-    @ObservationIgnored private var assistantCatalogMutationID: UUID?
-    @ObservationIgnored private var assistantCachePreparationTask: Task<Void, Never>?
     @ObservationIgnored private var derivedRefreshes: [
         UUID: (id: UUID, task: Task<Void, Never>)
     ] = [:]
@@ -278,13 +250,6 @@ final class NotateApplicationCoordinator {
     @ObservationIgnored private var closeHandoffs: [
         UUID: (id: UUID, task: Task<Void, Never>)
     ] = [:]
-    /// Cross-note source navigation must flush the visible editor before it
-    /// constructs the destination. Keep one model-bearing task and one small,
-    /// latest-wins anchor so repeated source taps cannot accumulate editors.
-    @ObservationIgnored private var assistantSourceNavigation:
-        (id: UUID, task: Task<Void, Never>)?
-    @ObservationIgnored private var pendingAssistantSourceNavigation:
-        AssistantSourceNavigationRequest?
     /// File and Photos pickers can deliver another selection while a previous
     /// batch is still validating or committing large payloads. Admit exactly
     /// one root import batch at a time instead of cancelling authored-file
@@ -301,16 +266,14 @@ final class NotateApplicationCoordinator {
         (@MainActor () async -> Void)?
     @ObservationIgnored private var closeHandoffSuspensionForTesting:
         (@MainActor () async -> Void)?
-    @ObservationIgnored private var assistantSourceNavigationSuspensionForTesting:
-        (@MainActor () async -> Void)?
     @ObservationIgnored private var payloadOpenObserverForTesting:
         (@MainActor (UUID) -> Void)?
     @ObservationIgnored private var compatibilityDerivedRefreshSuspensionForTesting:
         (@MainActor (Int64, CompatibilityDerivedRefreshTestPhase) async -> Void)?
     #endif
     /// Records lightweight diagnostics for a failed fresh projection until a
-    /// verified refresh persists it. Live assistant publication uses the
-    /// request-local text; retries rebuild from authoritative Canvas Core.
+    /// verified refresh persists it. Retries rebuild from authoritative
+    /// Canvas Core.
     @ObservationIgnored private(set) var derivedCatalogPersistenceFailures: [
         UUID: DerivedCatalogPersistenceFailure
     ] = [:]
@@ -323,8 +286,6 @@ final class NotateApplicationCoordinator {
         startupNotice: String? = nil,
         catalogFailureDescription: String? = nil,
         isUITesting: Bool = false,
-        assistantIndex: NotebookIndex? = nil,
-        assistantPipelineCoordinator: AssistantPipelineCoordinator? = nil,
         deletedPageAcknowledgement: ((LibraryRepository, UUID) throws -> Void)? = nil,
         compatibilityDerivedPayloadCommit: (
             @MainActor (LibraryRepository, UUID, Int, String) throws -> Void
@@ -333,23 +294,6 @@ final class NotateApplicationCoordinator {
         self.modelContainer = modelContainer
         self.repository = repository
         self.assetStore = assetStore
-        self.assistantIndex = assistantIndex ?? NotebookIndex()
-        self.assistantPipelineCoordinator = assistantPipelineCoordinator
-            ?? AssistantPipelineCoordinator()
-        assistantCPUWorker = AssistantCPUWorker()
-        assistantMaintenanceCoordinator = AssistantMaintenanceCoordinator()
-        #if DEBUG
-        assistantModelClient = isUITesting
-            && NotateUITestLaunchConfiguration.usesFoundationModels == false
-            ? NotateUITestAssistantModelClient()
-            : FoundationModelAssistantClient()
-        #else
-        assistantModelClient = FoundationModelAssistantClient()
-        #endif
-        // Opening, integrity checking, trimming, and VACUUM can all touch a
-        // large SQLite file. Prepare the reproducible cache later at utility
-        // priority instead of blocking this @MainActor initializer.
-        assistantArtifactCache = nil
         self.migrationCoordinator = migrationCoordinator
         self.startupNotice = startupNotice
         self.catalogFailureDescription = catalogFailureDescription
@@ -400,10 +344,7 @@ final class NotateApplicationCoordinator {
                     modelContainer: container,
                     repository: LibraryRepository(modelContainer: container),
                     assetStore: assetStore,
-                    migrationCoordinator: try? LegacyCanvasMigrationCoordinator.live(),
-                    assistantIndex: NotebookIndex.production(
-                        catalogRootURL: assetStore.libraryRoot
-                    )
+                    migrationCoordinator: try? LegacyCanvasMigrationCoordinator.live()
                 )
             },
             unavailableFactory: { catalogErrorDescription in
@@ -727,127 +668,11 @@ final class NotateApplicationCoordinator {
         guard await reconcileAssetTrashTransactions() else { return }
         await reconcileIncompletePayloads()
         guard catalogFailureDescription == nil else { return }
-        #if DEBUG
-        if NotateUITestLaunchConfiguration.usesFoundationModels {
-            do {
-                try await installUITestFoundationModelProbePayload()
-            } catch {
-                catalogFailureDescription = "The isolated Foundation Models probe could not seed its note: \(error.localizedDescription)"
-                return
-            }
-        }
-        #endif
         isLibraryRecoveryComplete = true
         await purgeExpiredTrash()
         guard isCatalogWritable else { return }
         await migrateLegacyCanvasIfNeeded()
         await removeLegacyCanvasItems()
-        guard isCatalogWritable else { return }
-        // Registration is lightweight catalog work and is required for
-        // request-time lexical routing. Complete it before the cancellable,
-        // delayed pass that opens documents and repairs Core Spotlight.
-        await refreshAssistantCatalogRegistration()
-        scheduleAssistantCachePreparation()
-        scheduleAssistantLibraryPreparation()
-    }
-
-    #if DEBUG
-    /// Installs one real Canvas Core checkpoint for the opt-in device probe.
-    /// Both the catalog and this payload live below the UI-test-only temporary
-    /// root, so running the probe cannot read, migrate, or rewrite user notes.
-    private func installUITestFoundationModelProbePayload() async throws {
-        guard NotateUITestLaunchConfiguration.seedFixture,
-            let notebook = repository.items.first(where: {
-                $0.name == "Studio Notebook" && $0.kind == .notebook
-            }) else {
-            throw CocoaError(.fileNoSuchFile)
-        }
-
-        let directories = try await assetStore.prepareItem(id: notebook.id)
-        let pageID = UUID()
-        var markup = PaperMarkup(bounds: CGRect(
-            origin: .zero,
-            size: CanvasConstants.a4PortraitSize
-        ))
-        markup.insertNewTextbox(
-            attributedText: AttributedString(
-                "The observatory access code is cobalt-kestrel-47. The launch window begins at 06:40."
-            ),
-            frame: CGRect(x: 72, y: 96, width: 450, height: 120)
-        )
-        let snapshot = CanvasCoreSnapshot(
-            generation: 1,
-            pages: [CanvasPageSnapshot(id: pageID, markup: markup)],
-            currentPageID: pageID
-        )
-        try await CanvasCoreStore(rootURL: directories.canvas).checkpoint(snapshot)
-        try repository.updateDerivedPayload(
-            itemID: notebook.id,
-            pageCount: 1,
-            searchableText: "The observatory access code is cobalt-kestrel-47. The launch window begins at 06:40.",
-            previewGeneration: snapshot.generation
-        )
-    }
-    #endif
-
-    /// Opens and performs startup maintenance for the reproducible assistant
-    /// cache only after the first UI work has settled. If an assistant request
-    /// is active, maintenance waits; foreground use never waits for the cache.
-    private func scheduleAssistantCachePreparation() {
-        guard assistantArtifactCache == nil,
-            assistantCachePreparationTask == nil else { return }
-        let root = assetStore.libraryRoot
-            .appendingPathComponent("AssistantArtifacts", isDirectory: true)
-        assistantCachePreparationTask = Task(priority: .utility) { [weak self] in
-            do {
-                try await Task.sleep(for: .milliseconds(750))
-                while let self, self.activeEditor?.assistant.isWorking == true {
-                    try Task.checkCancellation()
-                    try await Task.sleep(for: .milliseconds(250))
-                }
-            } catch {
-                return
-            }
-            guard Task.isCancelled == false else { return }
-            let cache = await self?.assistantMaintenanceCoordinator
-                .prepareArtifactCache(at: root)
-            guard Task.isCancelled == false, let self else { return }
-            self.assistantArtifactCache = cache
-            self.activeEditor?.assistant.setArtifactCache(cache)
-            self.assistantCachePreparationTask = nil
-        }
-    }
-
-    /// Permanent deletion is a privacy boundary and cannot depend on the
-    /// delayed UI-maintenance cache open having happened already. Preparing on
-    /// demand also recovers a corrupt reproducible database before it is
-    /// cleared, so a successful catalog deletion never leaves summary bytes in
-    /// an unopened store.
-    private func assistantArtifactCacheForDeletion() async throws -> AssistantArtifactCache {
-        if let assistantArtifactCache { return assistantArtifactCache }
-        assistantCachePreparationTask?.cancel()
-        assistantCachePreparationTask = nil
-        let root = assetStore.libraryRoot
-            .appendingPathComponent("AssistantArtifacts", isDirectory: true)
-        guard let cache = await assistantMaintenanceCoordinator
-            .prepareArtifactCache(at: root) else {
-            throw AssistantArtifactCacheError.io(
-                "The assistant artifact cache could not be opened for permanent deletion."
-            )
-        }
-        assistantArtifactCache = cache
-        return cache
-    }
-
-    private func purgeAssistantArtifactCacheForDeletion() async throws {
-        let cache = try await assistantArtifactCacheForDeletion()
-        // Clear the presentation reference before sealing. A task that looks
-        // up the cache after its derivation await sees nil; a task that already
-        // captured this actor is rejected by the seal below.
-        assistantArtifactCache = nil
-        activeEditor?.assistant.setArtifactCache(nil)
-        _ = try await cache.removeAllAndSeal()
-        await assistantMaintenanceCoordinator.discardArtifactCacheAfterDeletion()
     }
 
     func closeActiveItem(
@@ -860,14 +685,9 @@ final class NotateApplicationCoordinator {
             return
         }
 
-        cancelAssistantSourceNavigation()
         if let editor = activeEditor {
             let itemID = editor.itemID
             let editorModel = editor.model
-            // Stop foreground AI ownership as soon as closing begins. The
-            // editor itself remains visible and retained until its authored
-            // state crosses the verified Canvas Core boundary below.
-            editor.assistant.cancel()
             let previousDerivedRefresh = derivedRefreshes
                 .removeValue(forKey: itemID)?.task
             previousDerivedRefresh?.cancel()
@@ -902,10 +722,8 @@ final class NotateApplicationCoordinator {
                 // may the visible editor disappear and navigation return to
                 // Library. Catalog/index maintenance remains best effort.
                 beforeNavigation()
-                self.activeEditor?.assistant.cancel()
                 self.activeEditor = nil
                 self.synchronizeRoute(with: self.librarySession.scope)
-                self.scheduleAssistantLibraryPreparation()
                 didClose = true
 
                 guard self.isCatalogWritable else { return }
@@ -917,7 +735,7 @@ final class NotateApplicationCoordinator {
                 guard !Task.isCancelled,
                     self.closeHandoffs[itemID]?.id == handoffID,
                     self.isCatalogWritable,
-                    let generation = await self.publishAssistantIndex(
+                    let generation = await self.verifiedGenerationForDerivedRefresh(
                         itemID: itemID,
                         model: editorModel
                     ) else { return }
@@ -927,8 +745,7 @@ final class NotateApplicationCoordinator {
                 // Library query cannot miss the note that just closed.
                 await self.refreshCompatibilityDerivedData(
                     itemID: itemID,
-                    minimumGeneration: generation,
-                    refreshesAssistantCatalog: true
+                    minimumGeneration: generation
                 )
             }
             closeHandoffs[itemID] = (handoffID, task)
@@ -938,7 +755,6 @@ final class NotateApplicationCoordinator {
         let itemID = activeAttachment?.itemID
         activeAttachment = nil
         synchronizeRoute(with: librarySession.scope)
-        scheduleAssistantLibraryPreparation()
         if isCatalogWritable, let itemID {
             try? repository.markOpened(id: itemID)
         }
@@ -1159,16 +975,6 @@ final class NotateApplicationCoordinator {
         closeHandoffSuspensionForTesting = suspension
     }
 
-    func setAssistantSourceNavigationSuspensionForTesting(
-        _ suspension: (@MainActor () async -> Void)?
-    ) {
-        assistantSourceNavigationSuspensionForTesting = suspension
-    }
-
-    func navigateToAssistantSourceForTesting(_ anchor: AssistantSourceAnchor) {
-        navigateToAssistantSource(anchor)
-    }
-
     func setPayloadOpenObserverForTesting(
         _ observer: (@MainActor (UUID) -> Void)?
     ) {
@@ -1195,18 +1001,10 @@ final class NotateApplicationCoordinator {
         pendingPayloadOpenItemID
     }
 
-    var hasActiveAssistantSourceNavigationForTesting: Bool {
-        assistantSourceNavigation != nil
-    }
-
-    var pendingAssistantSourceItemIDForTesting: UUID? {
-        pendingAssistantSourceNavigation?.anchor.itemID
-    }
     #endif
 
     private func open(_ item: LibraryItemRecord) {
         guard isCatalogWritable else { return }
-        cancelAssistantSourceNavigation()
         if item.kind == .notebook
             || item.kind == .importedDocument
             || item.kind == .attachment {
@@ -1235,32 +1033,23 @@ final class NotateApplicationCoordinator {
             guard item.payloadState == .ready else {
                 throw LibraryRepositoryError.itemNotReady(item.id)
             }
-            // Stop any library-wide scan before constructing or restoring an
-            // editor. It is restarted below and waits for the editor's canvas
-            // to become ready before touching notebook files again.
-            assistantLibraryPreparationTask?.cancel()
             switch item.kind {
             case .folder:
                 try repository.markOpened(id: item.id)
                 librarySession.selectScope(.folder(item.id))
                 synchronizeRoute(with: librarySession.scope)
             case .notebook:
-                suspendAssistantBackgroundMaintenance()
-                activeEditor?.assistant.cancel()
                 activeEditor = makeActiveEditor(for: item)
                 route = .notebook(item.id)
             case .canvas, .legacyTypedNote:
                 throw LibraryAssetStoreError.itemNotFound(item.id)
             case .importedDocument:
-                suspendAssistantBackgroundMaintenance()
-                activeEditor?.assistant.cancel()
                 activeEditor = makeActiveEditor(for: item)
                 route = .document(item.id)
             case .attachment:
                 guard let filename = item.sourceFilename else {
                     throw LibraryAssetStoreError.itemNotFound(item.id)
                 }
-                suspendAssistantBackgroundMaintenance()
                 let url = assetStore.directories(for: item.id).sources
                     .appendingPathComponent(filename)
                 activeAttachment = ActiveAttachment(
@@ -1270,603 +1059,13 @@ final class NotateApplicationCoordinator {
                 )
                 route = .attachment(item.id)
             }
-            scheduleAssistantLibraryPreparation()
         } catch {
             alertMessage = error.localizedDescription
         }
     }
 
-    /// Keeps full-library RAG maintenance completely outside note-taking.
-    /// Current-note indexing still follows verified checkpoints, while this
-    /// catalog-wide pass runs only on library surfaces where it cannot compete
-    /// with canvas restoration, scrolling, or Pencil input.
-    private func scheduleAssistantLibraryPreparation() {
-        assistantLibraryPreparationTask?.cancel()
-        assistantLibraryPreparationTask = nil
-        guard isCatalogWritable,
-            activeEditor == nil,
-            activeAttachment == nil else { return }
-        assistantLibraryPreparationTask = Task(priority: .background) { [weak self, assistantIndex] in
-            do {
-                // Leave the first library frames and their immediate input
-                // handling uncontested before beginning maintenance.
-                try await Task.sleep(for: .milliseconds(750))
-            } catch {
-                return
-            }
-            guard Task.isCancelled == false,
-                let self,
-                self.isCatalogWritable,
-                self.activeEditor == nil,
-                self.activeAttachment == nil else { return }
-            await assistantIndex.resumeBackgroundMaintenance()
-            // Reconciliation is a correctness-critical catalog mutation. Run
-            // it on the same serialized lane as create/rename/trash/restore so
-            // a snapshot can never commit after a newer item-scoped update.
-            await self.refreshAssistantCatalogRegistration()
-            guard Task.isCancelled == false,
-                self.activeEditor == nil,
-                self.activeAttachment == nil else { return }
-            // Registration is already current. This second phase may be
-            // cancelled freely because it only warms reproducible per-item
-            // indexes and never applies a library-wide deletion snapshot.
-            await assistantIndex.prepareRegisteredLibrary(
-                itemIDs: self.assistantIndexedItemIDsForMaintenance()
-            )
-        }
-    }
-
-    /// Cancels catalog-wide work, requests cancellation of disposable
-    /// Vision/OCR enrichment, and blocks late derived commits before an
-    /// interactive document surface becomes active. Foreground assistant
-    /// requests remain available: only reproducible maintenance is suspended.
-    private func suspendAssistantBackgroundMaintenance() {
-        assistantLibraryPreparationTask?.cancel()
-        assistantLibraryPreparationTask = nil
-        Task(priority: .userInitiated) { [assistantIndex] in
-            await assistantIndex.suspendBackgroundMaintenance()
-        }
-    }
-
-    private func makeActiveEditor(
-        for item: LibraryItemRecord,
-        reusing assistant: AssistantPresentationModel? = nil
-    ) -> ActiveEditor {
-        let model = makeEditorModel(for: item)
-        let presentation: AssistantPresentationModel
-        if let assistant {
-            presentation = assistant
-            presentation.updateFocusedItem(
-                itemID: item.id,
-                itemName: item.name,
-                itemKind: item.kind,
-                currentPageID: nil
-            )
-        } else {
-            presentation = AssistantPresentationModel(
-                itemID: item.id,
-                itemName: item.name,
-                itemKind: item.kind,
-                // Request preparation refreshes the lightweight persisted
-                // focused item through its verified snapshot. Library-wide
-                // registration is maintained at startup and by coalesced
-                // mutation maintenance, never rescanned on the first-token
-                // path.
-                items: [],
-                navigateToSource: { [weak self] anchor in
-                    self?.navigateToAssistantSource(anchor)
-                },
-                index: assistantIndex,
-                modelClient: assistantModelClient,
-                pipelineCoordinator: assistantPipelineCoordinator,
-                cpuWorker: assistantCPUWorker
-            )
-        }
-        presentation.setArtifactCache(assistantArtifactCache)
-        presentation.setDeadlineAwareRequestPreparation {
-            [weak self, weak model] task, requestDeadline in
-            guard let self, let model else { return .canvasTemporarilyBusy }
-            // A focused request must never spend its absolute watchdog behind
-            // an unrelated whole-library FTS migration. Its verified snapshot
-            // publishes directly to the actor's hot index; an item-scoped
-            // successor then repairs any older catalog snapshot still in the
-            // serialized maintenance lane.
-            guard await model.prepareForAssistantRequest() else {
-                if case .failed = model.saveState {
-                    return .saveFailed
-                }
-                return .canvasTemporarilyBusy
-            }
-            let indexedGeneration = await self.publishAssistantIndex(
-                itemID: item.id,
-                model: model,
-                foregroundEnrichmentDeadline:
-                    AssistantFoundationTimeoutPolicy
-                        .foregroundEnrichmentDeadline(
-                            for: task,
-                            requestDeadline: requestDeadline
-                        )
-            )
-            guard indexedGeneration == model.verifiedCheckpointGeneration else {
-                if case .failed = model.saveState {
-                    return .saveFailed
-                }
-                return .retrievalPreparationFailed
-            }
-            self.scheduleAssistantCatalogSynchronization(itemIDs: [item.id])
-            return .ready
-        }
-        return ActiveEditor(item: item, model: model, assistant: presentation)
-    }
-
-    private func visitAssistantIndexedItemsForMaintenance(
-        itemIDs proposedItemIDs: [UUID]? = nil,
-        stopsWhenCancelled: Bool = true,
-        didYieldBatch: (@MainActor () -> Void)? = nil,
-        didUpdateMaterializedFallbackBytes: (@MainActor (Int) -> Void)? = nil,
-        visit: @MainActor (AssistantIndexedItem) async -> Void
-    ) async -> Set<UUID>? {
-        // Never retain SwiftData model objects across a suspension point. A
-        // delete-all operation can commit while this background scan yields;
-        // resuming an iterator that still owns the deleted records would then
-        // read invalidated backing data. UUIDs remain valid value snapshots,
-        // and each record is re-resolved immediately before projection.
-        let itemIDs = proposedItemIDs ?? repository.items.map(\.id)
-        var visitedItemIDs = Set<UUID>()
-        visitedItemIDs.reserveCapacity(itemIDs.count)
-        let batchSize = 128
-        var lowerBound = 0
-        while lowerBound < itemIDs.count {
-            if stopsWhenCancelled, Task.isCancelled { return nil }
-            // SwiftData records are MainActor-bound. Yield before resolving
-            // this ID batch; each live model is converted below and released
-            // before the next suspension point.
-            await Task.yield()
-            didYieldBatch?()
-
-            let upperBound = min(lowerBound + batchSize, itemIDs.count)
-            let orderedBatchIDs = Array(itemIDs[lowerBound..<upperBound])
-            // Marker discovery touches only bounded UUID/URL metadata. Do it
-            // before materializing any fallback text, and keep filesystem work
-            // off MainActor without retaining a full registration in the raw
-            // task.
-            let markerCandidates = orderedBatchIDs.map { itemID in
-                (
-                    itemID: itemID,
-                    canvasDirectory: assetStore.directories(for: itemID).canvas
-                )
-            }
-            let markerScan = Task.detached(priority: .utility) {
-                var pending = Set<UUID>()
-                pending.reserveCapacity(min(markerCandidates.count, 16))
-                for candidate in markerCandidates {
-                    guard Task.isCancelled == false else { break }
-                    if AssistantRecoveryMarkerStore.isPending(
-                        in: candidate.canvasDirectory
-                    ) {
-                        pending.insert(candidate.itemID)
-                    }
-                }
-                return pending
-            }
-            let pendingRecoveryItemIDs: Set<UUID>
-            if stopsWhenCancelled {
-                pendingRecoveryItemIDs = await withTaskCancellationHandler {
-                    await markerScan.value
-                } onCancel: {
-                    markerScan.cancel()
-                }
-            } else {
-                pendingRecoveryItemIDs = await markerScan.value
-            }
-            // 'NotebookIndex.replaceRegisteredItems' also stopped before the
-            // next registration when its task was cancelled, even for the
-            // correctness-critical caller that lets the marker scan drain.
-            guard Task.isCancelled == false else { return nil }
-            for itemID in orderedBatchIDs {
-                guard Task.isCancelled == false else { return nil }
-                // Resolve exactly one MainActor model and immediately copy its
-                // value fields. The model's lifetime ends inside this helper,
-                // before registration suspends on the NotebookIndex actor.
-                guard let source = assistantIndexedItemForMaintenance(
-                    itemID: itemID,
-                    checksRecoveryMarker: false
-                ) else { continue }
-                let item = if pendingRecoveryItemIDs.contains(itemID) {
-                    AssistantIndexedItem(
-                        itemID: source.itemID,
-                        itemName: source.itemName,
-                        kind: source.kind,
-                        parentID: source.parentID,
-                        canvasDirectory: source.canvasDirectory,
-                        fallbackSearchableText: source.fallbackSearchableText,
-                        expectedGeneration: source.expectedGeneration,
-                        requiresVerifiedRecovery: true
-                    )
-                } else {
-                    source
-                }
-                visitedItemIDs.insert(itemID)
-                // The callback brackets the only full-text DTO retained by
-                // this scan. It is a DEBUG-observable regression seam and also
-                // documents the production high-water invariant.
-                didUpdateMaterializedFallbackBytes?(
-                    item.fallbackSearchableText.utf8.count
-                )
-                await visit(item)
-                withExtendedLifetime(item) {}
-                didUpdateMaterializedFallbackBytes?(0)
-            }
-            lowerBound = upperBound
-        }
-        return visitedItemIDs
-    }
-
-    private func assistantIndexedItemIDsForMaintenance() -> [UUID] {
-        repository.items.compactMap { item in
-            guard item.payloadState == .ready,
-                item.isTrashed == false,
-                item.kind == .notebook
-                || item.kind == .importedDocument else { return nil }
-            return item.id
-        }
-    }
-
-    #if DEBUG
-    /// Test-only seam for deterministically mutating the catalog while a
-    /// maintenance snapshot is suspended. Release builds expose no additional
-    /// coordinator surface.
-    func assistantIndexedItemIDsForMaintenanceForTesting(
-        didUpdateMaterializedFallbackBytes: (@MainActor (Int) -> Void)? = nil,
-        didYieldBatch: @escaping @MainActor () -> Void
-    ) async -> [UUID] {
-        let visited = await visitAssistantIndexedItemsForMaintenance(
-            stopsWhenCancelled: false,
-            didYieldBatch: didYieldBatch,
-            didUpdateMaterializedFallbackBytes:
-                didUpdateMaterializedFallbackBytes,
-            visit: { _ in }
-        ) ?? []
-        return visited.sorted { $0.uuidString < $1.uuidString }
-    }
-    #endif
-
-    private func assistantIndexedItemForMaintenance(
-        itemID: UUID,
-        checksRecoveryMarker: Bool = true
-    ) -> AssistantIndexedItem? {
-        guard let item = repository.item(id: itemID) else { return nil }
-        return assistantIndexedItemForMaintenance(
-            record: item,
-            checksRecoveryMarker: checksRecoveryMarker
-        )
-    }
-
-    private func assistantIndexedItemForMaintenance(
-        record item: LibraryItemRecord,
-        checksRecoveryMarker: Bool
-    ) -> AssistantIndexedItem? {
-        guard item.payloadState == .ready,
-            item.isTrashed == false,
-            item.kind == .notebook || item.kind == .importedDocument else { return nil }
-        return AssistantIndexedItem(
-            itemID: item.id,
-            itemName: item.name,
-            kind: item.kind,
-            parentID: item.parentID,
-            canvasDirectory: assetStore.directories(for: item.id).canvas,
-            fallbackSearchableText: item.searchableText,
-            expectedGeneration: item.previewGeneration,
-            requiresVerifiedRecovery: checksRecoveryMarker
-                && assistantRecoveryMarkerIsPending(itemID: item.id)
-        )
-    }
-
-    private func assistantRecoveryMarkerIsPending(itemID: UUID) -> Bool {
-        AssistantRecoveryMarkerStore.isPending(
-            in: assetStore.directories(for: itemID).canvas
-        )
-    }
-
-    private func synchronizeAssistantCatalogItems(
-        _ itemIDs: Set<UUID>,
-        didUpdateMaterializedFallbackBytes: (@MainActor (Int) -> Void)? = nil
-    ) async {
-        guard itemIDs.isEmpty == false else { return }
-        guard let activeIDs = await visitAssistantIndexedItemsForMaintenance(
-            itemIDs: itemIDs.sorted { $0.uuidString < $1.uuidString },
-            stopsWhenCancelled: false,
-            didUpdateMaterializedFallbackBytes:
-                didUpdateMaterializedFallbackBytes,
-            visit: { item in
-                await assistantIndex.register([item])
-            }
-        ) else { return }
-        await assistantIndex.unregister(itemIDs.subtracting(activeIDs))
-    }
-
-    #if DEBUG
-    func synchronizeAssistantCatalogItemsForTesting(
-        _ itemIDs: Set<UUID>,
-        didUpdateMaterializedFallbackBytes: @escaping @MainActor (Int) -> Void
-    ) async {
-        await synchronizeAssistantCatalogItems(
-            itemIDs,
-            didUpdateMaterializedFallbackBytes:
-                didUpdateMaterializedFallbackBytes
-        )
-    }
-    #endif
-
-    private func scheduleAssistantCatalogSynchronization(
-        itemIDs: Set<UUID>
-    ) {
-        guard itemIDs.isEmpty == false else { return }
-        // A full startup snapshot predating this mutation must not reconcile
-        // afterward and remove the freshly updated item.
-        assistantLibraryPreparationTask?.cancel()
-        let predecessor = assistantCatalogMutationTask
-        let taskID = UUID()
-        assistantCatalogMutationID = taskID
-        assistantCatalogMutationTask = Task(priority: .utility) {
-            @MainActor [weak self] in
-            await predecessor?.value
-            guard let self else { return }
-            await self.synchronizeAssistantCatalogItems(itemIDs)
-            if self.assistantCatalogMutationID == taskID {
-                self.assistantCatalogMutationTask = nil
-                self.assistantCatalogMutationID = nil
-            }
-        }
-    }
-
-    private func refreshAssistantCatalogRegistration() async {
-        let predecessor = assistantCatalogMutationTask
-        let taskID = UUID()
-        assistantCatalogMutationID = taskID
-        let task = Task(priority: .utility) {
-            @MainActor [weak self] in
-            await predecessor?.value
-            guard let self else { return }
-            let reconciliation = await self.assistantIndex
-                .beginRegisteredItemReconciliation()
-            guard let desiredItemIDs = await self
-                .visitAssistantIndexedItemsForMaintenance(
-                    stopsWhenCancelled: false,
-                    visit: { item in
-                        await self.assistantIndex.register([item])
-                    }
-                ) else { return }
-            await self.assistantIndex.finishRegisteredItemReconciliation(
-                reconciliation,
-                desiredItemIDs: desiredItemIDs
-            )
-        }
-        assistantCatalogMutationTask = task
-        await task.value
-        if assistantCatalogMutationID == taskID {
-            assistantCatalogMutationTask = nil
-            assistantCatalogMutationID = nil
-        }
-    }
-
-    private func navigateToAssistantSource(_ anchor: AssistantSourceAnchor) {
-        // A resolved source belongs to an editor-owned assistant. If that
-        // editor was closed while resolution was in flight, the result is no
-        // longer a user-visible navigation request and must not reopen it.
-        guard isCatalogWritable, activeEditor != nil else { return }
-        guard let item = repository.item(id: anchor.itemID),
-            item.payloadState == .ready,
-            item.isTrashed == false,
-            item.kind == .notebook
-            || item.kind == .importedDocument else {
-            alertMessage = "That source is no longer available in the library."
-            return
-        }
-
-        pendingAssistantSourceNavigation = AssistantSourceNavigationRequest(
-            id: UUID(),
-            anchor: anchor
-        )
-        suspendAssistantBackgroundMaintenance()
-        startPendingAssistantSourceNavigationIfPossible()
-    }
-
-    private func startPendingAssistantSourceNavigationIfPossible() {
-        guard assistantSourceNavigation == nil,
-            let request = pendingAssistantSourceNavigation,
-            isCatalogWritable,
-            let precedingEditor = activeEditor else { return }
-
-        if precedingEditor.itemID == request.anchor.itemID {
-            pendingAssistantSourceNavigation = nil
-            precedingEditor.model.navigateToAssistantSource(
-                pageID: request.anchor.pageID,
-                pageBounds: request.anchor.pageBounds
-            )
-            return
-        }
-
-        let navigationID = UUID()
-        let precedingModelID = ObjectIdentifier(precedingEditor.model)
-        let task = Task { @MainActor [weak self, precedingEditor] in
-            var flushedModelID: ObjectIdentifier?
-            defer {
-                self?.finishAssistantSourceFlush(
-                    navigationID,
-                    flushedModelID: flushedModelID
-                )
-            }
-            #if DEBUG
-            await self?.assistantSourceNavigationSuspensionForTesting?()
-            #endif
-            guard let self,
-                Task.isCancelled == false,
-                self.assistantSourceNavigation?.id == navigationID else {
-                return
-            }
-            await precedingEditor.model.flushForLifecycle()
-            guard Task.isCancelled == false,
-                self.assistantSourceNavigation?.id == navigationID else {
-                return
-            }
-            flushedModelID = precedingModelID
-        }
-        assistantSourceNavigation = (navigationID, task)
-    }
-
-    private func finishAssistantSourceFlush(
-        _ navigationID: UUID,
-        flushedModelID: ObjectIdentifier?
-    ) {
-        guard assistantSourceNavigation?.id == navigationID else { return }
-        assistantSourceNavigation = nil
-        if let flushedModelID {
-            scheduleAssistantSourceInstallation(afterFlushing: flushedModelID)
-        } else {
-            schedulePendingAssistantSourceNavigationResume()
-        }
-    }
-
-    private func scheduleAssistantSourceInstallation(
-        afterFlushing flushedModelID: ObjectIdentifier
-    ) {
-        guard assistantSourceNavigation == nil,
-            pendingAssistantSourceNavigation != nil,
-            let currentModel = activeEditor?.model,
-            ObjectIdentifier(currentModel) == flushedModelID else {
-            schedulePendingAssistantSourceNavigationResume()
-            return
-        }
-        let navigationID = UUID()
-        let task = Task { @MainActor [weak self] in
-            defer {
-                self?.finishAssistantSourceInstallation(navigationID)
-            }
-            // The flush task calls this method from its `defer` and still owns
-            // the outgoing editor until it returns. Yield before resolving or
-            // constructing the destination so that model can be released.
-            await Task.yield()
-            guard let self,
-                Task.isCancelled == false,
-                self.assistantSourceNavigation?.id == navigationID else {
-                return
-            }
-            await self.installLatestAssistantSourceNavigation(
-                navigationID: navigationID,
-                flushedModelID: flushedModelID
-            )
-        }
-        assistantSourceNavigation = (navigationID, task)
-    }
-
-    private func installLatestAssistantSourceNavigation(
-        navigationID: UUID,
-        flushedModelID: ObjectIdentifier
-    ) async {
-        guard assistantSourceNavigation?.id == navigationID,
-            Task.isCancelled == false,
-            let currentModel = activeEditor?.model,
-            ObjectIdentifier(currentModel) == flushedModelID,
-            let request = pendingAssistantSourceNavigation else { return }
-
-        guard isCatalogWritable,
-            let item = repository.item(id: request.anchor.itemID),
-            item.payloadState == .ready,
-            item.isTrashed == false,
-            item.kind == .notebook || item.kind == .importedDocument else {
-            if pendingAssistantSourceNavigation?.id == request.id {
-                pendingAssistantSourceNavigation = nil
-                alertMessage = "That source is no longer available in the library."
-            }
-            return
-        }
-
-        if activeEditor?.itemID == item.id {
-            guard pendingAssistantSourceNavigation?.id == request.id else { return }
-            pendingAssistantSourceNavigation = nil
-            activeEditor?.model.navigateToAssistantSource(
-                pageID: request.anchor.pageID,
-                pageBounds: request.anchor.pageBounds
-            )
-            return
-        }
-
-        #if DEBUG
-        payloadOpenObserverForTesting?(item.id)
-        #endif
-        guard let editor = makeAssistantSourceDestination(
-            item: item,
-            flushedModelID: flushedModelID
-        ) else { return }
-        await editor.model.start()
-
-        // `start()` yields while restoring the destination. A newer source tap
-        // or an explicit close may have superseded this request meanwhile.
-        // Never apply the stale page reveal-or resurrect an editor cleared by
-        // close-after that suspension point.
-        guard assistantSourceNavigation?.id == navigationID,
-            Task.isCancelled == false,
-            activeEditor?.model == editor.model,
-            pendingAssistantSourceNavigation?.id == request.id else { return }
-        pendingAssistantSourceNavigation = nil
-        editor.assistant.updateCurrentPage(editor.model.currentPageIDForAssistant)
-        editor.model.navigateToAssistantSource(
-            pageID: request.anchor.pageID,
-            pageBounds: request.anchor.pageBounds
-        )
-    }
-
-    /// This synchronous handoff deliberately keeps the outgoing editor local
-    /// only until `activeEditor` is replaced. The async destination startup
-    /// receives just the new editor, so it cannot retain both models.
-    private func makeAssistantSourceDestination(
-        item: LibraryItemRecord,
-        flushedModelID: ObjectIdentifier
-    ) -> ActiveEditor? {
-        guard let precedingEditor = activeEditor,
-            ObjectIdentifier(precedingEditor.model) == flushedModelID else {
-            return nil
-        }
-        let editor = makeActiveEditor(for: item, reusing: precedingEditor.assistant)
-        activeAttachment = nil
-        activeEditor = editor
-        route = Self.editorRoute(for: item)
-        scheduleAssistantLibraryPreparation()
-        return editor
-    }
-
-    private func finishAssistantSourceInstallation(_ navigationID: UUID) {
-        guard assistantSourceNavigation?.id == navigationID else { return }
-        assistantSourceNavigation = nil
-        schedulePendingAssistantSourceNavigationResume()
-    }
-
-    private func schedulePendingAssistantSourceNavigationResume() {
-        guard assistantSourceNavigation == nil,
-            pendingAssistantSourceNavigation != nil,
-            activeEditor != nil else { return }
-        // Release the outgoing task's captured editor before another source
-        // transition is allowed to retain the now-visible model.
-        Task { @MainActor [weak self] in
-            await Task.yield()
-            self?.startPendingAssistantSourceNavigationIfPossible()
-        }
-    }
-
-    private func cancelAssistantSourceNavigation() {
-        pendingAssistantSourceNavigation = nil
-        assistantSourceNavigation?.task.cancel()
-    }
-
-    private static func editorRoute(for item: LibraryItemRecord) -> NotateAppRoute {
-        switch item.kind {
-        case .notebook: .notebook(item.id)
-        case .canvas, .legacyTypedNote: .home
-        case .importedDocument: .document(item.id)
-        case .attachment: .attachment(item.id)
-        case .folder: .folder(item.id)
-        }
+    private func makeActiveEditor(for item: LibraryItemRecord) -> ActiveEditor {
+        ActiveEditor(item: item, model: makeEditorModel(for: item))
     }
 
     private func makeEditorModel(for item: LibraryItemRecord) -> CanvasEditorModel {
@@ -2048,7 +1247,6 @@ final class NotateApplicationCoordinator {
                 pageCount: snapshot.pages.count,
                 previewGeneration: previewGeneration
             )
-            scheduleAssistantCatalogSynchronization(itemIDs: [item.id])
             if let refreshed = repository.item(id: item.id) {
                 open(refreshed)
             }
@@ -2065,7 +1263,6 @@ final class NotateApplicationCoordinator {
     func renameEditorItem(id: UUID, to name: String) throws {
         try requireCatalogWritable()
         try repository.renameItem(id: id, to: name)
-        scheduleAssistantCatalogSynchronization(itemIDs: [id])
     }
 
     private func updateFolder(id: UUID, draft: LibraryFolderDraft) {
@@ -2284,7 +1481,6 @@ final class NotateApplicationCoordinator {
             searchableText: searchableText,
             previewGeneration: previewGeneration
         )
-        scheduleAssistantCatalogSynchronization(itemIDs: [item.id])
     }
 
     private func toggleFavorite(id: UUID) {
@@ -2309,16 +1505,13 @@ final class NotateApplicationCoordinator {
                 )
                 try requireCatalogWritable()
                 _ = try repository.completeDuplication(prepared)
-                scheduleAssistantCatalogSynchronization(
-                    itemIDs: Set(prepared.sourceToDuplicateItemIDs.values)
-                )
             } catch {
                 if isCatalogWritable, let plan {
-                    let targetIDs = (try? repository.cancelDuplication(plan)
-                        ?? Array(plan.sourceToDuplicateItemIDs.values))
+                    let targetIDs = (try? repository.cancelDuplication(plan))
+                        ?? Array(plan.sourceToDuplicateItemIDs.values)
                     for targetID in targetIDs {
                         if let recovery = try? await assetStore.moveItemAssetsToRecoveryTrash(
-                            id: targetID
+                            itemID: targetID
                         ) {
                             try? await assetStore.discardRecoveryItem(at: recovery)
                         }
@@ -2342,7 +1535,6 @@ final class NotateApplicationCoordinator {
                 throw LibraryRepositoryError.itemNotReady(parentID)
             }
             try repository.moveItems(ids: ids, toParentID: parentID)
-            scheduleAssistantCatalogSynchronization(itemIDs: ids)
             return true
         } catch {
             alertMessage = error.localizedDescription
@@ -2354,7 +1546,6 @@ final class NotateApplicationCoordinator {
         guard isCatalogWritable else { return }
         do {
             try repository.moveToTrash(itemIDs: ids)
-            scheduleAssistantCatalogSynchronization(itemIDs: ids)
         } catch {
             alertMessage = error.localizedDescription
         }
@@ -2364,7 +1555,6 @@ final class NotateApplicationCoordinator {
         guard isCatalogWritable else { return }
         do {
             for id in ids { try repository.restoreFromTrash(itemID: id) }
-            scheduleAssistantCatalogSynchronization(itemIDs: ids)
         } catch {
             alertMessage = error.localizedDescription
         }
@@ -2557,8 +1747,7 @@ final class NotateApplicationCoordinator {
         await store.releaseImportedSourceReservation(sourceReservation)
         await refreshCompatibilityDerivedData(
             itemID: restoration.ownerItemID,
-            minimumGeneration: publishedGeneration,
-            refreshesAssistantCatalog: true
+            minimumGeneration: publishedGeneration
         )
     }
 
@@ -2785,7 +1974,6 @@ final class NotateApplicationCoordinator {
                 searchableText: searchableText,
                 previewGeneration: previewGeneration
             )
-            scheduleAssistantCatalogSynchronization(itemIDs: [item.id])
             if opensOnSuccess,
                 let refreshed = repository.item(id: item.id) {
                 open(refreshed)
@@ -2850,252 +2038,101 @@ final class NotateApplicationCoordinator {
         }
     }
 
-    private func publishAssistantIndex(
+    /// Resolves the editor's latest verified checkpoint and, when Canvas Core
+    /// promoted an older recovery head, fences the stale preview and catalog
+    /// generation before derived data is rebuilt. Returns the verified
+    /// generation, or nil when the checkpoint is not safe to publish from.
+    private func verifiedGenerationForDerivedRefresh(
         itemID: UUID,
-        model: CanvasEditorModel,
-        foregroundEnrichmentDeadline: ContinuousClock.Instant? = nil
+        model: CanvasEditorModel
     ) async -> Int64? {
-        let clock = ContinuousClock()
-        let attemptCount = foregroundEnrichmentDeadline == nil ? 1 : 2
+        guard !Task.isCancelled,
+            isCatalogWritable,
+            let initialItem = repository.item(id: itemID),
+            initialItem.payloadState == .ready,
+            initialItem.isTrashed == false,
+            initialItem.kind == .notebook
+            || initialItem.kind == .importedDocument else { return nil }
 
-        for attempt in 0..<attemptCount {
-            guard !Task.isCancelled,
-                isCatalogWritable,
-                foregroundEnrichmentDeadline.map({ clock.now < $0 }) ?? true,
-                let initialItem = repository.item(id: itemID),
-                initialItem.payloadState == .ready,
-                initialItem.isTrashed == false,
-                initialItem.kind == .notebook
-                || initialItem.kind == .importedDocument else { return nil }
-
-            let snapshot: CanvasCoreSnapshot
-            if let verified = model.latestVerifiedIndexSnapshot,
-                verified.generation == model.verifiedCheckpointGeneration {
-                snapshot = verified
-            } else {
-                // Recovery-only fallback for callers that predate the in-memory
-                // verified-snapshot handoff.
-                let store = CanvasCoreStore(
-                    rootURL: assetStore.directories(for: itemID).canvas
-                )
-                let loadTask = Task.detached(
-                    priority: foregroundEnrichmentDeadline == nil
-                        ? .utility
-                        : .userInitiated
-                ) {
-                    await store.load()
-                }
-                let loadResult: CanvasCoreLoadResult
-                if let foregroundEnrichmentDeadline {
-                    let outcome = await assistantImageTaskOutcome(
-                        of: loadTask,
-                        until: foregroundEnrichmentDeadline
-                    )
-                    guard case let .value(value) = outcome else { return nil }
-                    loadResult = value
-                } else {
-                    loadResult = await loadTask.value
-                }
-                guard case let .restored(restored) = loadResult else {
-                    return nil
-                }
-                snapshot = restored
-            }
-            let indexDelta = model.latestVerifiedIndexDelta.flatMap { delta in
-                delta.generation == snapshot.generation ? delta : nil
-            }
-
-            guard !Task.isCancelled,
-                isCatalogWritable,
-                foregroundEnrichmentDeadline.map({ clock.now < $0 }) ?? true,
-                var item = repository.item(id: itemID),
-                item.payloadState == .ready,
-                item.isTrashed == false,
-                item.kind == .notebook
-                || item.kind == .importedDocument else { return nil }
-
-            if item.previewGeneration > snapshot.generation
-                || assistantRecoveryMarkerIsPending(itemID: itemID) {
-                // Canvas Core has already promoted this recovered checkpoint as
-                // the durable head. Fence every newer retrieval surface and
-                // rebuild it; the higher preview generation remains a durable
-                // recovery marker until the replacement thumbnail commits.
-                guard model.saveState == .saved,
-                    model.verifiedCheckpointGeneration == snapshot.generation,
-                    (model.latestVerifiedIndexSnapshot?.generation
-                    ?? snapshot.generation) == snapshot.generation,
-                    !Task.isCancelled,
-                    foregroundEnrichmentDeadline.map({ clock.now < $0 })
-                    ?? true,
-                    let recoveryToken = await assistantIndex
-                    .recoveryRegistrationToken(itemID: itemID),
-                    model.saveState == .saved,
-                    model.verifiedCheckpointGeneration == snapshot.generation,
-                    (model.latestVerifiedIndexSnapshot?.generation
-                    ?? snapshot.generation) == snapshot.generation,
-                    !Task.isCancelled,
-                    foregroundEnrichmentDeadline.map({ clock.now < $0 })
-                    ?? true,
-                    let refreshedItem = repository.item(id: itemID),
-                    refreshedItem.payloadState == .ready,
-                    refreshedItem.isTrashed == false,
-                    refreshedItem.previewGeneration > snapshot.generation
-                    || assistantRecoveryMarkerIsPending(itemID: itemID),
-                    refreshedItem.kind == .notebook
-                    || refreshedItem.kind == .importedDocument else {
-                    guard attempt + 1 < attemptCount else { return nil }
-                    await Task.yield()
-                    continue
-                }
-                item = refreshedItem
-                let recoveryRegistration = AssistantIndexedItem(
-                    itemID: item.id,
-                    itemName: item.name,
-                    kind: item.kind,
-                    parentID: item.parentID,
-                    canvasDirectory: assetStore.directories(for: item.id).canvas,
-                    fallbackSearchableText: "",
-                    expectedGeneration: snapshot.generation
-                )
-                guard await assistantIndex.reconcileVerifiedRecoveryRegistration(
-                    recoveryRegistration,
-                    expected: recoveryToken
-                ),
-                model.saveState == .saved,
-                model.verifiedCheckpointGeneration == snapshot.generation,
-                (model.latestVerifiedIndexSnapshot?.generation
-                ?? snapshot.generation) == snapshot.generation,
-                !Task.isCancelled,
-                foregroundEnrichmentDeadline.map({ clock.now < $0 }) ?? true else {
-                    guard attempt + 1 < attemptCount else { return nil }
-                    await Task.yield()
-                    continue
-                }
-
-                // `library.png` has no embedded generation stamp. Its physical
-                // removal is therefore part of the recovery fence, not a
-                // best-effort cache hint. On failure the durable higher preview
-                // marker remains and a bounded retry can try again safely.
-                let thumbnailURL = assetStore.directories(for: itemID)
-                    .thumbnails
-                    .appendingPathComponent("library.png", isDirectory: false)
-                let thumbnailFenced: Bool
-                do {
-                    if FileManager.default.fileExists(atPath: thumbnailURL.path) {
-                        try FileManager.default.removeItem(at: thumbnailURL)
-                    }
-                    thumbnailFenced = FileManager.default.fileExists(
-                        atPath: thumbnailURL.path
-                    ) == false
-                } catch {
-                    thumbnailFenced = false
-                }
-                guard thumbnailFenced else {
-                    guard attempt + 1 < attemptCount else { return nil }
-                    await Task.yield()
-                    continue
-                }
-
-                do {
-                    _ = try repository.reconcileRecoveredPayload(
-                        itemID: itemID,
-                        verifiedGeneration: snapshot.generation,
-                        pageCount: snapshot.pages.count
-                    )
-                } catch {
-                    return nil
-                }
-                guard let recoveredItem = repository.item(id: itemID) else {
-                    return nil
-                }
-                item = recoveredItem
-                await librarySession.thumbnailStore.invalidate(itemIDs: [itemID])
-                guard model.saveState == .saved,
-                    model.verifiedCheckpointGeneration == snapshot.generation,
-                    (model.latestVerifiedIndexSnapshot?.generation
-                    ?? snapshot.generation) == snapshot.generation,
-                    !Task.isCancelled,
-                    foregroundEnrichmentDeadline.map({ clock.now < $0 })
-                    ?? true else {
-                    guard attempt + 1 < attemptCount else { return nil }
-                    await Task.yield()
-                    continue
-                }
-                if foregroundEnrichmentDeadline != nil {
-                    // Persist the repair intent before another suspension can
-                    // reject foreground indexing. The coalesced task rebuilds
-                    // search metadata and the thumbnail from the verified head.
-                    scheduleDerivedLibraryRefresh(itemID: itemID, model: model)
-                }
-            }
-
-            let indexedItem = AssistantIndexedItem(
-                itemID: item.id,
-                itemName: item.name,
-                kind: item.kind,
-                parentID: item.parentID,
-                canvasDirectory: assetStore.directories(for: item.id).canvas,
-                fallbackSearchableText: item.searchableText,
-                expectedGeneration: snapshot.generation
+        let snapshot: CanvasCoreSnapshot
+        if let verified = model.latestVerifiedIndexSnapshot,
+            verified.generation == model.verifiedCheckpointGeneration {
+            snapshot = verified
+        } else {
+            // Recovery-only fallback when the in-memory verified snapshot is
+            // unavailable.
+            let store = CanvasCoreStore(
+                rootURL: assetStore.directories(for: itemID).canvas
             )
-            let accepted: Bool
-            if let foregroundEnrichmentDeadline {
-                var preferredPageIDs = [snapshot.currentPageID]
-                if let indexDelta {
-                    preferredPageIDs.append(contentsOf: indexDelta.changedPageIDs)
-                }
-                // The current page is always first. A small number of additional
-                // freshly changed pages are the urgent foreground set. The
-                // image worker adds a tiny rotating continuation window and
-                // checkpoints each whole page, so repeated requests/reopens
-                // advance later visual-only pages without a library-wide scan.
-                var seenPageIDs = Set<UUID>()
-                preferredPageIDs = Array(
-                    preferredPageIDs
-                        .filter { seenPageIDs.insert($0).inserted }
-                        .prefix(4)
-                )
-                accepted = await assistantIndex.indexForForegroundRequest(
-                    snapshot: snapshot,
-                    item: indexedItem,
-                    delta: indexDelta,
-                    preferredPageIDs: preferredPageIDs,
-                    enrichmentDeadline: foregroundEnrichmentDeadline
-                )
-            } else {
-                accepted = await assistantIndex.index(
-                    snapshot: snapshot,
-                    item: indexedItem,
-                    delta: indexDelta
-                )
-            }
-
-            guard accepted,
-                !Task.isCancelled,
-                isCatalogWritable,
-                let current = repository.item(id: itemID),
-                current.payloadState == .ready,
-                current.isTrashed == false else {
-                guard attempt + 1 < attemptCount,
-                    foregroundEnrichmentDeadline.map({ clock.now < $0 })
-                    ?? false else { return nil }
-                await Task.yield()
-                continue
-            }
-            guard model.verifiedCheckpointGeneration == snapshot.generation else {
-                guard attempt + 1 < attemptCount,
-                    foregroundEnrichmentDeadline.map({ clock.now < $0 })
-                    ?? false else { return nil }
-                await Task.yield()
-                continue
-            }
-            return snapshot.generation
+            let loadResult = await Task.detached(priority: .utility) {
+                await store.load()
+            }.value
+            guard case let .restored(restored) = loadResult else { return nil }
+            snapshot = restored
         }
-        return nil
+
+        guard !Task.isCancelled,
+            isCatalogWritable,
+            let item = repository.item(id: itemID),
+            item.payloadState == .ready,
+            item.isTrashed == false,
+            item.kind == .notebook
+            || item.kind == .importedDocument else { return nil }
+
+        if item.previewGeneration > snapshot.generation {
+            // Canvas Core has already promoted this recovered checkpoint as
+            // the durable head. The higher preview generation remains a
+            // durable recovery marker until the replacement thumbnail commits.
+            guard model.saveState == .saved,
+                model.verifiedCheckpointGeneration == snapshot.generation,
+                !Task.isCancelled else { return nil }
+
+            // `library.png` has no embedded generation stamp. Its physical
+            // removal is therefore part of the recovery fence, not a
+            // best-effort cache hint.
+            let thumbnailURL = assetStore.directories(for: itemID)
+                .thumbnails
+                .appendingPathComponent("library.png", isDirectory: false)
+            let thumbnailFenced: Bool
+            do {
+                if FileManager.default.fileExists(atPath: thumbnailURL.path) {
+                    try FileManager.default.removeItem(at: thumbnailURL)
+                }
+                thumbnailFenced = FileManager.default.fileExists(
+                    atPath: thumbnailURL.path
+                ) == false
+            } catch {
+                thumbnailFenced = false
+            }
+            guard thumbnailFenced else { return nil }
+
+            do {
+                _ = try repository.reconcileRecoveredPayload(
+                    itemID: itemID,
+                    verifiedGeneration: snapshot.generation,
+                    pageCount: snapshot.pages.count
+                )
+            } catch {
+                return nil
+            }
+            await librarySession.thumbnailStore.invalidate(itemIDs: [itemID])
+            guard model.saveState == .saved,
+                model.verifiedCheckpointGeneration == snapshot.generation,
+                !Task.isCancelled else { return nil }
+        }
+
+        guard !Task.isCancelled,
+            isCatalogWritable,
+            let current = repository.item(id: itemID),
+            current.payloadState == .ready,
+            current.isTrashed == false,
+            model.verifiedCheckpointGeneration == snapshot.generation else {
+            return nil
+        }
+        return snapshot.generation
     }
 
-    /// Coalesces the complete post-checkpoint pipeline, including assistant
-    /// indexing. A successor drains its cancelled predecessor before starting,
+    /// Coalesces the complete post-checkpoint pipeline. A successor drains its cancelled predecessor before starting,
     /// so frequent autosaves cannot build a queue of extraction and thumbnail
     /// work while the user is still writing.
     private func scheduleDerivedLibraryRefresh(
@@ -3115,8 +2152,7 @@ final class NotateApplicationCoordinator {
             guard !Task.isCancelled else { return }
             // A verified save does not mean the writer is finished. Give
             // Pencil and keyboard input a genuine quiet window before doing
-            // disposable indexing/preview work. A foreground assistant request
-            // bypasses this debounce through 'prepareForAssistantRequest()'.
+            // disposable indexing/preview work.
             try? await Task.sleep(for: .milliseconds(1_500))
             guard !Task.isCancelled, let self, let model,
                 self.isCatalogWritable,
@@ -3126,7 +2162,7 @@ final class NotateApplicationCoordinator {
                     self.derivedRefreshes.removeValue(forKey: itemID)
                 }
             }
-            guard let generation = await self.publishAssistantIndex(
+            guard let generation = await self.verifiedGenerationForDerivedRefresh(
                 itemID: itemID,
                 model: model
             ) else { return }
@@ -3247,8 +2283,7 @@ final class NotateApplicationCoordinator {
     private func failCloseCompatibilityDerivedProjection(
         itemID: UUID,
         claim: CompatibilityDerivedRefreshClaim,
-        pageCount: Int?,
-        assistantProjectionWasRegistered: Bool
+        pageCount: Int?
     ) async -> Bool {
         guard compatibilityDerivedRefreshIsCurrent(claim, itemID: itemID) else {
             return false
@@ -3274,10 +2309,6 @@ final class NotateApplicationCoordinator {
                 )
             catalogWasFenced = false
         }
-        if assistantProjectionWasRegistered,
-            compatibilityDerivedRefreshIsCurrent(claim, itemID: itemID) {
-            await assistantIndex.invalidate(itemID: itemID)
-        }
         return catalogWasFenced
     }
 
@@ -3285,10 +2316,8 @@ final class NotateApplicationCoordinator {
         store: CanvasCoreStore,
         claim: CompatibilityDerivedRefreshClaim,
         itemID: UUID,
-        refreshesAssistantCatalog: Bool,
         retryAttempt: Int,
-        fencesPublishedProjectionOnMismatch: Bool = false,
-        assistantProjectionWasRegistered: Bool = false
+        fencesPublishedProjectionOnMismatch: Bool = false
     ) async -> Bool {
         guard compatibilityDerivedRefreshIsCurrent(claim, itemID: itemID) else {
             return false
@@ -3302,9 +2331,7 @@ final class NotateApplicationCoordinator {
                 _ = await failCloseCompatibilityDerivedProjection(
                     itemID: itemID,
                     claim: claim,
-                    pageCount: nil,
-                    assistantProjectionWasRegistered:
-                        assistantProjectionWasRegistered
+                    pageCount: nil
                 )
             }
             guard compatibilityDerivedRefreshIsCurrent(
@@ -3314,7 +2341,6 @@ final class NotateApplicationCoordinator {
             scheduleCompatibilityDerivedRetry(
                 itemID: itemID,
                 minimumGeneration: claim.generation,
-                refreshesAssistantCatalog: refreshesAssistantCatalog,
                 nextAttempt: retryAttempt + 1
             )
             return false
@@ -3329,9 +2355,7 @@ final class NotateApplicationCoordinator {
                 _ = await failCloseCompatibilityDerivedProjection(
                     itemID: itemID,
                     claim: claim,
-                    pageCount: head.pages.count,
-                    assistantProjectionWasRegistered:
-                        assistantProjectionWasRegistered
+                    pageCount: head.pages.count
                 )
             }
             guard compatibilityDerivedRefreshIsCurrent(
@@ -3356,7 +2380,6 @@ final class NotateApplicationCoordinator {
             scheduleCompatibilityDerivedRetry(
                 itemID: itemID,
                 minimumGeneration: head.generation,
-                refreshesAssistantCatalog: refreshesAssistantCatalog,
                 nextAttempt: retryAttempt + 1
             )
             return false
@@ -3408,7 +2431,6 @@ final class NotateApplicationCoordinator {
     private func refreshCompatibilityDerivedData(
         itemID: UUID,
         minimumGeneration: Int64,
-        refreshesAssistantCatalog: Bool = false,
         retryAttempt: Int = 0
     ) async {
         guard isCatalogWritable,
@@ -3450,7 +2472,6 @@ final class NotateApplicationCoordinator {
             store: store,
             claim: refreshClaim,
             itemID: itemID,
-            refreshesAssistantCatalog: refreshesAssistantCatalog,
             retryAttempt: retryAttempt
         ),
         compatibilityDerivedRefreshIsCurrent(
@@ -3479,8 +2500,7 @@ final class NotateApplicationCoordinator {
         } catch {
             // Do not reload and certify repository.searchableText here: that
             // value is the older projection precisely because this write
-            // failed. The live assistant receives the local fresh value below;
-            // retries reload the authoritative Canvas snapshot, so diagnostic
+            // failed. Retries reload the authoritative Canvas snapshot, so diagnostic
             // state retains only its size rather than another full text copy.
             derivedCatalogPersistenceFailures[itemID] =
                 DerivedCatalogPersistenceFailure(
@@ -3491,7 +2511,6 @@ final class NotateApplicationCoordinator {
             scheduleCompatibilityDerivedRetry(
                 itemID: itemID,
                 minimumGeneration: snapshot.generation,
-                refreshesAssistantCatalog: refreshesAssistantCatalog,
                 nextAttempt: retryAttempt + 1
             )
             derivedProjectionPersisted = false
@@ -3500,48 +2519,9 @@ final class NotateApplicationCoordinator {
             store: store,
             claim: refreshClaim,
             itemID: itemID,
-            refreshesAssistantCatalog: refreshesAssistantCatalog,
             retryAttempt: retryAttempt,
             fencesPublishedProjectionOnMismatch: true
         ) else { return }
-        let recoveryMarkerWasPending = AssistantRecoveryMarkerStore.isPending(
-            in: canvasDirectory
-        )
-        var assistantProjectionWasRegistered = false
-        if refreshesAssistantCatalog, recoveryMarkerWasPending == false {
-            // 'previewGeneration' deliberately advances only after the card
-            // preview commits. Register this freshly persisted text with the
-            // verified Canvas generation directly, so a failed/slow preview
-            // cannot make the in-memory catalog keep its older projection.
-            if let item = repository.item(id: itemID) {
-                await assistantIndex.register([
-                    AssistantIndexedItem(
-                        itemID: itemID,
-                        itemName: item.name,
-                        kind: item.kind,
-                        parentID: item.parentID,
-                        canvasDirectory: assetStore.directories(for: item.id).canvas,
-                        fallbackSearchableText: searchableText,
-                        expectedGeneration: snapshot.generation
-                    ),
-                ])
-                assistantProjectionWasRegistered = true
-            }
-            guard await compatibilityDerivedHeadIsCurrent(
-                store: store,
-                claim: refreshClaim,
-                itemID: itemID,
-                refreshesAssistantCatalog: refreshesAssistantCatalog,
-                retryAttempt: retryAttempt,
-                fencesPublishedProjectionOnMismatch: true,
-                assistantProjectionWasRegistered:
-                    assistantProjectionWasRegistered
-            ),
-            compatibilityDerivedRefreshIsCurrent(
-                refreshClaim,
-                itemID: itemID
-            ) else { return }
-        }
         let preparedPreview = try? await LibraryPreviewPipeline.prepare(
             snapshot: snapshot,
             kind: kind
@@ -3559,17 +2539,14 @@ final class NotateApplicationCoordinator {
 
         // Re-read the verified head after all expensive extraction/rendering.
         // If a newer checkpoint landed while this task was suspended, the old
-        // bytes never reach the stable thumbnail path. Metadata and assistant
-        // registration already published by this producer are fenced too.
+        // bytes never reach the stable thumbnail path. Metadata already
+        // published by this producer is fenced too.
         guard await compatibilityDerivedHeadIsCurrent(
             store: store,
             claim: refreshClaim,
             itemID: itemID,
-            refreshesAssistantCatalog: refreshesAssistantCatalog,
             retryAttempt: retryAttempt,
-            fencesPublishedProjectionOnMismatch: true,
-            assistantProjectionWasRegistered:
-                assistantProjectionWasRegistered
+            fencesPublishedProjectionOnMismatch: true
         ),
         let preparedPreview,
         preparedPreview.generation == snapshot.generation else { return }
@@ -3591,71 +2568,14 @@ final class NotateApplicationCoordinator {
                 store: store,
                 claim: refreshClaim,
                 itemID: itemID,
-                refreshesAssistantCatalog: refreshesAssistantCatalog,
                 retryAttempt: retryAttempt,
-                fencesPublishedProjectionOnMismatch: true,
-                assistantProjectionWasRegistered:
-                    assistantProjectionWasRegistered
+                fencesPublishedProjectionOnMismatch: true
             ) else { return }
             // The card image is disposable, but its catalog generation also
             // certifies the searchable projection after restart. Never advance
             // that fence while SwiftData still contains older text.
             guard derivedProjectionPersisted else { return }
-            let recoveryMarkerIsPending = AssistantRecoveryMarkerStore.isPending(
-                in: canvasDirectory)
-            guard recoveryMarkerIsPending,
-                let repairItem = repository.item(id: itemID) else {
-                do {
-                    try repository.updateDerivedPayload(
-                        itemID: itemID,
-                        previewGeneration: committedPreviewGeneration
-                    )
-                } catch {
-                    return
-                }
-                await librarySession.thumbnailStore.invalidate(itemIDs: [itemID])
-                return
-            }
-            let repairRegistration = AssistantIndexedItem(
-                itemID: repairItem.id,
-                itemName: repairItem.name,
-                kind: repairItem.kind,
-                parentID: repairItem.parentID,
-                canvasDirectory: canvasDirectory,
-                fallbackSearchableText: repairItem.searchableText,
-                expectedGeneration: committedPreviewGeneration
-            )
-            guard let completionToken = await assistantIndex
-                .prepareVerifiedRecoveryCompletion(repairRegistration) else {
-                return
-            }
-            guard await compatibilityDerivedHeadIsCurrent(
-                store: store,
-                claim: refreshClaim,
-                itemID: itemID,
-                refreshesAssistantCatalog: refreshesAssistantCatalog,
-                retryAttempt: retryAttempt,
-                fencesPublishedProjectionOnMismatch: true,
-                assistantProjectionWasRegistered:
-                    assistantProjectionWasRegistered
-            ),
-            compatibilityDerivedRefreshIsCurrent(
-                refreshClaim,
-                itemID: itemID
-            ),
-            AssistantRecoveryMarkerStore.isPending(in: canvasDirectory),
-            let itemBeforeMarkerCommit = repository.item(id: itemID),
-            itemBeforeMarkerCommit.payloadState == .ready,
-            itemBeforeMarkerCommit.isTrashed == false,
-            itemBeforeMarkerCommit.name == repairItem.name,
-            itemBeforeMarkerCommit.kind == repairItem.kind,
-            itemBeforeMarkerCommit.parentID == repairItem.parentID,
-            itemBeforeMarkerCommit.searchableText
-                == repairItem.searchableText else { return }
             do {
-                // The actor has proven Spotlight, catalog, and OCR durability.
-                // This synchronous SwiftData mutation is now the only point at
-                // which the higher crash-recovery marker may be lowered.
                 try repository.updateDerivedPayload(
                     itemID: itemID,
                     previewGeneration: committedPreviewGeneration
@@ -3664,17 +2584,12 @@ final class NotateApplicationCoordinator {
                 return
             }
             await librarySession.thumbnailStore.invalidate(itemIDs: [itemID])
-            _ = await assistantIndex.completeVerifiedRecoveryRegistration(
-                repairRegistration,
-                expected: completionToken
-            )
         }
     }
 
     private func scheduleCompatibilityDerivedRetry(
         itemID: UUID,
         minimumGeneration: Int64,
-        refreshesAssistantCatalog: Bool,
         nextAttempt: Int
     ) {
         guard nextAttempt <= 3, isCatalogWritable else { return }
@@ -3704,7 +2619,6 @@ final class NotateApplicationCoordinator {
             await self.refreshCompatibilityDerivedData(
                 itemID: itemID,
                 minimumGeneration: minimumGeneration,
-                refreshesAssistantCatalog: refreshesAssistantCatalog,
                 retryAttempt: nextAttempt
             )
         }
@@ -3714,13 +2628,11 @@ final class NotateApplicationCoordinator {
     #if DEBUG
     func refreshCompatibilityDerivedDataForTesting(
         itemID: UUID,
-        minimumGeneration: Int64,
-        refreshesAssistantCatalog: Bool
+        minimumGeneration: Int64
     ) async {
         await refreshCompatibilityDerivedData(
             itemID: itemID,
-            minimumGeneration: minimumGeneration,
-            refreshesAssistantCatalog: refreshesAssistantCatalog
+            minimumGeneration: minimumGeneration
         )
     }
     #endif
@@ -3813,8 +2725,7 @@ final class NotateApplicationCoordinator {
             _ = await finishCommittedRecoveryTransaction(transaction)
             await refreshCompatibilityDerivedData(
                 itemID: asset.ownerItemID,
-                minimumGeneration: snapshot.generation,
-                refreshesAssistantCatalog: true
+                minimumGeneration: snapshot.generation
             )
         case .newDocument:
             try await assetStore.restoreRecoveryTransaction(transaction)
@@ -3832,7 +2743,6 @@ final class NotateApplicationCoordinator {
 
     private func enterCatalogFailure(_ message: String) {
         catalogFailureDescription = message
-        cancelAssistantSourceNavigation()
         activeEditor = nil
         activeAttachment = nil
         pendingPayloadOpenItemID = nil
@@ -3931,12 +2841,8 @@ final class NotateApplicationCoordinator {
         let affectedItemIDs = wholeItemIDs.union(survivingPageAssetsByOwner.keys)
 
         // Stop disposable producers before clearing their durable output.
-        // The index purge below drains its own image-enrichment writer; the
-        // coordinator guards added to the remaining refresh path prevent a
-        // cancelled task from recreating a deleted item directory.
-        let libraryPreparation = assistantLibraryPreparationTask
-        libraryPreparation?.cancel()
-        assistantLibraryPreparationTask = nil
+        // The coordinator guards in the refresh path prevent a cancelled task
+        // from recreating a deleted item directory.
         var producerTasks: [Task<Void, Never>] = []
         var previewPublicationTasks: [Task<Int64?, Never>] = []
         for itemID in affectedItemIDs {
@@ -3963,7 +2869,6 @@ final class NotateApplicationCoordinator {
                 producerTasks.append(task)
             }
         }
-        _ = await libraryPreparation?.result
         for task in producerTasks {
             _ = await task.result
         }
@@ -4054,37 +2959,7 @@ final class NotateApplicationCoordinator {
 
         var recoveryTransaction: LibraryAssetTrashTransaction?
         do {
-            // The compact V2 cache does not record every evidence owner, and a
-            // SQLite row deletion alone can retain payload bytes in freelist
-            // pages. It is entirely reproducible, so a full VACUUM is the only
-            // complete permanent-deletion boundary for both item and page
-            // deletions.
-            try await purgeAssistantArtifactCacheForDeletion()
             await librarySession.thumbnailStore.invalidate(itemIDs: affectedItemIDs)
-
-            for itemID in affectedItemIDs.sorted(by: {
-                $0.uuidString < $1.uuidString
-            }) {
-                // Purge can cover an entire expired-trash subtree. Resolve and
-                // copy one full-text projection at a time so the deletion
-                // transaction never retains the whole library's searchable
-                // text merely to remove reproducible assistant artifacts.
-                let indexedItem = repository.item(id: itemID).map { item in
-                    AssistantIndexedItem(
-                        itemID: item.id,
-                        itemName: item.name,
-                        kind: item.kind,
-                        parentID: item.parentID,
-                        canvasDirectory: assetStore.directories(for: item.id).canvas,
-                        fallbackSearchableText: item.searchableText,
-                        expectedGeneration: item.previewGeneration
-                    )
-                }
-                try await assistantIndex.purge(
-                    itemID: itemID,
-                    deletingArtifactsFor: indexedItem
-                )
-            }
 
             let anchors = plan.itemIDs.map {
                 LibraryAssetTrashManifest.CatalogAnchor(kind: .item, id: $0)
@@ -4143,14 +3018,6 @@ final class NotateApplicationCoordinator {
                 await CanvasCoreStore(rootURL: held.canvasDirectory)
                     .releaseImportedSourceReservation(held.reservation)
             }
-            await republishSurvivingPageOwners(
-                itemIDs: survivingOwnerItemIDs
-            )
-            // `purge` removes catalog registration before the fallible asset
-            // and SwiftData steps. Reconcile synchronously after rollback so
-            // every surviving item is immediately searchable again instead of
-            // waiting for a later library-maintenance pass.
-            await refreshAssistantCatalogRegistration()
             throw transactionError
         }
 
@@ -4166,40 +3033,6 @@ final class NotateApplicationCoordinator {
                 rootURL: assetStore.directories(for: itemID).canvas
             ).reclaimOrphanedImportedSources()
         }
-        await republishSurvivingPageOwners(itemIDs: survivingOwnerItemIDs)
-        // Reconcile once more from the committed catalog so a cancelled stale
-        // maintenance snapshot cannot re-register a permanently deleted item.
-        await refreshAssistantCatalogRegistration()
-    }
-
-    private func republishSurvivingPageOwners(
-        itemIDs: Set<UUID>
-    ) async {
-        for itemID in itemIDs.sorted(by: { $0.uuidString < $1.uuidString }) {
-            guard let item = repository.item(id: itemID), item.payloadState == .ready,
-                item.isTrashed == false else {
-                continue
-            }
-            guard item.kind == .notebook || item.kind == .importedDocument else {
-                continue
-            }
-            let store = CanvasCoreStore(
-                rootURL: assetStore.directories(for: itemID).canvas
-            )
-            guard case let .restored(snapshot) = await store.load() else {
-                continue
-            }
-            let indexedItem = AssistantIndexedItem(
-                itemID: item.id,
-                itemName: item.name,
-                kind: item.kind,
-                parentID: item.parentID,
-                canvasDirectory: assetStore.directories(for: item.id).canvas,
-                fallbackSearchableText: item.searchableText,
-                expectedGeneration: snapshot.generation
-            )
-            _ = await assistantIndex.index(snapshot: snapshot, item: indexedItem)
-        }
     }
 
     private func removeLegacyCanvasItems() async {
@@ -4207,24 +3040,6 @@ final class NotateApplicationCoordinator {
         guard plan.isEmpty == false else { return }
         var recoveryTransaction: LibraryAssetTrashTransaction?
         do {
-            try await purgeAssistantArtifactCacheForDeletion()
-            for itemID in plan.itemIDs {
-                let indexedItem = repository.item(id: itemID).map { item in
-                    AssistantIndexedItem(
-                        itemID: item.id,
-                        itemName: item.name,
-                        kind: item.kind,
-                        parentID: item.parentID,
-                        canvasDirectory: assetStore.directories(for: item.id).canvas,
-                        fallbackSearchableText: item.searchableText,
-                        expectedGeneration: item.previewGeneration
-                    )
-                }
-                try await assistantIndex.purge(
-                    itemID: itemID,
-                    deletingArtifactsFor: indexedItem
-                )
-            }
             let staged = try await assetStore.stageRecoveryTransaction(
                 purpose: .legacyCanvasRemoval,
                 catalogAnchors: plan.itemIDs.map {
@@ -4242,7 +3057,6 @@ final class NotateApplicationCoordinator {
             recoveryTransaction = staged
             let result = try repository.commitLegacyCanvasRemoval(plan)
             let cleanupCompleted = await finishCommittedRecoveryTransaction(staged)
-            await refreshAssistantCatalogRegistration()
             if cleanupCompleted {
                 startupNotice = result.itemIDs.count == 1
                     ? "1 legacy Canvas was removed as part of the Notes upgrade."
@@ -4260,10 +3074,6 @@ final class NotateApplicationCoordinator {
             } else if await reconcileAssetTrashTransactions() == false {
                 return
             }
-            // Restore NotebookIndex registration cleared before the failed
-            // legacy migration transaction. This also removes any IDs whose
-            // catalog records genuinely disappeared during a concurrent save.
-            await refreshAssistantCatalogRegistration()
             startupNotice = "Notate could not finish removing legacy Canvases. It will retry next time. \(transactionError.localizedDescription)"
         }
     }
@@ -4734,7 +3544,6 @@ private struct NotateCanvasEditorDestination: View {
     var body: some View {
         CanvasEditorView(
             model: editor.model,
-            assistant: editor.assistant,
             item: editor.item,
             onRename: onRename,
             onClose: close,

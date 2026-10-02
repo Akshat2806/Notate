@@ -180,8 +180,9 @@ final class PaperCanvasViewController: UIViewController, PaperCanvasCommanding {
         let decorationView: PaperPageDecorationView
         let contentView: PaperPageContentView
         var lastDeliveredMarkup: PaperMarkup
-    var renderedZoomScale: CGFloat = CanvasConstants.defaultZoomScale
-    var hasConfiguredGeometry = false
+        var renderedZoomScale: CGFloat = CanvasConstants.defaultZoomScale
+        var hasConfiguredGeometry = false
+        var isApplyingGeometry = false
 
     init(
         id: UUID,
@@ -206,7 +207,7 @@ final class PaperCanvasViewController: UIViewController, PaperCanvasCommanding {
             geometry: geometry,
             background: background,
             tables: tables,
-            rendersPaperTemplateInContentView: rendersPaperTemplateInContentView,
+            rendersPaperTemplate: rendersPaperTemplateInContentView,
             startsRenderingActive: false
         )
         lastDeliveredMarkup = markup
@@ -250,6 +251,7 @@ private var pageIDByController: [ObjectIdentifier: UUID] = [:]
     private var pageLayout: CanvasPageLayoutPreferences
     private var isReaderModeEnabled = false
     private var activeGeometryTool: CanvasGeometryTool?
+    private var topChromeHeight = CanvasConstants.toolbarTopPadding + CanvasConstants.toolbarHeight
     private var isRulerActive: Bool { activeGeometryTool == .ruler }
     private var appliedToolState: CanvasToolState?
     private var appliedInputMode: CanvasInputMode?
@@ -302,6 +304,7 @@ private var programmaticInsertionSequence: UInt64 = 0
 private var settledProgrammaticInsertionSequences: Set<UInt64> = []
 private var outOfOrderSettledProgrammaticInsertionSequences: Set<UInt64> = []
 private var insertionHistoryTasksByAcceptanceSequence: [UInt64: Task<Bool, Never>] = [:]
+private var settledProgrammaticInsertionSequence: UInt64 = 0
     // While a snapshot caller owns this boundary, later insertions remain in
     // the deferred queue. The caller first settles everything it observed,
     // then fails closed without waiting for the newer tail.
@@ -318,7 +321,7 @@ private var retainedProgrammaticInsertionImageCount = 0
 private var retainedProgrammaticInsertionImageBytes = 0
 private var retainedProgrammaticInsertionTextBytes = 0
 private var pagesPreparingInsertionHistory: Set<UUID> = []
-private var documentSynchronizationInteractionWasEnabled: Bool?
+private var isDocumentSynchronizationPending = false
 private var hasAppliedInitialViewport = false
 private var isApplyingGeometry = false
 private var isDirectInteractionActive = false
@@ -332,7 +335,6 @@ private var lastPublishedViewport: CanvasViewportState?
 private var lastPublishedViewportPageID: UUID?
 private var activeBoundaryPagePull: CanvasBoundaryPagePull?
 private var boundaryPullGate = CanvasBoundaryPullGate()
-private var boundaryPullHoldTask: Task<Void, Never>?
 private var pendingBoundaryPageInsertion: CanvasPageBoundary?
 private var dragStartFocusedPageID: UUID?
 private var dragStartContentOffset: CGPoint?
@@ -382,13 +384,17 @@ private static let renderedPageOverscanViewports: CGFloat = 0.25
     // hosts with native undo or live interaction state remain pinned.
 private static let maximumEagerPageHostCount = 32
     // A page-local stack is necessary because PaperKit resolves undo through
-    // containment. Twelve levels preserves ordinary short-form editing while
-    // making both native and app-owned history finite.
-private static let maximumUndoLevelCountPerPage = 12
-    // At most the focused page plus three recently edited page histories stay
-    // pinned. Authored snapshots remain durable and remountable after an older
+    // containment. Twenty levels covers a paragraph of handwriting corrections
+    // while keeping both native and app-owned history finite.
+private static let maximumUndoLevelCountPerPage = 20
+    // The focused page plus seven recently edited page histories stay pinned,
+    // so scrolling between a few pages while writing doesn't lose undo.
+    // Authored snapshots remain durable and remountable after an older
     // offscreen history is discarded.
-private static let maximumRetainedUndoPageHostCount = 4
+private static let maximumRetainedUndoPageHostCount = 8
+    // Pending app-owned undo registrations share one byte budget per page,
+    // independent of the level count, so deeper undo cannot raise peak memory.
+private static let maximumPendingAppUndoSerializedByteCount = 48 * 1_024 * 1_024
     // Programmatic insertion history retains immutable before/after archives.
     // Admit their combined bytes, not each archive independently.
 private static let maximumAppOwnedUndoActionSerializedByteCount = 4 * 1_024 * 1_024
@@ -413,7 +419,7 @@ private static let zoomPresentationReleaseDelay = Duration.milliseconds(140)
     // this delay in `contactDidBegin()` so drawing is never raster-backed.
 private static let programmaticFreeformZoomSettlementDelay = Duration.milliseconds(1_800)
 private static let zoomPresentationMaximumPixelDimension: CGFloat = 1_024
-private static let imagePlaygroundMaximumSourceDimension = 384
+private static let imagePlaygroundMinimumSourceDimension = 384
 private static let imagePlaygroundMaximumSourceDimension = 1_024
 private static let minimumInteractiveTableCellDimension: CGFloat = 24
 private static let tableAccessibilityMoveStep: CGFloat = 12
@@ -531,7 +537,7 @@ func setProgrammaticInsertionRetentionLimitsForTesting(
     maximumRetainedProgrammaticInsertionCountForTesting = count
     maximumRetainedProgrammaticInsertionImageCountForTesting = imageCount
     maximumRetainedProgrammaticInsertionImageBytesForTesting = imageBytes
-    maximumRetainedProgrammaticInsertionTextBytesForTesting = singleTextBytes
+    maximumSingleProgrammaticInsertionTextBytesForTesting = singleTextBytes
     maximumRetainedProgrammaticInsertionTextBytesForTesting = textBytes
 }
 func setMaximumAppOwnedUndoActionSerializedByteCountForTesting(
@@ -541,16 +547,18 @@ func setMaximumAppOwnedUndoActionSerializedByteCountForTesting(
 }
 func tableTransformAccessibilityActionNamesForTesting() -> (
     move: [String],
-    resize: [String]
+        resize: [String]
 ) {
     refreshTableAccessibilityElements()
-    let move = activeTableTarget.flatMap {
-        tableAccessibilityElementsByKey[TableAccessibilityKey(pageID: target.pageID, tableID: target.tableID)]?.accessibilityCustomActions?.map(\.name).filter {
+    let move = activeTableTarget.flatMap { target in
+        tableAccessibilityElementsByKey[
+            TableAccessibilityKey(pageID: target.pageID, tableID: target.tableID)
+        ]?.accessibilityCustomActions?.map(\.name).filter {
             $0.hasPrefix("Move ")
         } ?? []
     }
     return (
-        move: move,
+        move: move ?? [],
         resize: tableInteractionView.transformAccessibilityActionNames.resize
     )
 }
@@ -630,21 +638,20 @@ private var maximumRetainedProgrammaticInsertionImageCountForTesting: Int?
 private var maximumRetainedProgrammaticInsertionImageBytesForTesting: Int?
 private var maximumRetainedProgrammaticInsertionTextBytesForTesting: Int?
 private var maximumSingleProgrammaticInsertionTextBytesForTesting: Int?
-private var maximumRetainedProgrammaticInsertionTextBytesForTesting: Int?
 private var maximumAppOwnedUndoActionSerializedByteCountForTesting: Int?
 #endif
 
 private var pageSizes: [CGSize] { pages.map(\.displaySize) }
 private var cachedLayoutPlan: CanvasStackLayout.LayoutPlan?
-private var layoutPlan: CanvasStackLayout.LayoutPlan? {
-if let cachedLayoutPlan { return cachedLayoutPlan }
-let plan = CanvasStackLayout.cachedLayoutPlan(
-pageSizes: pageSizes,
-pageLayout: pageLayout,
-horizontalPageStride: horizontalPageStride
-)
-cachedLayoutPlan = plan
-return plan
+private var layoutPlan: CanvasStackLayout.LayoutPlan {
+    if let cachedLayoutPlan { return cachedLayoutPlan }
+    let plan = CanvasStackLayout.layoutPlan(
+        pageSizes: pageSizes,
+        pageLayout: pageLayout,
+        horizontalPageStride: horizontalPageStride
+    )
+    cachedLayoutPlan = plan
+    return plan
 }
 
 private func invalidateLayoutPlan() {
@@ -661,7 +668,8 @@ return CanvasConstants.defaultZoomScale
 }
 let viewport = CanvasStackLayout.unobscuredViewportRect(
 viewportSize: scrollView.bounds.size,
-safeAreaInsets: view.safeAreaInsets
+safeAreaInsets: view.safeAreaInsets,
+topChromeHeight: topChromeHeight
 )
 guard viewport.width > 0, viewport.height > 0 else {
 return CanvasConstants.defaultZoomScale
@@ -685,7 +693,8 @@ guard documentMode == .paged,
 pageLayout.scrollDirection == .horizontal else { return nil }
 let viewport = CanvasStackLayout.unobscuredViewportRect(
 viewportSize: scrollView.bounds.size,
-safeAreaInsets: view.safeAreaInsets
+safeAreaInsets: view.safeAreaInsets,
+topChromeHeight: topChromeHeight
 )
 guard viewport.width > 0 else { return nil }
 return (viewport.width + CanvasConstants.pageGap) / horizontalPageFitScale
@@ -900,6 +909,12 @@ view.setNeedsLayout()
 override func didReceiveMemoryWarning() {
 super.didReceiveMemoryWarning()
 isUnderMemoryPressure = true
+// Pressure is transient. Leaving the flag set would disable prefetch and
+// discard undo history on every eviction for the rest of the session.
+Task { @MainActor [weak self] in
+try? await Task.sleep(for: .seconds(10))
+self?.isUnderMemoryPressure = false
+}
 cancelProgrammaticFreeformZoomSettlement()
 endInteractiveZoomPresentation()
     guard hasActiveContact == false,
@@ -916,6 +931,23 @@ endInteractiveZoomPresentation()
 
     func updateCallbacks(_ callbacks: PaperCanvasCallbacks) {
         self.callbacks = callbacks
+    }
+
+    func updateTopChromeHeight(_ height: CGFloat) {
+        guard height.isFinite, height > 0,
+              abs(topChromeHeight - height) > 0.5 else { return }
+        topChromeHeight = height
+        geometryInstrumentView.topChromeHeight = height
+        // The chrome height feeds the horizontal fit scale and the page
+        // stride, so a cached plan built for the old height is stale.
+        invalidateLayoutPlan()
+        guard scrollView.bounds.width > 0, scrollView.bounds.height > 0,
+              hasActiveContact == false else { return }
+        let viewport = viewportForCurrentPageMode(
+            currentViewportState(),
+            prefersHorizontalFit: usesHorizontalPageFit
+        )
+        applyViewport(viewport, focusedOn: focusedPageID, preserveFocusedPage: true)
     }
 
     /// Stops presentation-only work when SwiftUI retires this controller. An
@@ -954,10 +986,10 @@ guard hasCompletedDismantle == false else { return }
 prepareForDismantle()
 hasCompletedDismantle = true
 scrollView.delegate = nil
-contactMonitor.isEnabled = nil
+contactMonitor.isEnabled = false
 contactMonitor.onContactBegan = nil
 contactMonitor.onContactEnded = nil
-contactMonitor.shouldTrackDirectTouches = false
+contactMonitor.shouldTrackDirectTouches = { false }
 pencilInteraction.delegate = nil
 view.removeInteraction(pencilInteraction)
 insertionHistoryTask?.cancel()
@@ -1031,6 +1063,7 @@ _ = detachPageHost(id: pageID)
         let pageInteractionIsEnabled = isReaderModeEnabled == false
             && laserIsActive == false
             && regionSelectionIsActive == false
+            && isDocumentSynchronizationPending == false
 
         contactMonitor.isEnabled = isReaderModeEnabled == false
         threeFingerUndoSwipeGestureRecognizer.isEnabled = isReaderModeEnabled == false
@@ -1043,7 +1076,10 @@ _ = detachPageHost(id: pageID)
 
         if laserIsActive, let appliedToolState {
             laserPointerGestureRecognizer.isEnabled = true
-            laserPointerView.activate(style: appliedToolState.laserPointerStyle)
+            laserPointerView.activate(
+                style: appliedToolState.laserPointerStyle,
+                color: appliedToolState.configuration(for: .laserPointer)?.color.uiColor
+            )
         } else {
             laserPointerGestureRecognizer.isEnabled = false
             laserPointerView.cancel()
@@ -1066,6 +1102,18 @@ _ = detachPageHost(id: pageID)
         synchronizeRulerState()
         configureOuterPanForInputMode()
         refreshTableAccessibilityElements()
+    }
+
+    /// A replacement controller must not accept edits until it has adopted the
+    /// model's authoritative snapshot; strokes drawn earlier would be
+    /// overwritten by the synchronization.
+    func setDocumentSynchronizationPending(_ isPending: Bool) {
+        guard isDocumentSynchronizationPending != isPending else { return }
+        isDocumentSynchronizationPending = isPending
+        // Before the view loads there is nothing to lock yet; the flag is
+        // honored by the first `refreshInteractionPolicy()` after load.
+        guard isViewLoaded else { return }
+        refreshInteractionPolicy()
     }
 
     func applyToolState(_ state: CanvasToolState) {
@@ -1093,7 +1141,10 @@ _ = detachPageHost(id: pageID)
         appliedToolState = state
         if isLaserPointerActive {
             laserPointerGestureRecognizer.isEnabled = true
-            laserPointerView.activate(style: state.laserPointerStyle)
+            laserPointerView.activate(
+                style: state.laserPointerStyle,
+                color: state.configuration(for: .laserPointer)?.color.uiColor
+            )
         } else {
             laserPointerGestureRecognizer.isEnabled = false
             laserPointerView.deactivate()
@@ -1420,125 +1471,17 @@ _ = detachPageHost(id: pageID)
             normalizedCenterX: bounds.midX / page.displaySize.width,
             normalizedCenterY: bounds.midY / page.displaySize.height
         )
-    }
-
-    private var updateIsolationActive: Bool {
-        updateIsolationCount > 0
-    }
-
-    func beginUpdateIsolation() {
-        updateIsolationCount += 1
-        if updateIsolationCount == 1 {
-            beginUpdateIsolationWhileHoldingLayoutLock()
-        }
-    }
-
-    func endUpdateIsolation() {
-        guard updateIsolationCount > 0 else {
-            assertionFailure("Unbalanced endUpdateIsolation()")
-            return
-        }
-        updateIsolationCount -= 1
-        if updateIsolationCount == 0 {
-            endUpdateIsolationWhileHoldingLayoutLock()
-        }
-    }
-
-    // MARK: - Attachment geometry for detached (non-live) pages
-
-    private func detachedPageAttachmentLayout(
-        snapshot: CanvasDocumentSnapshot,
-        pageID: UUID,
-        scale: CGFloat,
-        behindContent: Bool
-    ) -> DetachedPageAttachmentLayout? {
-        guard let snapshotPage = snapshot.pages.first(where: { $0.id == pageID }) else {
-            return nil
-        }
-        let page = CanvasPage(
-            id: snapshotPage.id,
-            markup: snapshotPage.markup,
-            tables: snapshotPage.tables,
-            paperTemplate: snapshotPage.paperTemplate,
-            geometry: snapshotPage.geometry,
-            background: snapshotPage.background
-        )
-        let establishment = PageGeometryEstablishment(
-            origin: .zero,
-            scale: scale,
-            rotation: snapshotPage.geometry.rotation
-        )
-        let attachments = viewportAttachmentPresentation(
-            for: page,
-            scale: scale,
-            establishment: establishment
-        )
-        guard attachments.isEmpty == false else {
-            return nil
-        }
-        return DetachedPageAttachmentLayout(
-            pageID: pageID,
-            scale: scale,
-            establishment: establishment,
-            detail: .init(
-                pageID: pageID,
-                geometry: snapshotPage.geometry,
-                scale: scale,
-                behindContent: behindContent
-            ),
-            attachments: attachments
+        setFocusedPage(pageID, fromDirectInteraction: false)
+        applyViewport(
+            restoredViewportForCurrentPageMode(viewport),
+            focusedOn: pageID,
+            preserveFocusedPage: true,
+            animated: animated
         )
     }
 
-    // MARK: - Page sync for attachment snapshot
+    // MARK: - Controller attachment synchronization
 
-    // Returns true when the live document already matches the snapshot;
-    // otherwise reconciles the live page and returns false.
-    @discardableResult
-    func synchronizePageForAttachment(
-        snapshot: CanvasDocumentSnapshot,
-        pageID: UUID,
-        scale: CGFloat,
-        behindContent: Bool
-    ) -> Bool {
-        guard let snapshotPage = snapshot.pages.first(where: { $0.id == pageID }) else {
-            return false
-        }
-        guard let index = pages.firstIndex(where: { $0.id == pageID }) else {
-            return false
-        }
-        let livePage = pages[index]
-        let matchesSnapshot = livePage.markup == snapshotPage.markup
-            && livePage.tables == snapshotPage.tables
-            && livePage.paperTemplate == snapshotPage.paperTemplate
-            && livePage.geometry == snapshotPage.geometry
-            && livePage.background == snapshotPage.background
-        if matchesSnapshot {
-            return true
-        }
-        if hostsLivePage(for: pageID) {
-            updatePage(
-                livePage.updating(
-                    markup: snapshotPage.markup,
-                    tables: snapshotPage.tables,
-                    paperTemplate: snapshotPage.paperTemplate,
-                    geometry: snapshotPage.geometry,
-                    background: snapshotPage.background
-                ),
-                viewport: nil
-            )
-        } else {
-            // A detached page update that the view hierarchy
-            // is not currently hosting still needs layout so
-            // snapshot attachment can measure against it.
-            ensurePageExistsForAttachmentSnapshot(
-                snapshot: snapshot,
-                page: snapshotPage,
-                scale: scale,
-                behindContent: behindContent
-            )
-        }
-    }
     func synchronizeDocumentAfterAttachment(
         _ snapshot: CanvasDocumentSnapshot
     ) -> Bool {
@@ -1684,12 +1627,6 @@ _ = detachPageHost(id: pageID)
                     imageBytes: decodedBytes,
                     textBytes: 0
                 )
-            case let .assistantText(text, _):
-                return ProgrammaticInsertionRetentionCost(
-                    imageCount: 0,
-                    imageBytes: 0,
-                    textBytes: text.utf8.count
-                )
             case .text, .shape, .table, .circle:
                 return ProgrammaticInsertionRetentionCost(
                     imageCount: 0,
@@ -1744,30 +1681,6 @@ _ = detachPageHost(id: pageID)
             ?? Self.maximumRetainedProgrammaticInsertionImageCount, 0)
         #else
         Self.maximumRetainedProgrammaticInsertionImageCount
-        #endif
-    }
-    private var effectiveMaximumRetainedProgrammaticInsertionImageBytes: Int {
-        #if DEBUG
-        max(maximumRetainedProgrammaticInsertionImageBytesForTesting
-            ?? Self.maximumRetainedProgrammaticInsertionImageBytes, 0)
-        #else
-        Self.maximumRetainedProgrammaticInsertionImageBytes
-        #endif
-    }
-    private var effectiveMaximumSingleProgrammaticInsertionTextBytes: Int {
-        #if DEBUG
-        max(maximumSingleProgrammaticInsertionTextBytesForTesting
-            ?? Self.maximumSingleProgrammaticInsertionTextBytes, 0)
-        #else
-        Self.maximumSingleProgrammaticInsertionTextBytes
-        #endif
-    }
-    private var effectiveMaximumRetainedProgrammaticInsertionTextBytes: Int {
-        #if DEBUG
-        max(maximumRetainedProgrammaticInsertionTextBytesForTesting
-            ?? Self.maximumRetainedProgrammaticInsertionTextBytes, 0)
-        #else
-        Self.maximumRetainedProgrammaticInsertionTextBytes
         #endif
     }
     private var effectiveMaximumRetainedProgrammaticInsertionImageBytes: Int {
@@ -2571,6 +2484,16 @@ _ = detachPageHost(id: pageID)
             return
         }
 
+        // Scrolling calls this every frame. A notebook with no tables, and no
+        // table state left to clear, has nothing to lay out.
+        if tableAccessibilityElementsByKey.isEmpty,
+            activeTableTarget == nil,
+            activeTableCell == nil,
+            hoveredTableCell == nil,
+            pages.allSatisfy({ $0.tables.isEmpty }) {
+            return
+        }
+
         var liveKeys = Set<TableAccessibilityKey>()
         var orderedElements: [Any] = []
         var selectedTableFrame: CGRect?
@@ -3160,6 +3083,22 @@ private func drainPendingHistoryCommandsIfPossible() {
     }
 }
 
+/// The whole stack, read from the live PaperKit hosts. Returning nil while an
+/// insertion is mid-transaction makes the model retry rather than save a
+/// half-committed page.
+func snapshotDocument() -> CanvasDocumentSnapshot? {
+    guard pagesPreparingInsertionHistory.isEmpty,
+        pages.contains(where: { $0.id == focusedPageID }) else { return nil }
+    for page in pages {
+        deliverMarkupIfChanged(pageID: page.id)
+    }
+    return CanvasDocumentSnapshot(
+        pages: pages,
+        currentPageID: focusedPageID,
+        viewport: currentViewportState()
+    )
+}
+
 func snapshotActivePage() -> CanvasActivePageSnapshot? {
     deliverMarkupIfChanged(pageID: focusedPageID)
     guard let page = pages.first(where: { $0.id == focusedPageID }) else { return nil }
@@ -3339,7 +3278,10 @@ private func configureLaserPointer() {
     let state = appliedToolState
     laserPointerGestureRecognizer.isEnabled = state?.activeTool == .laserPointer
     if let state, state.activeTool == .laserPointer {
-        laserPointerView.activate(style: state.laserPointerStyle)
+        laserPointerView.activate(
+                style: state.laserPointerStyle,
+                color: state.configuration(for: .laserPointer)?.color.uiColor
+            )
     } else {
         laserPointerView.deactivate()
     }
@@ -3380,6 +3322,42 @@ private func configureRegionSelection() {
         regionSelectionView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
     ])
 }
+
+    /// Starts Wand's one-shot circling mode over the focused page. Page,
+    /// scroll, laser, and instrument interaction is suspended until the
+    /// selection completes or is cancelled.
+    func beginImageWandSelection(checkpointGeneration: Int64) {
+        guard isReaderModeEnabled == false,
+            let host = hostsByPageID[focusedPageID],
+            host.controller.view.superview != nil,
+            regionSelectionView.superview != nil else { return }
+
+        resetRegionSelection()
+        let pageFrame = regionSelectionView.convert(
+            host.controller.view.bounds,
+            from: host.controller.view
+        )
+        // Keep the circling area clear of the floating top chrome.
+        var available = pageFrame.intersection(regionSelectionView.bounds)
+        let chromeInset = max(view.safeAreaInsets.top, topChromeHeight)
+        if available.minY < chromeInset {
+            let delta = chromeInset - available.minY
+            available.origin.y += delta
+            available.size.height -= delta
+        }
+        guard available.isNull == false,
+            available.width >= 20,
+            available.height >= 20 else { return }
+
+        regionSelectionPageID = host.id
+        regionSelectionCheckpointGeneration = checkpointGeneration
+        suspendInteractionForRegionSelection()
+        regionSelectionView.begin(selectionBounds: available)
+    }
+
+    func cancelImageWandSelection() {
+        resetRegionSelection()
+    }
 
     private func completeImageWandRegionSelection(_ overlayPath: CGPath) {
     guard let pageID = regionSelectionPageID,
@@ -3465,12 +3443,11 @@ private func configureRegionSelection() {
         let shortestEdgeScale = CGFloat(Self.imagePlaygroundMinimumSourceDimension)
             / minimumDimension
         let scale = min(longestEdgeScale, max(1, shortestEdgeScale))
-guard let renderedThumbnail = try? await CanvasDocumentExporter.shared.render(
+guard let renderedThumbnail = try? await CanvasDocumentExporter.shared.renderImage(
             pageSnapshot,
             cropRect: pageBounds,
             scale: scale,
             mode: .imagePlaygroundSource
-
         ), Task.isCancelled == false,
         let maskedThumbnail = Self.maskRegionThumbnail(
             renderedThumbnail,
@@ -4224,7 +4201,7 @@ private static func prepareImagePlaygroundSource(_ image: CGImage) -> CGImage? {
             pageID != focusedPageID,
             pageID != programmaticNavigationPageID,
             hasActiveContact == false,
-            documentSynchronizationInteractionWasEnabled == nil,
+            isDocumentSynchronizationPending == false,
             pendingPaperTemplates[pageID] == nil,
             queuedInsertionCountByPageID[pageID, default: 0] == 0,
             pagesPreparingInsertionHistory.contains(pageID) == false,
@@ -4239,7 +4216,7 @@ private static func prepareImagePlaygroundSource(_ image: CGImage) -> CGImage? {
             tableTransformSession?.pageID != pageID,
             let host = hostsByPageID[pageID],
             host.controller.presentedViewController == nil,
-            viewTreeContainsFirstResponder(host.controller.view) == false else { return }
+            host.controller.view.isFirstResponder == false else { return }
 
         if let historyManager = host.controller.undoManager {
             guard historyManager.isUndoing == false,
@@ -4352,16 +4329,16 @@ private func performPaperTemplateChange(
             applyViewport(
                 viewportForCurrentPageMode(
                     retainedViewport,
-                prefersHorizontalFit: usesHorizontalPageFit
-            ),
-            focusedOn: retainedID,
-            preserveFocusedPage: true
-        )
+                    prefersHorizontalFit: usesHorizontalPageFit
+                ),
+                focusedOn: retainedID,
+                preserveFocusedPage: true
+            )
         setFocusedPage(page.id, fromDirectInteraction: false)
         scrollPageToTop(id: page.id, animated: animated)
     } else {
         setFocusedPage(retainedID, fromDirectInteraction: false)
-        applyViewportForCurrentPaneMode()
+        applyViewport(retainedViewport, focusedOn: retainedID, preserveFocusedPage: true)
     }
     publishUndoAvailability()
 }
@@ -4401,6 +4378,9 @@ private func performPaperTemplateChange(
             let host = ensurePageHostMounted(for: page.id) else { return }
         let previous = pages[index]
         guard previous != page else { return }
+        let retainedViewport = currentViewportState()
+        let wasFocused = focusedPageID == page.id
+        pages[index] = page
     invalidateLayoutPlan()
     host.lastDeliveredMarkup = page.markup
     host.contentView.template = page.paperTemplate
@@ -4490,7 +4470,8 @@ private func performLegacyActivation(
             viewportSize: scrollView.bounds.size,
             safeAreaInsets: view.safeAreaInsets,
             zoomScale: scale,
-            layoutPlan: layoutPlan
+            layoutPlan: layoutPlan,
+            topChromeHeight: topChromeHeight
         )
         let shouldAnimate = animated
             && UIAccessibility.isReduceMotionEnabled == false
@@ -4502,7 +4483,8 @@ private func performLegacyActivation(
                 contentOffset: target,
                 viewportSize: scrollView.bounds.size,
                 safeAreaInsets: view.safeAreaInsets,
-                zoomScale: scale
+                zoomScale: scale,
+                topChromeHeight: topChromeHeight
             ),
             zoomScale: scale,
             layoutPlan: layoutPlan
@@ -4564,9 +4546,9 @@ private func performLegacyActivation(
             viewportSize: scrollView.bounds.size,
             safeAreaInsets: view.safeAreaInsets,
             zoomScale: scale,
-            layoutPlan: layoutPlan
+            layoutPlan: layoutPlan,
+            topChromeHeight: topChromeHeight
         )
-        let shouldAnimate = animated
         let shouldAnimate = animated
             && UIAccessibility.isReduceMotionEnabled == false
             && (abs(scrollView.contentOffset.x - offset.x) > 0.5
@@ -4608,19 +4590,21 @@ private func performLegacyActivation(
         viewportSize: scrollView.bounds.size,
         safeAreaInsets: view.safeAreaInsets,
         zoomScale: scale,
-        layoutPlan: layoutPlan
+        layoutPlan: layoutPlan,
+        topChromeHeight: topChromeHeight
     )
     scrollView.setContentOffset(offset, animated: false)
     isApplyingGeometry = false
-    updatePaperPresentationWindows()
+    updatePaperTemplatePresentationWindows()
     setFocusedPage(pageID, fromDirectInteraction: false)
     scheduleTransientViewportPublication()
 }
 private func settleTransientZoom() {
     guard hasAppliedInitialViewport else { return }
-    guard hasActiveContact == false else { return }
+    guard hasActiveContact == false else {
         shouldSettleTransientZoomAfterContact = true
         return
+    }
     shouldSettleTransientZoomAfterContact = false
     let retainedPageID = focusedPageID
     let retainedViewport = currentViewportState()
@@ -4628,6 +4612,17 @@ private func settleTransientZoom() {
         for: retainedViewport.stackZoomScale
     )
     let targetPresentationScale = retainedViewport.stackZoomScale / targetNativeScale
+    let offset = pages.firstIndex(where: { $0.id == retainedPageID }).map {
+        CanvasStackLayout.targetContentOffset(
+            pageIndex: $0,
+            viewport: retainedViewport,
+            viewportSize: scrollView.bounds.size,
+            safeAreaInsets: view.safeAreaInsets,
+            zoomScale: retainedViewport.stackZoomScale,
+            layoutPlan: layoutPlan,
+            topChromeHeight: topChromeHeight
+        )
+    } ?? scrollView.contentOffset
     let alreadySettled = abs(scrollView.zoomScale - targetPresentationScale) <= 0.0001
         && abs(scrollView.contentOffset.x - offset.x) <= 0.5
         && abs(scrollView.contentOffset.y - offset.y) <= 0.5
@@ -4649,7 +4644,10 @@ private func updateContentInsets() {
         viewportSize: scrollView.bounds.size,
         safeAreaInsets: view.safeAreaInsets,
         zoomScale: effectiveZoomScale,
-        layoutPlan: plan
+        contentSize: plan.contentSize,
+        pageSizes: pageSizes,
+        pageLayout: pageLayout,
+        topChromeHeight: topChromeHeight
     )
     if scrollView.contentInset != insets {
         scrollView.contentInset = insets
@@ -4691,10 +4689,9 @@ private func performFreeformExpansion(
         ) else { return false }
     let wasFocused = focusedPageID == page.id
     let currentViewport = currentViewportState()
-    let retainedViewport = currentViewportState()
     let latestPage = page
     let translatedViewport = FreeformCanvasLayout.translatedViewport(
-        oldViewport: currentViewport,
+        currentViewport,
         from: latestPage.displaySize,
         expansion: expansion
     )
@@ -4762,19 +4759,6 @@ private func performFreeformExpansion(
         scrollView.setZoomScale(presentationScale, animated: false)
     }
     updateContentInsets()
-        let nativeScale = resolvedNativeRenderScale(for: scale)
-let nativeScaleChanged = abs(renderedZoomScale - nativeScale) > 0.0001
-        if nativeScaleChanged {
-            resetPresentationZoomToIdentityForNativeBasisChange()
-            renderedZoomScale = nativeScale
-        }
-        layoutDocumentAtRenderedScale()
-        configureTransientZoomRange()
-        let presentationScale = scale / renderedZoomScale
-        if abs(scrollView.zoomScale - presentationScale) > 0.0001 {
-            scrollView.setZoomScale(presentationScale, animated: false)
-        }
-        updateContentInsets()
         let proposedOffset = FreeformCanvasLayout.translatedContentOffset(
             oldContentOffset,
             expansion: expansion,
@@ -4803,8 +4787,7 @@ private func updateBoundaryPagePull(
 contentOffset: CGPoint,
 panTranslation: CGPoint,
 isDragging: Bool,
-now: TimeInterval,
-schedulesHoldTimer: Bool
+now: TimeInterval
 ) {
 guard documentMode == .paged,
 isReaderModeEnabled == false,
@@ -4828,12 +4811,6 @@ measuredPull: measuredPull,
 now: now
 )
 setBoundaryPagePull(pull)
-if schedulesHoldTimer {
-synchronizeBoundaryPullHoldTask()
-} else {
-boundaryPullHoldTask?.cancel()
-boundaryPullHoldTask = nil
-}
 }
 private func beginBoundaryPagePullGesture(at contentOffset: CGPoint) {
 guard documentMode == .paged, isReaderModeEnabled == false else {
@@ -4852,39 +4829,9 @@ pageLayout: pageLayout
 boundaryPullGate.begin(eligibleBoundaries: eligibleBoundaries)
 boundaryPageFeedbackGenerator.prepare()
 }
-private func synchronizeBoundaryPullHoldTask() {
-boundaryPullHoldTask?.cancel()
-boundaryPullHoldTask = nil
-guard boundaryPullHoldTask == nil else { return }
-let sessionID = boundaryPullGate.sessionID
-boundaryPullHoldTask = Task { @MainActor [weak self] in
-do {
-try await Task.sleep(
-for: .milliseconds(CanvasConstants.boundaryPullHoldMilliseconds)
-)
-} catch {
-return
-}
-
-        guard let self,
-            self.boundaryPullGate.sessionID == sessionID else { return }
-        self.boundaryPullHoldTask = nil
-        let pull = self.boundaryPullGate.completeHold(
-            now: CACurrentMediaTime(),
-            panVelocity: self.scrollView.panGestureRecognizer.velocity(
-                in: self.scrollView
-            ),
-            isDragging: self.scrollView.isDragging
-        )
-        self.setBoundaryPagePull(pull)
-        self.synchronizeBoundaryPullHoldTask()
-        }
-    }
     private func cancelBoundaryPagePullGesture(
         clearPendingInsertion: Bool = true
     ) {
-        boundaryPullHoldTask?.cancel()
-        boundaryPullHoldTask = nil
         boundaryPullGate.cancel()
         if clearPendingInsertion {
             pendingBoundaryPageInsertion = nil
@@ -4912,8 +4859,6 @@ guard isReaderModeEnabled == false else {
 cancelBoundaryPagePullGesture()
 return false
 }
-boundaryPullHoldTask?.cancel()
-boundaryPullHoldTask = nil
 pendingBoundaryPageInsertion = boundaryPullGate.end(
 releaseVelocity: releaseVelocity
 )
@@ -4936,14 +4881,15 @@ pendingBoundaryPageInsertion = nil
 // with the newly inserted page. Unaccepted pulls never alter UIKit's
 // native rubber-band or projected destination.
 scrollView.setContentOffset(scrollView.contentOffset, animated: false)
-callbacks_boundaryPageInsertionRequested(requestedBoundary)
+callbacks.boundaryPageInsertionRequested(requestedBoundary)
 }
 private var visibleDocumentRect: CGRect {
 CanvasStackLayout.visibleDocumentRect(
 contentOffset: scrollView.contentOffset,
 viewportSize: scrollView.bounds.size,
 safeAreaInsets: view.safeAreaInsets,
-zoomScale: effectiveZoomScale
+zoomScale: effectiveZoomScale,
+topChromeHeight: topChromeHeight
 )
 }
 // Keeps the transient pattern path tied to the visible board rather than
@@ -4985,7 +4931,7 @@ height: intersection.height
 private func currentViewportState() -> CanvasViewportState {
 guard let index = pages.firstIndex(where: { $0.id == focusedPageID }),
 scrollView.bounds.width > 0,
-scrollView.bounds.height > 0 else { return initialViewportState }
+scrollView.bounds.height > 0 else { return initialViewport }
 var viewport = CanvasStackLayout.viewportState(
 focusedPageIndex: index,
 visibleDocumentRect: visibleDocumentRect,
@@ -5028,11 +4974,11 @@ if let activeTableTarget, activeTableTarget.pageID != id {
 clearActiveTableTarget()
 }
 focusedPageID = id
-synchronizeRulerHistoryActivity(pageID: id)
-recordUndoHistoryViewport(pageID: id)
+synchronizeRulerState()
+recordUndoHistoryActivity(pageID: id)
 lastPublishedViewport = nil
 lastPublishedViewportPageID = nil
-callbacks_focusedPageChanged(id)
+callbacks.focusedPageChanged(id)
 publishUndoAvailability()
 }
 private func publishViewport() {
@@ -5047,14 +4993,13 @@ for pageID: UUID
 guard viewport.isValid,
 let pageIndex = pages.firstIndex(where: { $0.id == pageID }) else { return }
 if pages[pageIndex].viewport != viewport {
-pages[pageIndex].viewport = viewport
 pages[pageIndex] = pages[pageIndex].replacing(viewport: viewport)
 }
 guard lastPublishedViewport != viewport
 || lastPublishedViewportPageID != pageID else { return }
 lastPublishedViewport = viewport
 lastPublishedViewportPageID = pageID
-callbacks_viewportChanged(pageID, viewport)
+callbacks.viewportChanged(pageID, viewport)
 }
 private func captureAndPublishCurrentViewport() {
 guard hasAppliedInitialViewport,
@@ -5163,9 +5108,8 @@ layer.shouldRasterize = false
 if documentMode == .freeform {
 host.decorationView.setOverlayPresentationActive(true)
 } else {
-host.decorationView.superview == documentView
-if host.decorationView.superview == documentView {
-host.undoController.view.superview === documentView
+if host.decorationView.superview == documentView,
+host.undoController.view.superview === documentView {
 documentView.insertSubview(
 host.decorationView,
 belowSubview: host.undoController.view
@@ -5245,7 +5189,7 @@ publishUndoAvailability()
 // normal delegate usually delivered it already; this also covers an OS
 // revision that delays its last markup callback until touch teardown.
 deliverAllChangedMarkup()
-callbacks_snapshotContactEnded()
+callbacks.snapshotContactEnded()
 }
 private func synchronizeRulerState() {
 for (pageID, host) in hostsByPageID {
@@ -5271,7 +5215,7 @@ let markup = host.controller.markup,
 markup != host.lastDeliveredMarkup else { return }
 host.lastDeliveredMarkup = markup
 replacePageMarkup(id: pageID, markup: markup)
-callbacks_markupChanged(pageID, markup)
+callbacks.markupChanged(pageID, markup)
 }
 private func replacePageMarkup(id: UUID, markup: PaperMarkup) {
 guard let index = pages.firstIndex(where: { $0.id == id }) else { return }
@@ -5284,6 +5228,7 @@ _ insertion: CanvasInsertion, pageID: UUID
 guard let host = hostsByPageID[pageID],
 let originalMarkup = host.controller.markup
 else { return false }
+let paperController = host.controller
 let controllerIdentity = ObjectIdentifier(paperController)
 let interactionWasEnabled = paperController.view.isUserInteractionEnabled
 paperController.view.isUserInteractionEnabled = false
@@ -5369,7 +5314,7 @@ return false
 #endif
 guard let retainedHost = hostsByPageID[pageID],
     ObjectIdentifier(retainedHost.controller) == controllerIdentity,
-    retainedHost.controller.markup == originalMarkup else {
+    retainedHost.controller.markup == insertedMarkup else {
     await restoreFailedInsertion(
         on: paperController,
         originalMarkup: originalMarkup,
@@ -5378,50 +5323,6 @@ guard let retainedHost = hostsByPageID[pageID],
     )
     return false
 }
-    guard let redoData = try? await insertedMarkup.dataRepresentation() else {
-        await restoreFailedInsertion(
-            on: paperController,
-            originalMarkup: originalMarkup,
-            originalSelection: originalSelection,
-            undoData: undoData
-        )
-        return false
-    }
-    let (serializedHistoryBytes, historyByteCountOverflowed) = undoData.count
-        .addingReportingOverflow(redoData.count)
-    guard historyByteCountOverflowed == false,
-        serializedHistoryBytes
-        <= effectiveMaximumAppOwnedUndoActionSerializedByteCount else {
-        await restoreFailedInsertion(
-            on: paperController,
-            originalMarkup: originalMarkup,
-            originalSelection: originalSelection,
-            undoData: undoData
-        )
-        return false
-    }
-#if DEBUG
-    if consumeSerializedInsertionFailureForTesting(.retainedHostValidation) {
-        await restoreFailedInsertion(
-            on: paperController,
-            originalMarkup: originalMarkup,
-            originalSelection: originalSelection,
-            undoData: undoData
-        )
-        return false
-    }
-#endif
-    guard let retainedHost = hostsByPageID[pageID],
-        ObjectIdentifier(retainedHost.controller) == controllerIdentity,
-        retainedHost.controller.markup == insertedMarkup else {
-        await restoreFailedInsertion(
-            on: paperController,
-            originalMarkup: originalMarkup,
-            originalSelection: originalSelection,
-                undoData: undoData
-            )
-            return false
-        }
 
         // PaperKit 26.0 can enqueue its own undo registration after the
         // insertion call returns. Keep registration suspended through the
@@ -5631,31 +5532,6 @@ guard let retainedHost = hostsByPageID[pageID],
                 frame: paperController.suggestedFrameForInserting(contentInFrame: requested)
             )
 
-        case let .assistantText(text, requestedFrame):
-            let normalizedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard normalizedText.isEmpty == false else { return }
-            let defaultHeight = min(
-                max(CGFloat(normalizedText.count / 34 + 1) * 24 + 36, 96),
-                320
-            )
-            let requested = requestedFrame.map {
-                constrainedFrame($0, to: markup.bounds)
-            } ?? centeredFrame(
-                size: CGSize(width: min(320, markup.bounds.width * 0.72), height: defaultHeight),
-                in: insertionBounds,
-                constrainedTo: markup.bounds
-            )
-            guard requested.width >= 24, requested.height >= 24 else { return }
-            let frame = paperController.suggestedFrameForInserting(contentInFrame: requested)
-            let attributedText = NSAttributedString(
-                string: normalizedText,
-                attributes: [
-                    .font: UIFont.systemFont(ofSize: 18),
-                    .foregroundColor: RGBAColor.graphite.uiColor,
-                ]
-            )
-            inserted.insertNewTextbox(attributedText: attributedText, frame: frame)
-
         case let .positionedImage(image, requestedFrame):
             let availableFrame = constrainedFrame(requestedFrame, to: markup.bounds)
             guard availableFrame.width >= 2, availableFrame.height >= 2 else { return }
@@ -5834,14 +5710,7 @@ guard let retainedHost = hostsByPageID[pageID],
             )
             partialResult = overflowed ? Int.max : next
         }
-        let (maximumPendingSerializedByteCount, pendingBudgetOverflowed) =
-            Self.maximumUndoLevelCountPerPage
-            .multipliedReportingOverflow(
-                by: effectiveMaximumAppOwnedUndoActionSerializedByteCount
-            )
-        let pendingSerializedByteBudget = pendingBudgetOverflowed
-            ? Int.max
-            : maximumPendingSerializedByteCount
+        let pendingSerializedByteBudget = Self.maximumPendingAppUndoSerializedByteCount
 
         while registrations.isEmpty == false {
             let (nextByteCount, overflowed) = retainedSerializedByteCount
@@ -6219,21 +6088,8 @@ guard let retainedHost = hostsByPageID[pageID],
             contentOffset: contentOffset,
             panTranslation: panTranslation,
             isDragging: isDragging,
-            now: now,
-            schedulesHoldTimer: false
+            now: now
         )
-    }
-    func completeBoundaryPagePullHoldForTesting(
-        now: TimeInterval,
-        panVelocity: CGPoint = .zero,
-        isDragging: Bool = true
-    ) {
-        let pull = boundaryPullGate.completeHold(
-            now: now,
-            panVelocity: panVelocity,
-            isDragging: isDragging
-        )
-        setBoundaryPagePull(pull)
     }
     @discardableResult
     func prepareBoundaryPageInsertionForTesting(
@@ -6280,8 +6136,7 @@ extension PaperCanvasViewController: UIScrollViewDelegate {
             contentOffset: scrollView.contentOffset,
             panTranslation: scrollView.panGestureRecognizer.translation(in: scrollView),
             isDragging: scrollView.isDragging,
-            now: CACurrentMediaTime(),
-            schedulesHoldTimer: true
+            now: CACurrentMediaTime()
         )
         guard hasAppliedInitialViewport, isApplyingGeometry == false else { return }
         guard settledEnvironment == currentViewportEnvironment else {
@@ -7273,14 +7128,16 @@ private final class CanvasTableAccessibilityElement: UIAccessibilityElement {
     func performAddRowForTesting() -> Bool { addRow() }
     func performAddColumnForTesting() -> Bool { addColumn() }
     #endif
+}
 
-    private enum CanvasTableGrowthAxis {
+private enum CanvasTableGrowthAxis {
         case rows
         case columns
     }
 
     @MainActor
     private final class CanvasContactGestureRecognizer: UIGestureRecognizer, UIGestureRecognizerDelegate {
+        private var trackedTouches: Set<ObjectIdentifier> = []
         var onContactBegan: (() -> Void)?
         var onContactEnded: (() -> Void)?
         var shouldTrackDirectTouches: () -> Bool = { false }
@@ -7527,7 +7384,7 @@ final class PaperPageDecorationView: UIView {
             template: template,
             logicalPageSize: logicalPageSize,
             renderScale: renderScale,
-            visibleRect: visibleLogicalRect,
+            visibleLogicalRect: visibleLogicalRect,
             dotDiameter: dotDiameter
         )
         guard configuration != templateLayerConfiguration else { return }
@@ -7577,12 +7434,7 @@ final class PaperPageDecorationView: UIView {
 /// Immutable input for CATiledLayer's background-queue callbacks. Each draw
 /// computes only the lattice primitives intersecting that tile. This avoids a
 /// single multi-million-element path as a freeform board expands.
-    }
-
-    /// Immutable input for CATiledLayer's background-queue callbacks. Each draw
-    /// computes only the lattice primitives intersecting that tile. This avoids a
-    /// single multi-million-element path as a freeform board expands.
-    final class CanvasPaperTemplateDrawingSource: @unchecked Sendable {
+final class CanvasPaperTemplateDrawingSource: @unchecked Sendable {
         private struct AxisLattice {
             let first: CGFloat
             let spacing: CGFloat
@@ -7657,8 +7509,7 @@ final class PaperPageDecorationView: UIView {
             pageSize.height > 0,
             renderScale.isFinite,
             renderScale > 0 else { return }
-        guard nativePageBounds.width.isFinite,
-            nativePageBounds.height.isFinite else { return }
+        let nativePageBounds = CGRect(origin: .zero, size: CGSize(width: pageSize.width * renderScale, height: pageSize.height * renderScale))
         let nativeClip = context.boundingBoxOfClipPath.intersection(nativePageBounds)
         guard nativeClip.isNull == false, nativeClip.isEmpty == false else { return }
         let logicalClip = CGRect(
@@ -8322,4 +8173,3 @@ private extension CGFloat {
         Swift.min(Swift.max(self, range.lowerBound), range.upperBound)
     }
 }
-

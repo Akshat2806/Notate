@@ -64,7 +64,7 @@ struct LibraryTagEditor: View {
                     Button("Cancel", role: .cancel) { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Create", action: commit)
+                    Button(title.hasPrefix("Edit") ? "Save" : "Create", action: commit)
                         .disabled(trimmedName.isEmpty)
                 }
             }
@@ -286,6 +286,7 @@ struct LibraryFolderEditor: View {
         name.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    @ViewBuilder
     private var folderColorGrid: some View {
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 50))], spacing: 10) {
             ForEach(LibraryColorDraft.folderPalette, id: \.self) { color in
@@ -328,9 +329,7 @@ struct LibraryFolderEditor: View {
             .onChange(of: customColor) { _, value in
                 selectedColor = LibraryColorDraft(value)
             }
-    }
-
-        .padding(.vertical, 6)
+            .padding(.vertical, 6)
     }
 
     private var folderIconGrid: some View {
@@ -365,11 +364,11 @@ struct LibraryFolderEditor: View {
                         lineWidth: symbolName == symbol.name ? 1.5 : 0.8
                     )
                 }
+                .buttonStyle(.plain)
+                .accessibilityLabel(symbol.label)
+                .accessibilityValue(symbolName == symbol.name ? "Selected" : "")
+                .accessibilityAddTraits(symbolName == symbol.name ? .isSelected : [])
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel(symbol.label)
-            .accessibilityValue(symbolName == symbol.name ? "Selected" : "")
-            .accessibilityAddTraits(symbolName == symbol.name ? .isSelected : [])
         }
         .padding(.vertical, 6)
     }
@@ -516,7 +515,6 @@ struct LibraryNotebookEditor: View {
                 .padding(.horizontal, 2)
                 .scrollIndicators(.hidden)
             }
-        }
         .frame(maxWidth: 620)
         .padding(
             .horizontal,
@@ -535,6 +533,7 @@ struct LibraryNotebookEditor: View {
                 Button("Create & Open", action: commit)
                     .disabled(trimmedName.isEmpty)
             }
+        }
         }
         .task {
             try? await Task.sleep(for: .milliseconds(120))
@@ -602,9 +601,10 @@ struct LibraryNotebookEditor: View {
                 from: transfer.fileURL
             )
             let draft = LibraryCustomCoverDraft(data: normalized)
-            withAnimation(reduceMotion ? nil : NotateDesign.Motion.selection)
-            customCover = draft
-            coverChoice = .customAsset(relativePath: draft.itemRelativePath)
+            withAnimation(reduceMotion ? nil : NotateDesign.Motion.selection) {
+                customCover = draft
+                coverChoice = .customAsset(relativePath: draft.itemRelativePath)
+            }
         } catch {
             coverImportError = error.localizedDescription
         }
@@ -774,10 +774,11 @@ struct LibraryCoverPicker: View {
                 from: transfer.fileURL
             )
             let draft = LibraryCustomCoverDraft(data: normalized)
-            withAnimation(reduceMotion ? nil : NotateDesign.Motion.selection)
-            customCover = draft
-            customPreviewData = normalized
-            selectedChoice = .customAsset(relativePath: draft.itemRelativePath)
+            withAnimation(reduceMotion ? nil : NotateDesign.Motion.selection) {
+                customCover = draft
+                customPreviewData = normalized
+                selectedChoice = .customAsset(relativePath: draft.itemRelativePath)
+            }
         } catch {
             coverImportError = error.localizedDescription
         }
@@ -1346,9 +1347,11 @@ struct LibrarySettingsView: View {
 
     private var settingsHeader: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Color.clear
-                .frame(height: 46)
-                .accessibilityHidden(true)
+            HStack {
+                LibraryRevealSidebarButton()
+                Spacer(minLength: 0)
+            }
+            .frame(minHeight: 46)
             Text("Settings")
                 .font(.largeTitle.weight(.bold))
                 .fontDesign(.serif)

@@ -4,57 +4,11 @@ import SwiftUI
 import UniformTypeIdentifiers
 import UIKit
 
-/// Keeps the canvas picker and the two editor action clusters in separate
-/// layout corridors. When the canvas becomes narrower (for example beside the
-/// assistant rail or in iPad multitasking), the chrome moves to two rows before
-/// those corridors can overlap.
-enum CanvasEditorChromeLayout {
-    static let assistantActionTrailingClearance = NotateDesign.Spacing.control
+private struct CanvasChromeHeightPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
 
-    private static let outerHorizontalPadding: CGFloat = 16
-    private static let pickerToActionsGap = NotateDesign.Spacing.content
-    /// Reader, Assist, and More form the larger trailing cluster. Reserving the
-    /// larger side symmetrically keeps the centered picker clear in LTR and RTL.
-    private static let actionCountPerSide: CGFloat = 3
-
-    /// Undo, redo, one visible scrolling tool, Add, the picker divider, and
-    /// the picker's own tight horizontal padding.
-    private static let minimumPickerWidth =
-        (3 * NotateDesign.Control.standard)
-        + NotateDesign.Control.minimumHitTarget
-        + 7
-        + (2 * NotateDesign.Spacing.tight)
-
-    static func usesStackedLayout(
-        availableWidth: CGFloat,
-        isAccessibilitySize: Bool,
-        isAssistantRailPresented: Bool
-    ) -> Bool {
-        isAccessibilitySize
-            || availableWidth < minimumSingleRowWidth(
-                isAssistantRailPresented: isAssistantRailPresented
-            )
-    }
-
-    static func minimumSingleRowWidth(
-        isAssistantRailPresented: Bool
-    ) -> CGFloat {
-        minimumPickerWidth
-            + (2 * pickerHorizontalClearance(
-                isAssistantRailPresented: isAssistantRailPresented
-            ))
-            + (2 * outerHorizontalPadding)
-    }
-
-    static func pickerHorizontalClearance(
-        isAssistantRailPresented: Bool
-    ) -> CGFloat {
-        let actionWidths = actionCountPerSide * NotateDesign.Control.minimumHitTarget
-        let actionSpacing = (actionCountPerSide - 1) * NotateDesign.Spacing.compact
-        return actionWidths
-            + actionSpacing
-            + (isAssistantRailPresented ? assistantActionTrailingClearance : 0)
-            + pickerToActionsGap
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
     }
 }
 
@@ -101,12 +55,9 @@ final class CanvasEditorMediaTaskGate {
 struct CanvasEditorView: View {
     private enum AccessibilityFocus: Hashable {
         case recoveryFailure
-        case assistantPanel
-        case assistantButton
     }
 
     @Bindable var model: CanvasEditorModel
-    @Bindable var assistant: AssistantPresentationModel
     let item: LibraryItemRecord
     let onRename: @MainActor (String) throws -> Void
     let onClose: (@MainActor () -> Void)?
@@ -123,10 +74,15 @@ struct CanvasEditorView: View {
     @State private var selectedPhoto: PhotosPickerItem?
     @State private var importError: String?
     @State private var imageWandError: String?
+    /// Frames of the tool bar's controls, so the options panel can sit under
+    /// the one that opened it.
+    @State private var toolFrames: [String: CGRect] = [:]
     @State private var imageWandSelection: CanvasRegionSelectionContext?
     @State private var isImageWandPresented = false
     @State private var lifecycleFlushTask: Task<Void, Never>?
     @State private var mediaTaskGate = CanvasEditorMediaTaskGate()
+    @State private var topChromeHeight: CGFloat =
+        CanvasConstants.toolbarTopPadding + CanvasConstants.toolbarHeight
 
     private var importErrorPresentation: Binding<Bool> {
         Binding(
@@ -148,7 +104,6 @@ struct CanvasEditorView: View {
 
     init(
         model: CanvasEditorModel,
-        assistant: AssistantPresentationModel,
         item: LibraryItemRecord,
         onRename: @escaping @MainActor (String) throws -> Void,
         onClose: (@MainActor () -> Void)? = nil,
@@ -156,7 +111,6 @@ struct CanvasEditorView: View {
         flushesOnDisappear: Bool = true
     ) {
         self.model = model
-        self.assistant = assistant
         self.item = item
         self.onRename = onRename
         self.onClose = onClose
@@ -166,70 +120,24 @@ struct CanvasEditorView: View {
 
     var body: some View {
         GeometryReader { geometry in
-            let usesRail = usesAssistantRail(width: geometry.size.width)
-            let isAssistantRailPresented = assistant.isPresented && usesRail
-            let assistantRailWidth = isAssistantRailPresented
-                ? min(360, geometry.size.width * 0.4)
-                : 0
-            let canvasWidth = max(
-                0,
-                geometry.size.width
-                    - assistantRailWidth
-                    - (isAssistantRailPresented
-                        ? NotateDesign.Hairline.standardWidth
-                        : 0)
-            )
-
-            HStack(spacing: 0) {
-                canvasSurface(
-                    isAssistantRailPresented: isAssistantRailPresented,
-                    availableSize: CGSize(
-                        width: canvasWidth,
-                        height: geometry.size.height
-                    )
-                )
-
-                if isAssistantRailPresented {
-                    Rectangle()
-                        .fill(Color.primary.opacity(NotateDesign.Hairline.subtleOpacity))
-                        .frame(width: NotateDesign.Hairline.standardWidth)
-                        .accessibilityHidden(true)
-                    assistantPanel
-                        .frame(width: assistantRailWidth)
-                        .transition(.move(edge: .trailing).combined(with: .opacity))
-                }
-            }
-            .animation(
-                reduceMotion ? nil : NotateDesign.Motion.presentation,
-                value: assistant.isPresented
+            canvasSurface(
+                availableSize: geometry.size
             )
             .onAppear {
-                model.setReaderViewportSize(
-                    CGSize(width: canvasWidth, height: geometry.size.height)
-                )
+                model.setReaderViewportSize(geometry.size)
             }
-            .onChange(of: CGSize(width: canvasWidth, height: geometry.size.height)) {
-                _, size in
+            .onChange(of: geometry.size) { _, size in
                 model.setReaderViewportSize(size)
-            }
-            .sheet(isPresented: compactAssistantBinding(width: geometry.size.width)) {
-                assistantPanel
-                    .presentationDetents([.height(330), .medium, .large])
-                    .presentationDragIndicator(.visible)
-                    .presentationBackground(workspaceColor)
-                    .presentationBackgroundInteraction(.enabled(upThrough: .height(330)))
             }
         }
         .task {
-            // Canvas restoration owns the opening critical path. Foundation
-            // Models warmup begins only when the user opens Notate, so model
-            // preparation cannot compete with the first editable frame.
             await model.start()
-            assistant.updateCurrentPage(model.currentPageIDForAssistant)
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .inactive || phase == .background {
-                startLifecycleFlush()
+                // Inactive (Control Center, app switcher peek) saves without
+                // killing an in-flight import; only a real background cancels it.
+                startLifecycleFlush(cancelsMedia: phase == .background)
             } else if phase == .active {
                 Task { await model.retryPendingLifecycleCheckpoint() }
             }
@@ -238,14 +146,7 @@ struct CanvasEditorView: View {
             guard newGeneration > oldGeneration else { return }
             if let onVerifiedCheckpoint {
                 Task { await onVerifiedCheckpoint() }
-            } else {
-                // Standalone previews/tests have no application coordinator to
-                // publish the verified snapshot into the shared index.
-                assistant.invalidateIndex(for: item.id)
             }
-        }
-        .onChange(of: model.currentPageNumber) { _, _ in
-            assistant.updateCurrentPage(model.currentPageIDForAssistant)
         }
         .onChange(of: model.imageWandRequest?.id) { _, requestID in
             guard let request = model.imageWandRequest,
@@ -253,25 +154,10 @@ struct CanvasEditorView: View {
             imageWandSelection = request.selection
             isImageWandPresented = true
         }
-        .onChange(of: assistant.isPresented) { _, isPresented in
-            if UIAccessibility.isVoiceOverRunning {
-                accessibilityFocus = isPresented ? .assistantPanel : .assistantButton
-            }
-        }
         .onChange(of: model.launchState) { _, state in
             handleLaunchAccessibility(state)
-            if state == .ready {
-                assistant.updateCurrentPage(model.currentPageIDForAssistant)
-            }
         }
-        .onChange(of: model.saveState) { oldState, state in
-            // `markDocumentChanged` enters `.saving` synchronously, well
-            // before the trailing checkpoint is verified. An assistant
-            // request always begins after its preparation checkpoint, so the
-            // first subsequent authored edit is this saved-to-saving edge.
-            if oldState != .saving, state == .saving {
-                assistant.noteContentDidChange()
-            }
+        .onChange(of: model.saveState) { _, state in
             announceSaveFailureIfNeeded(state)
         }
         .onDisappear {
@@ -309,6 +195,15 @@ struct CanvasEditorView: View {
             onCancellation: cancelImageWand
         )
         .alert(
+            "Couldn't Complete That",
+            isPresented: Binding(
+                get: { model.actionNotice != nil },
+                set: { if $0 == false { model.actionNotice = nil } }
+            ),
+            actions: { Button("OK", role: .cancel) { model.actionNotice = nil } },
+            message: { Text(model.actionNotice ?? "") }
+        )
+        .alert(
             "Image Could Not Be Added",
             isPresented: importErrorPresentation,
             actions: {
@@ -331,7 +226,6 @@ struct CanvasEditorView: View {
     }
 
     private func canvasSurface(
-        isAssistantRailPresented: Bool,
         availableSize: CGSize
     ) -> some View {
         ZStack {
@@ -346,6 +240,7 @@ struct CanvasEditorView: View {
                     initialInputMode: model.inputMode,
                     initialPageLayout: model.pageLayout,
                     documentMode: model.documentMode,
+                    topChromeHeight: topChromeHeight,
                     callbacks: model.callbacks,
                     onAttach: model.attachCanvasController,
                     onDetach: model.detachCanvasController
@@ -392,16 +287,20 @@ struct CanvasEditorView: View {
             value: model.boundaryPagePull != nil
         )
         .overlay(alignment: .top) {
-            topChrome(
-                isAssistantRailPresented: isAssistantRailPresented,
-                availableWidth: availableSize.width
-            )
-            .disabled(
-                model.launchState != .ready || model.isReaderModeTransitioning
-            )
-            .allowsHitTesting(
-                model.launchState == .ready && model.isReaderModeTransitioning == false
-            )
+            // Editing controls wait for a ready canvas, but Back must always
+            // work or a failed recovery would trap the person in the note.
+            topChrome(availableWidth: availableSize.width)
+            .disabled(model.isReaderModeTransitioning)
+            .allowsHitTesting(model.isReaderModeTransitioning == false)
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if model.supportsPageStack,
+               model.pageCount > 1 || model.showsAddPageAffordance,
+               model.isReaderMode == false, model.launchState == .ready {
+                pageIndicator
+                    .padding(.trailing, 16)
+                    .padding(.bottom, 16)
+            }
         }
         .overlay(alignment: .bottomLeading) {
             if model.allowsAuthoring {
@@ -411,88 +310,92 @@ struct CanvasEditorView: View {
             }
         }
         .overlay(alignment: .bottom) {
-            statusChrome
-        }
-    }
-
-    private func usesAssistantRail(width: CGFloat) -> Bool {
-        width >= 700
-    }
-
-    private func compactAssistantBinding(width: CGFloat) -> Binding<Bool> {
-        Binding(
-            get: { assistant.isPresented && usesAssistantRail(width: width) == false },
-            set: { isPresented in
-                if isPresented == false { closeAssistant() }
+            VStack(spacing: NotateDesign.Spacing.compact) {
+                if model.isImageWandSelectionActive {
+                    imageWandPrompt
+                }
+                statusChrome
             }
-        )
-    }
-
-    private var assistantPanel: some View {
-        AssistantPanelView(
-            assistant: assistant,
-            surfaceColor: workspaceColor,
-            onDismiss: closeAssistant,
-            onInsertText: model.insertAssistantText,
-            allowsInsertion: model.allowsAuthoring
-        )
-        .accessibilityFocused($accessibilityFocus, equals: .assistantPanel)
+        }
+        .onPreferenceChange(CanvasChromeHeightPreferenceKey.self) { height in
+            guard height.isFinite, height > 0,
+                  abs(topChromeHeight - height) > 0.5 else { return }
+            topChromeHeight = height
+        }
     }
 
     @ViewBuilder
-    private func topChrome(
-        isAssistantRailPresented: Bool,
-        availableWidth: CGFloat
-    ) -> some View {
-        Group {
-            if model.isReaderMode {
-                editorIdentityAndActions
-            } else if CanvasEditorChromeLayout.usesStackedLayout(
-                availableWidth: availableWidth,
-                isAccessibilitySize: dynamicTypeSize.isAccessibilitySize,
-                isAssistantRailPresented: isAssistantRailPresented
-            ) {
-                VStack(spacing: NotateDesign.Spacing.compact) {
-                    editorIdentityAndActions
-                    editorPicker
-                }
-            } else {
-                ZStack(alignment: .top) {
-                    editorPicker
-                        .padding(
-                            .horizontal,
-                            CanvasEditorChromeLayout.pickerHorizontalClearance(
-                                isAssistantRailPresented: isAssistantRailPresented
-                            )
-                        )
-                    editorIdentityAndActions
-                        .padding(
-                            .trailing,
-                            isAssistantRailPresented
-                                ? CanvasEditorChromeLayout.assistantActionTrailingClearance
-                                : 0
-                        )
+    private func topChrome(availableWidth: CGFloat) -> some View {
+        // One row: Back, Pages, the tool bar (centred), Reader, More. Only this
+        // row is measured. The options panel floats beneath it as an overlay,
+        // so opening or closing it never changes the canvas inset.
+        editorIdentityAndActions(availableWidth: availableWidth)
+            .padding(.horizontal, 16)
+            .padding(.top, 8)
+            .frame(maxWidth: .infinity, alignment: .top)
+            .background {
+                GeometryReader { proxy in
+                    Color.clear.preference(
+                        key: CanvasChromeHeightPreferenceKey.self,
+                        value: proxy.size.height
+                    )
                 }
             }
-        }
-        .padding(.horizontal, 16)
-        .padding(.top, 8)
-        .frame(maxWidth: .infinity, alignment: .top)
+            .coordinateSpace(name: CanvasToolPicker.barSpace)
+            .onPreferenceChange(CanvasToolFramesKey.self) { frames in
+                toolFrames = frames
+            }
+            .overlay(alignment: .topLeading) {
+                // Centred under the toolbar, top edge just below the top row.
+                // (Alignment guides can't do this: they only shift a view
+                // relative to a sibling, and the panel has none.)
+                GeometryReader { proxy in
+                    if model.isReaderMode == false, model.overlay != .none {
+                        let barMidX = toolFrames["bar"]?.midX ?? proxy.size.width / 2
+                        let limit = max(proxy.size.width / 2 - 150, 0)
+                        let shift = min(max(barMidX - proxy.size.width / 2, -limit), limit)
+
+                        toolPicker(placement: .panel, availableWidth: availableWidth)
+                            .frame(width: proxy.size.width, alignment: .center)
+                            .offset(
+                                x: shift,
+                                y: proxy.size.height + CanvasToolPicker.PanelMetrics.gapBelowBar
+                            )
+                    }
+                }
+            }
+            .animation(
+                reduceMotion ? nil : .easeOut(duration: 0.15),
+                value: model.overlay
+            )
+            .accessibilityIdentifier("canvas.top.chrome")
     }
 
-    private var editorPicker: some View {
-        CanvasToolPicker(
+    private func toolPicker(
+        placement: CanvasToolPicker.Placement,
+        availableWidth: CGFloat
+    ) -> some View {
+        let anchorKey = CanvasToolPicker.anchorKey(
+            for: model.overlay,
+            activeTool: model.toolState.activeTool
+        )
+
+        return CanvasToolPicker(
             toolState: model.toolState,
             overlay: model.overlay,
             preferredGeometryTool: model.preferredGeometryTool,
             activeGeometryTool: model.activeGeometryTool,
             canUndo: model.canUndo,
             canRedo: model.canRedo,
+            placement: placement,
+            panelAnchorMidX: anchorKey.flatMap { toolFrames[$0]?.midX },
+            panelContainerWidth: availableWidth,
             onIntent: handleToolbarIntent
         )
+        .disabled(model.launchState != .ready)
     }
 
-    private var editorIdentityAndActions: some View {
+    private func editorIdentityAndActions(availableWidth: CGFloat) -> some View {
         GlassEffectContainer(spacing: NotateDesign.Spacing.compact) {
             HStack(spacing: NotateDesign.Spacing.compact) {
                 if let onClose {
@@ -514,11 +417,14 @@ struct CanvasEditorView: View {
                         CanvasPageOverviewButton(model: model)
                     }
                 }
-                Spacer()
+                Spacer(minLength: NotateDesign.Spacing.compact)
+                if model.isReaderMode == false {
+                    toolPicker(placement: .bar, availableWidth: availableWidth)
+                    Spacer(minLength: NotateDesign.Spacing.compact)
+                }
                 if model.supportsPageStack {
                     readerButton
                 }
-                assistantButton
                 CanvasMoreButton(
                     model: model,
                     item: item,
@@ -526,6 +432,67 @@ struct CanvasEditorView: View {
                 )
             }
         }
+    }
+
+    /// Wand is a one-shot mode, so it announces itself and offers a way out
+    /// without covering the page.
+    private var imageWandPrompt: some View {
+        HStack(spacing: NotateDesign.Spacing.control) {
+            Image(systemName: "wand.and.stars")
+                .foregroundStyle(NotateDesign.Palette.accent)
+            Text("Circle what you want to transform")
+                .font(.subheadline.weight(.medium))
+            Button("Cancel") { cancelImageWand() }
+                .font(.subheadline.weight(.semibold))
+                .accessibilityIdentifier("canvas.wand.cancel")
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .notateGlassSurface(shape: Capsule())
+        .padding(.bottom, 24)
+        .transition(.opacity)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("canvas.wand.prompt")
+    }
+
+    /// Orientation without chrome: which page of the note is in view.
+    private var pageIndicator: some View {
+        HStack(spacing: NotateDesign.Spacing.compact) {
+            Text("\(model.currentPageNumber) / \(model.pageCount)")
+                .font(.footnote.monospacedDigit().weight(.medium))
+                .foregroundStyle(.secondary)
+                .allowsHitTesting(false)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Page \(model.currentPageNumber) of \(model.pageCount)")
+                .accessibilityIdentifier("canvas.page.indicator")
+
+            if model.showsAddPageAffordance {
+                Rectangle()
+                    .fill(Color.primary.opacity(0.22))
+                    .frame(width: 1, height: 16)
+                    .accessibilityHidden(true)
+                Button {
+                    model.addPageAtEndFromAffordance()
+                } label: {
+                    Label("Add Page", systemImage: "plus")
+                        .font(.footnote.weight(.semibold))
+                        .labelStyle(.titleAndIcon)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(NotateDesign.Palette.accent)
+                .accessibilityIdentifier("canvas.page.add")
+                .transition(.opacity)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, model.showsAddPageAffordance ? 10 : 6)
+        .notateGlassSurface(shape: Capsule())
+        .animation(
+            reduceMotion ? nil : NotateDesign.Motion.feedback,
+            value: model.showsAddPageAffordance
+        )
+        .sensoryFeedback(.impact(weight: .light), trigger: model.pageCount)
     }
 
     private var readerButton: some View {
@@ -547,29 +514,6 @@ struct CanvasEditorView: View {
                 ? "Returns to editing on the current page"
                 : "Opens a read-only view of this note"
         )
-    }
-
-    private var assistantButton: some View {
-        Button {
-            if assistant.isPresented {
-                closeAssistant()
-            } else {
-                assistant.open()
-            }
-        } label: {
-            NotateCompactGlassButtonLabel {
-                NotateAssistantIdentityMark(size: 25)
-                    .opacity(assistant.isPresented ? 1 : 0.90)
-            }
-        }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier("canvas.assist")
-        .accessibilityLabel(assistant.isPresented ? "Close Notate" : "Open Notate")
-        .accessibilityFocused($accessibilityFocus, equals: .assistantButton)
-    }
-
-    private func closeAssistant() {
-        assistant.close()
     }
 
     private var workspaceColor: Color {
@@ -657,10 +601,9 @@ struct CanvasEditorView: View {
                         }
                     }
                     .padding(.horizontal, CanvasConstants.pageGap)
-                    .padding(
-                        .top,
-                        CanvasConstants.toolbarTopPadding
-                            + CanvasConstants.toolbarHeight
+                        .padding(
+                            .top,
+                            topChromeHeight
                     )
                 } else {
                     VStack {
@@ -674,8 +617,7 @@ struct CanvasEditorView: View {
                     }
                     .padding(
                         .top,
-                        CanvasConstants.toolbarTopPadding
-                            + CanvasConstants.toolbarHeight
+                        topChromeHeight
                             + CanvasConstants.firstPageToolbarGap / 2
                     )
                     .padding(.bottom, CanvasConstants.pageGap)
@@ -742,7 +684,6 @@ struct CanvasEditorView: View {
             imageWandError = "Image Playground requires a compatible iPad with image generation enabled in Apple Intelligence settings."
             return
         }
-        closeAssistant()
         model.beginImageWandSelection()
         UIAccessibility.post(
             notification: .announcement,
@@ -843,13 +784,26 @@ struct CanvasEditorView: View {
         }
     }
 
-    private func startLifecycleFlush() {
-        let pendingMediaTask = mediaTaskGate.cancel()
+    private func startLifecycleFlush(cancelsMedia: Bool = true) {
         guard lifecycleFlushTask == nil else { return }
+        // Ask for background time before anything is awaited, so a slow
+        // import cannot eat the window the save needs.
+        var backgroundTask = UIBackgroundTaskIdentifier.invalid
+        backgroundTask = UIApplication.shared.beginBackgroundTask(
+            withName: "Canvas lifecycle flush"
+        ) {
+            UIApplication.shared.endBackgroundTask(backgroundTask)
+            backgroundTask = .invalid
+        }
+        let pendingMediaTask = cancelsMedia ? mediaTaskGate.cancel() : nil
         lifecycleFlushTask = Task {
-            await pendingMediaTask?.value
+            // Save first; the cancelled import only needs to wind down.
             await model.flushForLifecycle()
+            await pendingMediaTask?.value
             lifecycleFlushTask = nil
+            if backgroundTask != .invalid {
+                UIApplication.shared.endBackgroundTask(backgroundTask)
+            }
         }
     }
 
@@ -888,9 +842,30 @@ private struct CanvasBoundaryPageIndicator: View {
     let pull: CanvasBoundaryPagePull
 
     var body: some View {
+        HStack(spacing: NotateDesign.Spacing.compact) {
+            ring
+            // Words make the gesture self-explanatory; they change no
+            // thresholds and are hidden from VoiceOver (Add Page is the
+            // accessible route).
+            Text(pull.isArmed ? "Release to add page" : "Pull to add page")
+                .font(.footnote.weight(.medium))
+                .foregroundStyle(pull.isArmed ? Color.primary : Color.secondary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .notateGlassSurface(shape: Capsule())
+                .contentTransition(.opacity)
+        }
+        .animation(
+            reduceMotion ? nil : NotateDesign.Motion.feedback,
+            value: pull.isArmed
+        )
+        .accessibilityHidden(true)
+    }
+
+    private var ring: some View {
         let circle = Circle()
 
-        ZStack {
+        return ZStack {
             circle
                 .fill(pull.isArmed ? NotateDesign.Palette.accent : Color.clear)
 
