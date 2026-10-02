@@ -214,8 +214,32 @@ final class NotateTests: XCTestCase {
     }
 
     @MainActor
-    func testPickerPillWidthIsPositiveAndGroupedWiderThanHistory() {
-        XCTAssertGreaterThan(CanvasToolPicker.preferredPillWidth, CanvasToolPicker.preferredHistoryWidth)
+    func testToolBarKeepsElevenControlsAndThreePipesInOneRow() {
+        // Undo Redo | Lasso Pen Pencil Brush Highlighter | Eraser Ruler Laser | +
+        XCTAssertEqual(CanvasToolPicker.BarMetrics.itemCount, 11)
+        XCTAssertEqual(CanvasToolPicker.BarMetrics.pipeCount, 3)
+        XCTAssertGreaterThan(CanvasToolPicker.preferredBarWidth, 500)
+        XCTAssertLessThan(CanvasToolPicker.preferredBarWidth, 640)
+    }
+
+    @MainActor
+    func testEveryPanelUsesTheSameSixColumnWidth() {
+        XCTAssertEqual(CanvasToolPicker.PanelMetrics.contentWidth, 252)
+    }
+
+    @MainActor
+    func testPanelAnchorsFollowTheControlThatOpenedThem() {
+        XCTAssertEqual(
+            CanvasToolPicker.anchorKey(for: .toolOptions(.calligraphy), activeTool: .calligraphy),
+            "pen"
+        )
+        XCTAssertEqual(
+            CanvasToolPicker.anchorKey(for: .toolOptions(.crayon), activeTool: .crayon),
+            "fountainPen"
+        )
+        XCTAssertEqual(CanvasToolPicker.anchorKey(for: .geometryTools, activeTool: .pen), "ruler")
+        XCTAssertEqual(CanvasToolPicker.anchorKey(for: .insert, activeTool: .pen), "add")
+        XCTAssertNil(CanvasToolPicker.anchorKey(for: .none, activeTool: .pen))
     }
 
 

@@ -632,14 +632,13 @@ public final class CanvasEditorModel {
             canvasController?.redo()
 
         case let .tapTool(tool):
+            // First tap selects; tapping the selected tool again opens its
+            // panel. (Style changes inside the panel use `.showOptions`.)
             if toolState.activeTool == tool {
                 toggleOptions(for: tool)
             } else {
                 select(tool)
-                // Choosing a tool reveals its style, thickness, and color
-                // strip in place; the strip follows style changes within a
-                // family because each style is its own tool.
-                overlay = tool.supportsOptions ? .toolOptions(tool) : .none
+                overlay = .none
             }
 
         case let .showOptions(tool):
@@ -694,22 +693,16 @@ public final class CanvasEditorModel {
                 : .insert
 
         case .tapGeometryToolSlot:
-            // One slot, one tap target: off -> ruler -> protractor ->
-            // compass -> off. The chooser strip is a long-press shortcut.
-            let order = CanvasGeometryTool.allCases
-            if let active = activeGeometryTool,
-               let index = order.firstIndex(of: active) {
-                let next = order.index(after: index)
-                activeGeometryTool = next < order.endIndex ? order[next] : nil
-            } else {
+            // First tap turns the preferred instrument on (no panel); tapping
+            // again opens the Ruler / Protractor / Compass panel. Turning an
+            // instrument off is done from that panel.
+            if activeGeometryTool == nil {
                 activeGeometryTool = preferredGeometryTool
+                overlay = .none
+                canvasController?.setGeometryTool(activeGeometryTool)
+            } else {
+                overlay = overlay == .geometryTools ? .none : .geometryTools
             }
-            if let activeGeometryTool { preferredGeometryTool = activeGeometryTool }
-            overlay = .none
-            canvasController?.setGeometryTool(activeGeometryTool)
-
-        case .showGeometryChooser:
-            overlay = overlay == .geometryTools ? .none : .geometryTools
 
         case let .toggleGeometryTool(tool):
             toggleGeometryTool(tool)

@@ -18,11 +18,6 @@ private struct CanvasChromeHeightPreferenceKey: PreferenceKey {
 /// those corridors can overlap.
 enum CanvasEditorChromeLayout {
     private static let outerHorizontalPadding: CGFloat = 16
-    /// Back, pages, reader, and more share the row with the tool pill.
-    private static let navigationClusterWidth =
-        (4 * NotateDesign.Control.minimumHitTarget)
-        + CanvasToolPicker.preferredHistoryWidth
-        + (7 * NotateDesign.Spacing.compact)
 
     static func usesStackedLayout(
         availableWidth: CGFloat,
@@ -31,10 +26,10 @@ enum CanvasEditorChromeLayout {
         isAccessibilitySize || availableWidth < minimumSingleRowWidth
     }
 
+    /// The single-row tool bar needs its full width; below that it wraps onto
+    /// a six-column grid.
     static var minimumSingleRowWidth: CGFloat {
-        CanvasToolPicker.preferredPillWidth
-            + navigationClusterWidth
-            + (2 * outerHorizontalPadding)
+        CanvasToolPicker.preferredBarWidth + (2 * outerHorizontalPadding)
     }
 }
 
@@ -100,6 +95,9 @@ struct CanvasEditorView: View {
     @State private var selectedPhoto: PhotosPickerItem?
     @State private var importError: String?
     @State private var imageWandError: String?
+    /// Frames of the tool bar's controls, so the options panel can sit under
+    /// the one that opened it.
+    @State private var toolFrames: [String: CGRect] = [:]
     @State private var imageWandSelection: CanvasRegionSelectionContext?
     @State private var isImageWandPresented = false
     @State private var lifecycleFlushTask: Task<Void, Never>?
@@ -353,14 +351,17 @@ struct CanvasEditorView: View {
             isAccessibilitySize: dynamicTypeSize.isAccessibilitySize
         )
 
+        // Only the navigation row and the tool bar are measured. The options
+        // panel floats beneath them as an overlay, so opening or closing it
+        // never changes the canvas inset (the page must not move).
         VStack(spacing: NotateDesign.Spacing.compact) {
-            editorIdentityAndActions(isStacked: isStacked)
+            editorIdentityAndActions
             if model.isReaderMode == false {
-                if isStacked {
-                    toolPicker(placement: .pill, isStacked: true)
-                }
-                if model.overlay != .none {
-                    toolPicker(placement: .options, isStacked: isStacked)
+                HStack(spacing: 0) {
+                    toolPicker(placement: .bar, isStacked: isStacked, availableWidth: availableWidth)
+                    if isStacked == false {
+                        Spacer(minLength: 0)
+                    }
                 }
             }
         }
@@ -375,14 +376,29 @@ struct CanvasEditorView: View {
                 )
             }
         }
+        .coordinateSpace(name: CanvasToolPicker.barSpace)
+        .onPreferenceChange(CanvasToolFramesKey.self) { frames in
+            toolFrames = frames
+        }
+        .overlay(alignment: .bottomLeading) {
+            if model.isReaderMode == false, model.overlay != .none {
+                toolPicker(placement: .panel, isStacked: isStacked, availableWidth: availableWidth)
+            }
+        }
         .accessibilityIdentifier("canvas.top.chrome")
     }
 
     private func toolPicker(
         placement: CanvasToolPicker.Placement,
-        isStacked: Bool
+        isStacked: Bool,
+        availableWidth: CGFloat
     ) -> some View {
-        CanvasToolPicker(
+        let anchorKey = CanvasToolPicker.anchorKey(
+            for: model.overlay,
+            activeTool: model.toolState.activeTool
+        )
+
+        return CanvasToolPicker(
             toolState: model.toolState,
             overlay: model.overlay,
             preferredGeometryTool: model.preferredGeometryTool,
@@ -391,12 +407,14 @@ struct CanvasEditorView: View {
             canRedo: model.canRedo,
             usesCompactLayout: isStacked,
             placement: placement,
+            panelAnchorMidX: anchorKey.flatMap { toolFrames[$0]?.midX },
+            panelContainerWidth: availableWidth,
             onIntent: handleToolbarIntent
         )
         .disabled(model.launchState != .ready)
     }
 
-    private func editorIdentityAndActions(isStacked: Bool) -> some View {
+    private var editorIdentityAndActions: some View {
         GlassEffectContainer(spacing: NotateDesign.Spacing.compact) {
             HStack(spacing: NotateDesign.Spacing.compact) {
                 if let onClose {
@@ -418,14 +436,7 @@ struct CanvasEditorView: View {
                         CanvasPageOverviewButton(model: model)
                     }
                 }
-                Spacer(minLength: NotateDesign.Spacing.compact)
-                if model.isReaderMode == false, isStacked == false {
-                    toolPicker(placement: .pill, isStacked: false)
-                    Spacer(minLength: NotateDesign.Spacing.compact)
-                }
-                if model.isReaderMode == false {
-                    toolPicker(placement: .history, isStacked: isStacked)
-                }
+                Spacer()
                 if model.supportsPageStack {
                     readerButton
                 }

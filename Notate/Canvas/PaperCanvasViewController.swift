@@ -939,9 +939,15 @@ endInteractiveZoomPresentation()
               abs(topChromeHeight - height) > 0.5 else { return }
         topChromeHeight = height
         geometryInstrumentView.topChromeHeight = height
+        // The chrome height feeds the horizontal fit scale and the page
+        // stride, so a cached plan built for the old height is stale.
+        invalidateLayoutPlan()
         guard scrollView.bounds.width > 0, scrollView.bounds.height > 0,
               hasActiveContact == false else { return }
-        let viewport = currentViewportState()
+        let viewport = viewportForCurrentPageMode(
+            currentViewportState(),
+            prefersHorizontalFit: usesHorizontalPageFit
+        )
         applyViewport(viewport, focusedOn: focusedPageID, preserveFocusedPage: true)
     }
 

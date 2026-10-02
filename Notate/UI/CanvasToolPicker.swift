@@ -30,37 +30,72 @@ struct CanvasTableSizeGridGeometry {
     }
 }
 
+/// Frames of the bar's controls, measured in the editor's "canvas.tool.bar"
+/// coordinate space, so the options panel can sit under the control that
+/// opened it.
+struct CanvasToolFramesKey: PreferenceKey {
+    static var defaultValue: [String: CGRect] = [:]
+
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
+        value.merge(nextValue()) { _, new in new }
+    }
+}
+
+private extension View {
+    func reportsToolFrame(_ key: String) -> some View {
+        background {
+            GeometryReader { proxy in
+                Color.clear.preference(
+                    key: CanvasToolFramesKey.self,
+                    value: [key: proxy.frame(in: .named(CanvasToolPicker.barSpace))]
+                )
+            }
+        }
+    }
+}
+
+/// The editor's tool bar and, when a tool is tapped a second time, a compact
+/// glass panel for it.
+///
+/// The bar is one control row: `Undo Redo | Lasso Pen Pencil Brush Highlighter
+/// | Eraser Ruler Laser | +`. The panel is rendered separately (as an overlay
+/// beneath the bar) so opening or closing it never changes the canvas inset.
 public struct CanvasToolPicker: View {
-    /// The picker is rendered as two pieces so the editor can seat the tool
-    /// pill on the same line as its navigation buttons while the options strip
-    /// opens directly beneath it.
+    /// Name of the coordinate space the editor gives the chrome; the bar
+    /// reports its controls' frames in it.
+    static let barSpace = "canvas.tool.bar"
+
     public enum Placement: Sendable {
-        case pill
-        case history
-        case options
+        case bar
+        case panel
     }
 
-    enum PillMetrics {
-        static let itemWidth: CGFloat = 38
-        static let itemHeight: CGFloat = 40
+    enum BarMetrics {
+        static let itemSize: CGFloat = NotateDesign.Control.standard
         static let itemSpacing: CGFloat = 2
-        static let horizontalPadding: CGFloat = 6
-        static let groupSpacing: CGFloat = 6
-        static let dividerWidth: CGFloat = 7
-        /// Draw group: lasso | pen pencil brush highlighter | eraser.
-        static let drawGroupItems = 6
-        static let drawGroupDividers = 2
-        /// Aids group: laser, ruler, add.
-        static let aidsGroupItems = 3
+        static let horizontalPadding: CGFloat = 8
+        static let verticalPadding: CGFloat = 8
+        static let pipeSlot: CGFloat = 9
+        static let itemCount = 11
+        static let pipeCount = 3
+    }
+
+    /// One 6-column grid for every panel so switching tools never changes its
+    /// width.
+    enum PanelMetrics {
+        static let column: CGFloat = 42
+        static let columns = 6
+        static let padding: CGFloat = 6
+        static let lineHeight: CGFloat = 42
+        static let cornerRadius: CGFloat = 20
+        static let gapBelowBar: CGFloat = 8
+        static let edgeMargin: CGFloat = 16
+        static var contentWidth: CGFloat { column * CGFloat(columns) }
     }
 
     enum StripMetrics {
-        static let horizontalPadding: CGFloat = 10
-        static let verticalPadding: CGFloat = 4
-        static let sectionSpacing: CGFloat = 8
         static let chipWidth: CGFloat = 34
         static let chipHeight: CGFloat = 38
-        static let swatchDiameter: CGFloat = 22
     }
 
     enum TableSizePickerMetrics {
@@ -75,29 +110,23 @@ public struct CanvasToolPicker: View {
         static let coordinateSpaceName = "TableSizePicker"
     }
 
-    /// The width the tool pill needs to show every control without scrolling.
-    /// The editor uses it to decide whether the pill can share the navigation
-    /// row.
-    static var preferredPillWidth: CGFloat {
-        func group(items: Int, dividers: Int) -> CGFloat {
-            let children = CGFloat(items + dividers)
-            return CGFloat(items) * PillMetrics.itemWidth
-                + CGFloat(dividers) * PillMetrics.dividerWidth
-                + (children - 1) * PillMetrics.itemSpacing
-                + (2 * PillMetrics.horizontalPadding)
-        }
-        return group(
-            items: PillMetrics.drawGroupItems,
-            dividers: PillMetrics.drawGroupDividers
-        )
-            + PillMetrics.groupSpacing
-            + group(items: PillMetrics.aidsGroupItems, dividers: 0)
+    /// Width the single-row bar needs. The editor stacks the bar under the
+    /// navigation buttons when the window is narrower than this.
+    static var preferredBarWidth: CGFloat {
+        CGFloat(BarMetrics.itemCount) * BarMetrics.itemSize
+            + CGFloat(BarMetrics.pipeCount) * BarMetrics.pipeSlot
+            + CGFloat(BarMetrics.itemCount + BarMetrics.pipeCount - 1) * BarMetrics.itemSpacing
+            + 2 * BarMetrics.horizontalPadding
     }
 
-    /// Undo and redo share one small capsule.
-    static var preferredHistoryWidth: CGFloat {
-        (2 * PillMetrics.itemWidth) + PillMetrics.itemSpacing
-            + (2 * PillMetrics.horizontalPadding)
+    /// Which bar control a panel for `overlay` hangs from.
+    static func anchorKey(for overlay: CanvasOverlay, activeTool: CanvasTool) -> String? {
+        switch overlay {
+        case let .toolOptions(tool): tool.toolbarFamilyRoot.rawValue
+        case .geometryTools: "ruler"
+        case .insert, .shapes, .tableSizePicker: "add"
+        case .none: nil
+        }
     }
 
     public let toolState: CanvasToolState
@@ -108,6 +137,10 @@ public struct CanvasToolPicker: View {
     public let canRedo: Bool
     public let usesCompactLayout: Bool
     public let placement: Placement
+    /// Horizontal centre of the control the panel belongs to, and the width
+    /// of the area it may occupy. Only used by `.panel`.
+    public let panelAnchorMidX: CGFloat?
+    public let panelContainerWidth: CGFloat
     public let onIntent: (CanvasToolbarIntent) -> Void
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -132,8 +165,6 @@ public struct CanvasToolPicker: View {
     @GestureState private var pressedTableSize: CanvasTableSize? = nil
     @State private var tableSizeSlideDidRecognize = false
 
-    @Namespace private var glassNamespace
-
     public init(
         toolState: CanvasToolState,
         overlay: CanvasOverlay,
@@ -142,7 +173,9 @@ public struct CanvasToolPicker: View {
         canUndo: Bool,
         canRedo: Bool,
         usesCompactLayout: Bool = false,
-        placement: Placement = .pill,
+        placement: Placement = .bar,
+        panelAnchorMidX: CGFloat? = nil,
+        panelContainerWidth: CGFloat = 0,
         onIntent: @escaping (CanvasToolbarIntent) -> Void
     ) {
         self.toolState = toolState
@@ -153,84 +186,93 @@ public struct CanvasToolPicker: View {
         self.canRedo = canRedo
         self.usesCompactLayout = usesCompactLayout
         self.placement = placement
+        self.panelAnchorMidX = panelAnchorMidX
+        self.panelContainerWidth = panelContainerWidth
         self.onIntent = onIntent
     }
 
     public var body: some View {
         switch placement {
-        case .pill:
-            toolPill
+        case .bar:
+            toolBar
+                .sensoryFeedback(.selection, trigger: toolState.activeTool)
                 .onChange(of: overlay) { _, newValue in
                     if case .insert = newValue {
                         isAddButtonFocused = true
                     }
                 }
-        case .history:
-            historyPill
-        case .options:
-            GlassEffectContainer(spacing: NotateDesign.Spacing.compact) {
-                accessorySurface
-                    .frame(maxWidth: .infinity)
-            }
+        case .panel:
+            panel
+                .sensoryFeedback(
+                    .selection,
+                    trigger: toolState.configuration(for: toolState.activeTool)
+                )
         }
     }
 
-    // MARK: Tool pill
+    // MARK: Bar
 
-    private var toolPill: some View {
-        CanvasToolPillContainer(scrolls: usesCompactLayout || dynamicTypeSize.isAccessibilitySize) {
-            pickerControls
+    @ViewBuilder private var toolBar: some View {
+        Group {
+            if usesCompactLayout || dynamicTypeSize.isAccessibilitySize {
+                LazyVGrid(
+                    columns: Array(repeating: GridItem(.flexible(), spacing: 2), count: 6),
+                    spacing: 2
+                ) {
+                    barItems
+                }
+            } else {
+                HStack(spacing: BarMetrics.itemSpacing) {
+                    barItems
+                }
+            }
         }
+        .padding(.horizontal, BarMetrics.horizontalPadding)
+        .padding(.vertical, BarMetrics.verticalPadding)
+        .glassEffect(
+            .regular.interactive(),
+            in: RoundedRectangle(
+                cornerRadius: NotateDesign.Radius.chrome,
+                style: .continuous
+            )
+        )
         .accessibilityIdentifier("canvas.tool.strip")
     }
 
-    /// Segmented into two capsules so the row reads as "what I draw with"
-    /// and "what helps me", rather than one undifferentiated strip.
-    @ViewBuilder private var pickerControls: some View {
-        GlassEffectContainer(spacing: PillMetrics.groupSpacing) {
-            HStack(spacing: PillMetrics.groupSpacing) {
-                CanvasToolGroup {
-                    toolButton(.lasso)
-                    groupDivider
-                    toolButton(.pen)
-                    toolButton(.pencil)
-                    toolButton(.fountainPen)
-                    toolButton(.highlighter)
-                    groupDivider
-                    toolButton(.eraser)
-                }
-                CanvasToolGroup {
-                    toolButton(.laserPointer)
-                    rulerButton
-                    addButton
-                }
-            }
-        }
+    private var stacksBar: Bool {
+        usesCompactLayout || dynamicTypeSize.isAccessibilitySize
     }
 
-    private var groupDivider: some View {
-        Rectangle()
-            .fill(Color.primary.opacity(0.14))
-            .frame(width: 1, height: 16)
-            .frame(width: PillMetrics.dividerWidth)
-            .accessibilityHidden(true)
+    @ViewBuilder private var barItems: some View {
+        utilityButton(title: "Undo", systemImage: "arrow.uturn.backward", isEnabled: canUndo) {
+            onIntent(.undo)
+        }
+        utilityButton(title: "Redo", systemImage: "arrow.uturn.forward", isEnabled: canRedo) {
+            onIntent(.redo)
+        }
+        barPipe
+        toolButton(.lasso)
+        toolButton(.pen)
+        toolButton(.pencil)
+        toolButton(.fountainPen)
+        toolButton(.highlighter)
+        barPipe
+        toolButton(.eraser)
+        rulerButton
+        toolButton(.laserPointer)
+        barPipe
+        addButton
     }
 
-    private var historyPill: some View {
-        HStack(spacing: PillMetrics.itemSpacing) {
-            utilityButton(title: "Undo", systemImage: "arrow.uturn.backward", isEnabled: canUndo) {
-                onIntent(.undo)
-            }
-            utilityButton(title: "Redo", systemImage: "arrow.uturn.forward", isEnabled: canRedo) {
-                onIntent(.redo)
-            }
+    /// Visible only in the one-row bar; the stacked grid has no room for it.
+    @ViewBuilder private var barPipe: some View {
+        if stacksBar == false {
+            Rectangle()
+                .fill(Color.primary.opacity(0.22))
+                .frame(width: 1, height: 20)
+                .frame(width: BarMetrics.pipeSlot, height: BarMetrics.itemSize)
+                .accessibilityHidden(true)
         }
-        .padding(.horizontal, PillMetrics.horizontalPadding)
-        .frame(height: NotateDesign.Control.compactGlassDiameter)
-        .glassEffect(.regular.interactive(), in: Capsule())
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("History")
-        .accessibilityIdentifier("canvas.history")
     }
 
     private var addButton: some View {
@@ -238,9 +280,9 @@ public struct CanvasToolPicker: View {
             onIntent(.toggleInsert)
         } label: {
             Image(systemName: "plus")
-                .font(.system(size: 15, weight: .semibold))
+                .font(.system(size: 17, weight: .medium))
                 .foregroundStyle(.primary)
-                .frame(width: PillMetrics.itemWidth, height: PillMetrics.itemHeight)
+                .frame(width: BarMetrics.itemSize, height: BarMetrics.itemSize)
                 .background {
                     if isAddExpanded {
                         selectedToolBackground
@@ -249,6 +291,7 @@ public struct CanvasToolPicker: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(CanvasCrispToolButtonStyle(reduceMotion: reduceMotion))
+        .reportsToolFrame("add")
         .accessibilityFocused($isAddButtonFocused)
         .accessibilityLabel("Add")
         .accessibilityIdentifier("canvas.tool.add")
@@ -256,6 +299,8 @@ public struct CanvasToolPicker: View {
         .help("Add content")
     }
 
+    /// First tap turns the ruler on; tapping again opens the instrument panel
+    /// (Ruler, Protractor, Compass).
     private var rulerButton: some View {
         let isActive = activeGeometryTool != nil
         let isExpanded = overlay == .geometryTools
@@ -267,33 +312,44 @@ public struct CanvasToolPicker: View {
                 tool: activeGeometryTool ?? preferredGeometryTool,
                 isSelected: isActive
             )
-            .frame(width: PillMetrics.itemWidth, height: PillMetrics.itemHeight)
+            .frame(width: BarMetrics.itemSize, height: BarMetrics.itemSize)
             .background {
-                if isActive || isExpanded {
+                if isActive {
                     selectedToolBackground
+                }
+            }
+            .overlay(alignment: .bottomTrailing) {
+                if isActive {
+                    chevron(isExpanded: isExpanded)
                 }
             }
             .contentShape(Rectangle())
         }
         .buttonStyle(CanvasCrispToolButtonStyle(reduceMotion: reduceMotion))
-        .highPriorityGesture(LongPressGesture(minimumDuration: 0.4).onEnded { _ in
-            onIntent(.showGeometryChooser)
-        })
+        .reportsToolFrame("ruler")
         .accessibilityFocused($isGeometrySlotFocused)
         .accessibilityLabel("Ruler")
         .accessibilityValue(
             isActive
-                ? "\((activeGeometryTool ?? preferredGeometryTool).title) on"
+                ? "\((activeGeometryTool ?? preferredGeometryTool).title) on, options \(isExpanded ? "expanded" : "collapsed")"
                 : "Off"
         )
         .accessibilityHint(
             isActive
-                ? "Switches to the next instrument, then turns instruments off. Touch and hold to choose."
+                ? "Double tap to \(isExpanded ? "hide" : "show") the ruler, protractor and compass"
                 : "Turns on the \(preferredGeometryTool.title.lowercased())"
         )
         .accessibilityAddTraits(isActive ? .isSelected : [])
         .accessibilityIdentifier("canvas.geometry.slot")
         .help("Ruler, protractor and compass")
+    }
+
+    private func chevron(isExpanded: Bool) -> some View {
+        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+            .font(.system(size: 7, weight: .bold))
+            .foregroundStyle(Color.secondary)
+            .padding(2)
+            .accessibilityHidden(true)
     }
 
     private var isAddExpanded: Bool {
@@ -308,9 +364,9 @@ public struct CanvasToolPicker: View {
     private func utilityButton(title: String, systemImage: String, isEnabled: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: systemImage)
-                .font(.system(size: 15, weight: .semibold))
+                .font(.system(size: 17, weight: .medium))
                 .foregroundStyle(.primary)
-                .frame(width: PillMetrics.itemWidth, height: PillMetrics.itemHeight)
+                .frame(width: BarMetrics.itemSize, height: BarMetrics.itemSize)
                 .contentShape(Rectangle())
         }
         .buttonStyle(CanvasCrispToolButtonStyle(reduceMotion: reduceMotion))
@@ -325,7 +381,11 @@ public struct CanvasToolPicker: View {
         let selected = toolState.activeTool.toolbarFamilyRoot == toolbarTool
         let configuration = toolState.configuration(for: displayedTool)
         let label = displayedTool.toolbarFamilyTitle
+        let hasFamilyVariants = displayedTool.toolbarFamilyVariants.count > 1
         let familyOptionsExpanded = isFamilyOptionsExpanded(for: toolbarTool)
+        // Pen and Brush always hint at their hidden styles; every other tool
+        // with options shows the arrow only while selected.
+        let showsChevron = hasFamilyVariants || (selected && displayedTool.supportsOptions)
 
         return Button { activate(displayedTool) } label: {
             ToolGlyph(
@@ -333,15 +393,24 @@ public struct CanvasToolPicker: View {
                 inkColor: Color(rgba: configuration?.color ?? .black),
                 isSelected: selected
             )
-                .frame(width: PillMetrics.itemWidth, height: PillMetrics.itemHeight)
+                .frame(width: BarMetrics.itemSize, height: BarMetrics.itemSize)
                 .background {
                     if selected {
                         selectedToolBackground
                     }
                 }
+                .overlay(alignment: .bottom) {
+                    toolIndicator(for: displayedTool, configuration: configuration)
+                }
+                .overlay(alignment: .bottomTrailing) {
+                    if showsChevron {
+                        chevron(isExpanded: familyOptionsExpanded)
+                    }
+                }
                 .contentShape(Rectangle())
         }
         .buttonStyle(CanvasCrispToolButtonStyle(reduceMotion: reduceMotion))
+        .reportsToolFrame(toolbarTool.rawValue)
         .highPriorityGesture(LongPressGesture(minimumDuration: 0.4).onEnded { _ in
             showOptions(for: displayedTool)
         })
@@ -358,6 +427,29 @@ public struct CanvasToolPicker: View {
                 : ""
         )
         .help(label)
+    }
+
+    @ViewBuilder
+    private func toolIndicator(
+        for tool: CanvasTool,
+        configuration: CanvasToolConfiguration?
+    ) -> some View {
+        if tool == .eraser {
+            Capsule()
+                .fill(Color.primary)
+                .frame(width: toolState.eraserMode == .pixel ? 3 : 8, height: 3)
+                .padding(.bottom, 2)
+        } else if let color = configuration?.color,
+                  tool != .lasso,
+                  tool != .laserPointer {
+            Capsule()
+                .fill(Color(rgba: color))
+                .frame(
+                    width: toolbarInkIndicatorWidth(configuration?.width ?? 2, for: tool),
+                    height: 3
+                )
+                .padding(.bottom, 2)
+        }
     }
 
     private var selectedToolBackground: some View {
@@ -387,134 +479,134 @@ public struct CanvasToolPicker: View {
         .padding(.horizontal, 1)
     }
 
-    // MARK: Options strip
+    // MARK: Panel
 
-    @ViewBuilder private var accessorySurface: some View {
+    /// Floats under the bar, centred under the control that opened it and
+    /// clamped to the window, so the page underneath never moves.
+    @ViewBuilder private var panel: some View {
+        panelContent
+            .fixedSize()
+            .alignmentGuide(.leading) { dimensions in
+                let margin = PanelMetrics.edgeMargin
+                let width = dimensions.width
+                let mid = panelAnchorMidX ?? (margin + width / 2)
+                let upper = max(panelContainerWidth - margin - width, margin)
+                return -min(max(mid - width / 2, margin), upper)
+            }
+            .alignmentGuide(.bottom) { _ in -PanelMetrics.gapBelowBar }
+    }
+
+    @ViewBuilder private var panelContent: some View {
         switch overlay {
         case .toolOptions(let tool) where tool.supportsOptions:
-            stripSurface { toolStrip(for: tool) }
-                .glassEffectID("canvas-tool-options", in: glassNamespace)
-                .transition(accessoryTransition)
+            panelSurface(width: PanelMetrics.contentWidth) { toolPanelLines(for: tool) }
         case .geometryTools:
-            stripSurface { geometryStrip }
-                .glassEffectID("canvas-geometry-picker", in: glassNamespace)
-                .transition(accessoryTransition)
+            panelSurface(width: PanelMetrics.contentWidth) { geometryLine }
         case .insert:
-            stripSurface { insertStrip }
-                .glassEffectID("canvas-insert-tray", in: glassNamespace)
-                .transition(accessoryTransition)
+            panelSurface(width: nil) { insertRow }
         case .shapes:
-            stripSurface { shapeCatalog }
-                .transition(accessoryTransition)
+            panelSurface(width: nil) { shapeCatalog }
         case .tableSizePicker:
-            stripSurface { tableSizePicker }
-                .transition(accessoryTransition)
+            panelSurface(width: nil) { tableSizePicker.padding(PanelMetrics.padding) }
         default:
             EmptyView()
         }
     }
 
-    private var accessoryTransition: AnyTransition {
-        .asymmetric(
-            insertion: .opacity.animation(.easeIn(duration: 0.1)),
-            removal: .opacity.animation(.easeOut(duration: 0.1))
-        )
+    private var panelTransition: AnyTransition {
+        reduceMotion
+            ? .opacity
+            : .opacity.combined(with: .scale(scale: 0.96, anchor: .top))
     }
 
-    private func stripSurface<Content: View>(
+    private func panelSurface<Content: View>(
+        width: CGFloat?,
         @ViewBuilder content: () -> Content
     ) -> some View {
-        CanvasOptionsStripContainer(content: content())
+        content()
+            .frame(width: width)
+            .padding(PanelMetrics.padding)
             .notateGlassSurface(
-                shape: RoundedRectangle(cornerRadius: 22, style: .continuous),
+                shape: RoundedRectangle(
+                    cornerRadius: PanelMetrics.cornerRadius,
+                    style: .continuous
+                ),
                 reduceTransparency: reduceTransparency
             )
+            .transition(panelTransition)
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("canvas.tool.options")
     }
 
-    /// Level two and three of the picker: style (when the family has styles),
-    /// thickness, then colors, on one compact line.
-    @ViewBuilder private func toolStrip(for tool: CanvasTool) -> some View {
-        if tool == .eraser {
-            HStack(spacing: StripMetrics.sectionSpacing) {
-                eraserModes
-                if toolState.eraserMode == .pixel {
-                    stripDivider
-                    thicknessChips(for: tool)
-                }
-            }
-            .accessibilityIdentifier("canvas.tool.options")
-        } else if tool == .laserPointer {
-            HStack(spacing: StripMetrics.sectionSpacing) {
-                laserPointerStyleButtons
-                stripDivider
-                colorChips(for: tool)
-            }
-            .accessibilityIdentifier("canvas.tool.options")
-        } else if tool.toolbarFamilyVariants.count > 1 {
-            // Level 1: the styles of this family, named. Level 2: thickness
-            // beside color. Two short lines read faster than one long one.
-            VStack(alignment: .leading, spacing: 0) {
-                HStack(spacing: StripMetrics.sectionSpacing) {
-                    styleChips(for: tool)
-                    Text(toolState.activeTool.title)
-                        .font(.footnote.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .contentTransition(.opacity)
-                        .accessibilityHidden(true)
-                }
-                Rectangle()
-                    .fill(Color.primary.opacity(0.10))
-                    .frame(height: 1)
-                    .padding(.vertical, 2)
-                    .accessibilityHidden(true)
-                HStack(spacing: StripMetrics.sectionSpacing) {
-                    thicknessChips(for: tool)
-                    stripDivider
-                    colorChips(for: tool)
-                }
-            }
-            .accessibilityIdentifier("canvas.tool.options")
-        } else {
-            HStack(spacing: StripMetrics.sectionSpacing) {
-                thicknessChips(for: tool)
-                stripDivider
-                colorChips(for: tool)
-            }
-            .accessibilityIdentifier("canvas.tool.options")
-        }
-    }
-
-    private var stripDivider: some View {
+    private var panelDivider: some View {
         Rectangle()
-            .fill(Color.primary.opacity(0.14))
-            .frame(width: 1, height: 20)
+            .fill(Color.primary.opacity(0.10))
+            .frame(height: 1)
             .accessibilityHidden(true)
     }
 
-    private func styleChips(for tool: CanvasTool) -> some View {
-        HStack(spacing: 0) {
-            ForEach(tool.toolbarFamilyVariants, id: \.self) { variant in
-                styleChip(variant)
+    /// Style, thickness, then colour: the same three lines for every writing
+    /// tool, minus the ones that don't apply.
+    @ViewBuilder private func toolPanelLines(for tool: CanvasTool) -> some View {
+        VStack(spacing: 0) {
+            if tool.toolbarFamilyVariants.count > 1 {
+                styleLine(for: tool)
+                panelDivider
+            }
+            switch tool {
+            case .eraser:
+                eraserModeLine
+                if toolState.eraserMode == .pixel {
+                    panelDivider
+                    thicknessLine(for: tool)
+                }
+            case .laserPointer:
+                laserStyleLine
+                panelDivider
+                colourLine(for: tool)
+            default:
+                thicknessLine(for: tool)
+                panelDivider
+                colourLine(for: tool)
             }
         }
+    }
+
+    private func styleLine(for tool: CanvasTool) -> some View {
+        let variants = tool.toolbarFamilyVariants
+        let segment = PanelMetrics.contentWidth / CGFloat(max(variants.count, 1))
+
+        return HStack(spacing: 0) {
+            ForEach(variants, id: \.self) { variant in
+                styleSegment(variant, width: segment)
+            }
+        }
+        .frame(height: PanelMetrics.lineHeight)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Style")
         .accessibilityIdentifier("canvas.tool.variants")
     }
 
-    private func styleChip(_ tool: CanvasTool) -> some View {
+    private func styleSegment(_ tool: CanvasTool, width: CGFloat) -> some View {
         let isActive = tool == toolState.activeTool
 
         return Button {
-            onIntent(.tapTool(tool))
+            // Picks the style and keeps the panel open.
+            onIntent(.showOptions(tool))
         } label: {
-            ToolGlyph(
-                tool: tool,
-                inkColor: Color(rgba: toolState.configuration(for: tool)?.color ?? .black),
-                isSelected: isActive
-            )
-            .frame(width: StripMetrics.chipWidth + 4, height: StripMetrics.chipHeight + 2)
+            HStack(spacing: 2) {
+                ToolGlyph(
+                    tool: tool,
+                    inkColor: Color(rgba: toolState.configuration(for: tool)?.color ?? .black),
+                    isSelected: isActive
+                )
+                Text(tool.title)
+                    .font(.system(size: 10, weight: .medium))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                    .foregroundStyle(isActive ? Color.primary : Color.secondary)
+            }
+            .frame(width: width, height: PanelMetrics.lineHeight)
             .background {
                 if isActive {
                     selectedToolBackground
@@ -531,18 +623,20 @@ public struct CanvasToolPicker: View {
         .help(tool.title)
     }
 
-    private func thicknessChips(for tool: CanvasTool) -> some View {
+    private func thicknessLine(for tool: CanvasTool) -> some View {
         HStack(spacing: 0) {
             ForEach(CanvasToolState.widthPresets(for: tool), id: \.self) { width in
-                thicknessChip(width, for: tool)
+                thicknessCell(width, for: tool)
             }
         }
+        .frame(height: PanelMetrics.lineHeight)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Thickness")
     }
 
-    private func thicknessChip(_ width: Double, for tool: CanvasTool) -> some View {
+    private func thicknessCell(_ width: Double, for tool: CanvasTool) -> some View {
         let isSelected = toolState.configuration(for: tool)?.width == width
+        let ink = toolState.configuration(for: tool)?.color
 
         return Button {
             updateWidth(width, for: tool)
@@ -557,12 +651,16 @@ public struct CanvasToolPicker: View {
                         .fill(Color.primary.opacity(0.5))
                         .frame(width: diameter, height: diameter)
                 } else {
+                    // The stroke you will get, in the colour you will get it.
                     Capsule()
-                        .fill(Color.primary.opacity(0.82))
-                        .frame(width: 18, height: inkPreviewHeight(width, for: tool))
+                        .fill(ink.map { Color(rgba: $0) } ?? Color.primary)
+                        .overlay {
+                            Capsule().strokeBorder(Color.primary.opacity(0.25), lineWidth: 0.5)
+                        }
+                        .frame(width: 20, height: max(inkPreviewHeight(width, for: tool), 2))
                 }
             }
-            .frame(width: StripMetrics.chipWidth, height: StripMetrics.chipHeight)
+            .frame(width: PanelMetrics.column, height: PanelMetrics.lineHeight)
             .contentShape(Rectangle())
         }
         .buttonStyle(CanvasCrispToolButtonStyle(reduceMotion: reduceMotion))
@@ -576,20 +674,21 @@ public struct CanvasToolPicker: View {
             : RGBAColor.quickInkPalette
     }
 
-    private func colorChips(for tool: CanvasTool) -> some View {
+    private func colourLine(for tool: CanvasTool) -> some View {
         let current = toolState.configuration(for: tool)?.color ?? .black
 
         return HStack(spacing: 0) {
             ForEach(quickPalette(for: tool), id: \.self) { swatch in
-                colorChip(swatch, current: current, for: tool)
+                colourCell(swatch, current: current, for: tool)
             }
             customColorPicker(current: current, for: tool)
         }
+        .frame(height: PanelMetrics.lineHeight)
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Color")
+        .accessibilityLabel("Colour")
     }
 
-    private func colorChip(_ swatch: RGBAColor, current: RGBAColor, for tool: CanvasTool) -> some View {
+    private func colourCell(_ swatch: RGBAColor, current: RGBAColor, for tool: CanvasTool) -> some View {
         let isSelected = colorsMatch(swatch, current)
 
         return Button {
@@ -597,19 +696,19 @@ public struct CanvasToolPicker: View {
         } label: {
             Circle()
                 .fill(Color(rgba: swatch))
-                .frame(width: StripMetrics.swatchDiameter, height: StripMetrics.swatchDiameter)
+                .frame(width: 24, height: 24)
                 .overlay {
-                    Circle()
-                        .strokeBorder(Color.primary.opacity(0.15), lineWidth: 1)
+                    Circle().strokeBorder(Color.primary.opacity(0.15), lineWidth: 1)
                 }
                 .overlay {
+                    // A double ring, so selection doesn't depend on colour.
                     if isSelected {
                         Circle()
                             .strokeBorder(Color.primary, lineWidth: 2)
                             .padding(-3.5)
                     }
                 }
-                .frame(width: StripMetrics.chipWidth, height: StripMetrics.chipHeight)
+                .frame(width: PanelMetrics.column, height: PanelMetrics.lineHeight)
                 .contentShape(Rectangle())
         }
         .buttonStyle(CanvasCrispToolButtonStyle(reduceMotion: reduceMotion))
@@ -627,11 +726,11 @@ public struct CanvasToolPicker: View {
             supportsOpacity: false
         )
         .labelsHidden()
-        .frame(width: StripMetrics.chipWidth, height: StripMetrics.chipHeight)
+        .frame(width: PanelMetrics.column, height: PanelMetrics.lineHeight)
         .accessibilityLabel("Custom color")
     }
 
-    private var eraserModes: some View {
+    private var eraserModeLine: some View {
         Picker("Eraser mode", selection: Binding(
             get: { toolState.eraserMode },
             set: { onIntent(.setEraserMode($0)) }
@@ -640,74 +739,87 @@ public struct CanvasToolPicker: View {
             Text("Stroke").tag(CanvasEraserMode.stroke)
         }
         .pickerStyle(.segmented)
-        .frame(width: dynamicTypeSize.isAccessibilitySize ? 240 : 150)
+        .padding(.horizontal, 4)
+        .frame(height: PanelMetrics.lineHeight)
     }
 
-    private var laserPointerStyleButtons: some View {
-        HStack(spacing: 0) {
+    private var laserStyleLine: some View {
+        let segment = PanelMetrics.contentWidth / CGFloat(CanvasLaserPointerStyle.allCases.count)
+        let tint = Color(rgba: toolState.configuration(for: .laserPointer)?.color ?? .laserRed)
+
+        return HStack(spacing: 0) {
             ForEach(CanvasLaserPointerStyle.allCases, id: \.self) { style in
-                laserPointerStyleButton(style)
+                let isSelected = toolState.laserPointerStyle == style
+                Button {
+                    onIntent(.setLaserPointerStyle(style))
+                } label: {
+                    HStack(spacing: 6) {
+                        LaserPointerStyleGlyph(style: style, tint: tint)
+                        Text(style.title)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(isSelected ? Color.primary : Color.secondary)
+                    }
+                    .frame(width: segment, height: PanelMetrics.lineHeight)
+                    .background {
+                        if isSelected {
+                            selectedToolBackground
+                        }
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(CanvasCrispToolButtonStyle(reduceMotion: reduceMotion))
+                .accessibilityLabel(style.title)
+                .accessibilityValue(isSelected ? "Selected" : "Not selected")
+                .accessibilityAddTraits(isSelected ? .isSelected : [])
+                .help(style.title)
             }
         }
+        .frame(height: PanelMetrics.lineHeight)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Laser style")
     }
 
-    private func laserPointerStyleButton(_ style: CanvasLaserPointerStyle) -> some View {
-        let isSelected = toolState.laserPointerStyle == style
-        let tint = Color(rgba: toolState.configuration(for: .laserPointer)?.color ?? .laserRed)
+    // MARK: Ruler panel
 
-        return Button {
-            onIntent(.setLaserPointerStyle(style))
-        } label: {
-            LaserPointerStyleGlyph(style: style, tint: tint)
-                .frame(width: StripMetrics.chipWidth + 8, height: StripMetrics.chipHeight)
-                .background {
-                    if isSelected {
-                        selectedToolBackground
-                    }
-                }
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(CanvasCrispToolButtonStyle(reduceMotion: reduceMotion))
-        .accessibilityLabel(style.title)
-        .accessibilityValue(isSelected ? "Selected" : "Not selected")
-        .accessibilityAddTraits(isSelected ? .isSelected : [])
-        .help(style.title)
-    }
+    private var geometryLine: some View {
+        let segment = PanelMetrics.contentWidth / CGFloat(CanvasGeometryTool.allCases.count)
 
-    // MARK: Ruler strip
-
-    private var geometryStrip: some View {
-        HStack(spacing: 0) {
+        return HStack(spacing: 0) {
             ForEach(CanvasGeometryTool.allCases, id: \.self) { tool in
-                geometryToolOption(tool)
+                geometrySegment(tool, width: segment)
             }
         }
+        .frame(height: PanelMetrics.lineHeight)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Geometry tools")
         .accessibilityIdentifier("canvas.geometry.picker")
     }
 
-    private func geometryToolOption(_ tool: CanvasGeometryTool) -> some View {
+    private func geometrySegment(_ tool: CanvasGeometryTool, width: CGFloat) -> some View {
         let isActive = activeGeometryTool == tool
 
         return Button {
             onIntent(.toggleGeometryTool(tool))
-            isGeometrySlotFocused = true
             UIAccessibility.post(
                 notification: .announcement,
                 argument: isActive ? "\(tool.title) off" : "\(tool.title) on"
             )
         } label: {
-            CanvasGeometryToolGlyph(tool: tool, isSelected: isActive)
-                .frame(width: StripMetrics.chipWidth + 14, height: StripMetrics.chipHeight)
-                .background {
-                    if isActive {
-                        selectedToolBackground
-                    }
+            HStack(spacing: 4) {
+                CanvasGeometryToolGlyph(tool: tool, isSelected: isActive)
+                Text(tool.title)
+                    .font(.system(size: 10, weight: .medium))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                    .foregroundStyle(isActive ? Color.primary : Color.secondary)
+            }
+            .frame(width: width, height: PanelMetrics.lineHeight)
+            .background {
+                if isActive {
+                    selectedToolBackground
                 }
-                .contentShape(Rectangle())
+            }
+            .contentShape(Rectangle())
         }
         .buttonStyle(CanvasCrispToolButtonStyle(reduceMotion: reduceMotion))
         .accessibilityFocused($focusedGeometryTool, equals: tool)
@@ -723,9 +835,9 @@ public struct CanvasToolPicker: View {
         .help(tool.title)
     }
 
-    // MARK: Add strip
+    // MARK: Add panel
 
-    private var insertStrip: some View {
+    private var insertRow: some View {
         HStack(spacing: 0) {
             insertChip(.text, title: "Text", hint: "Inserts a text box", identifier: "canvas.insert.text") {
                 onIntent(.insertText)
@@ -789,9 +901,7 @@ public struct CanvasToolPicker: View {
                 isAddButtonFocused = true
             }
         } label: {
-            CanvasTrayGlyph(kind: .image)
-                .frame(width: StripMetrics.chipWidth + 8, height: StripMetrics.chipHeight)
-                .contentShape(Rectangle())
+            CanvasInsertChipLabel(glyph: .image, title: "Image")
         }
         .tint(Color.primary)
         .accessibilityLabel("Insert image")
@@ -1282,55 +1392,22 @@ private struct LaserPointerStyleGlyph: View {
     }
 }
 
-/// Concrete containers keep the pill and strip out of `CanvasToolPicker`'s
-/// opaque return type; deep generic helper chains crashed the compiler on
-/// device builds before.
-private struct CanvasToolPillContainer<Content: View>: View {
-    let scrolls: Bool
-    @ViewBuilder let content: Content
+/// A labelled chip for the Add panel: a 22 pt glyph over a 10 pt caption.
+private struct CanvasInsertChipLabel: View {
+    let glyph: CanvasTrayGlyphKind
+    let title: String
 
     var body: some View {
-        if scrolls {
-            ScrollView(.horizontal, showsIndicators: false) {
-                content
-            }
-            .frame(maxWidth: CanvasToolPicker.preferredPillWidth)
-        } else {
-            content
+        VStack(spacing: 3) {
+            CanvasTrayGlyph(kind: glyph, size: 20)
+                .frame(height: 22)
+            Text(title)
+                .font(.system(size: 10, weight: .medium))
+                .lineLimit(1)
         }
-    }
-}
-
-/// One glass capsule holding a related set of controls.
-private struct CanvasToolGroup<Content: View>: View {
-    @ViewBuilder let content: Content
-
-    var body: some View {
-        HStack(spacing: CanvasToolPicker.PillMetrics.itemSpacing) {
-            content
-        }
-        .padding(.horizontal, CanvasToolPicker.PillMetrics.horizontalPadding)
-        .frame(height: NotateDesign.Control.compactGlassDiameter)
-        .glassEffect(.regular.interactive(), in: Capsule())
-    }
-}
-
-private struct CanvasOptionsStripContainer<Content: View>: View {
-    let content: Content
-
-    var body: some View {
-        ViewThatFits(in: .horizontal) {
-            padded(content)
-            ScrollView(.horizontal, showsIndicators: false) {
-                padded(content)
-            }
-        }
-    }
-
-    private func padded(_ view: Content) -> some View {
-        view
-            .padding(.horizontal, CanvasToolPicker.StripMetrics.horizontalPadding)
-            .padding(.vertical, CanvasToolPicker.StripMetrics.verticalPadding)
+        .foregroundStyle(Color.primary)
+        .frame(width: 52, height: 52)
+        .contentShape(Rectangle())
     }
 }
 
@@ -1343,13 +1420,7 @@ private struct CanvasInsertChipButton: View {
 
     var body: some View {
         Button(action: action) {
-            CanvasTrayGlyph(kind: glyph)
-                .frame(
-                    width: CanvasToolPicker.StripMetrics.chipWidth + 8,
-                    height: CanvasToolPicker.StripMetrics.chipHeight
-                )
-                .foregroundStyle(Color.primary)
-                .contentShape(Rectangle())
+            CanvasInsertChipLabel(glyph: glyph, title: title)
         }
         .buttonStyle(CanvasCrispToolButtonStyle(reduceMotion: reduceMotion))
         .accessibilityLabel("Insert \(title.lowercased())")
