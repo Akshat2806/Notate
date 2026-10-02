@@ -102,6 +102,15 @@ public final class CanvasEditorModel {
     private static let maximumDeferredControllerImageCount = 1
     private static let maximumDeferredControllerImageBytes = 128 * 1_024 * 1_024
 
+    /// Mirrors the Canvas Core persistence limits. A mutation that would
+    /// exceed them is refused up front; once accepted it could never be saved.
+    private static let maximumPageCount = 1_000
+    private static let maximumImagePageCount = 60
+
+    /// A short, user-facing reason an action was declined. The editor shows it
+    /// in an alert and clears it.
+    public var actionNotice: String?
+
     public enum LaunchState: Equatable {
         case loading
         case ready
@@ -1117,6 +1126,24 @@ public final class CanvasEditorModel {
         markDocumentChanged()
     }
 
+    private func declineIfPageLimitReached(addingImagePage: Bool = false) -> Bool {
+        if pages.count >= Self.maximumPageCount {
+            actionNotice = "This notebook has reached its limit of \(Self.maximumPageCount) pages."
+            return true
+        }
+        if addingImagePage {
+            let imagePages = pages.filter {
+                if case .image = $0.background { return true }
+                return false
+            }.count
+            if imagePages >= Self.maximumImagePageCount {
+                actionNotice = "This notebook has reached its limit of \(Self.maximumImagePageCount) photo pages."
+                return true
+            }
+        }
+        return false
+    }
+
     public func addPage(at position: CanvasPageInsertionPosition) {
         guard supportsPageStack,
               isReaderMode == false,
@@ -1138,6 +1165,7 @@ public final class CanvasEditorModel {
               allowsAuthoring,
               isDurableInsertionInFlight == false,
               pageTrashMutationsInFlight.isEmpty,
+              declineIfPageLimitReached(addingImagePage: true) == false,
               captureLatestControllerDocumentIfNeeded() else { return nil }
         let imageDocument = try CanvasDocumentImporter.makeImageSnapshot(
             data: data,
@@ -1175,6 +1203,7 @@ public final class CanvasEditorModel {
         guard allowsAuthoring,
               isDurableInsertionInFlight == false,
               pageTrashMutationsInFlight.isEmpty,
+              declineIfPageLimitReached() == false,
               captureLatestControllerDocumentIfNeeded(),
               let currentIndex = indexOfCurrentPage else { return }
 
@@ -1198,8 +1227,15 @@ public final class CanvasEditorModel {
             inheritedPaperTemplate = currentPaperTemplate
         }
 
+        // A new page matches the page it is added beside (an imported Letter
+        // or landscape page keeps its size) instead of snapping back to A4.
+        let newPageSize = documentKind == .canvas
+            ? nil
+            : pages[currentIndex].displaySize
         let page = CanvasPageSnapshot(
-            markup: Self.blankMarkup(for: documentKind),
+            markup: newPageSize.map {
+                PaperMarkup(bounds: CGRect(origin: .zero, size: $0))
+            } ?? Self.blankMarkup(for: documentKind),
             viewport: viewport,
             paperTemplate: inheritedPaperTemplate
         )
@@ -1286,6 +1322,7 @@ public final class CanvasEditorModel {
               allowsAuthoring,
               isDurableInsertionInFlight == false,
               pageTrashMutationsInFlight.isEmpty,
+              declineIfPageLimitReached() == false,
               captureLatestControllerDocumentIfNeeded(),
               let sourceIndex = pages.firstIndex(where: { $0.id == id }) else { return nil }
 
@@ -1665,11 +1702,9 @@ public final class CanvasEditorModel {
         }
 
         await checkpointLatest()
-        let existingFailure: String?
+        var existingFailure: String?
         if case let .failed(description) = saveState {
             existingFailure = description
-        } else {
-            existingFailure = nil
         }
 
         let terminalHandoffFailure = closeDeferredControllerHandoffIfNeeded()
@@ -1679,6 +1714,12 @@ public final class CanvasEditorModel {
             // those commands explicitly, persist any settled retiring-controller
             // insertion without pretending the rejected commands were saved.
             await checkpointLatest()
+            // A successful second checkpoint supersedes the first failure.
+            if case let .failed(description) = saveState {
+                existingFailure = description
+            } else {
+                existingFailure = nil
+            }
         }
         await savePreferencesNow()
 
@@ -1935,7 +1976,9 @@ public final class CanvasEditorModel {
     private func programmaticInsertionDidFail(
         _ error: PaperCanvasInsertionCommitError
     ) {
-        saveState = .failed(error.localizedDescription)
+        // The insertion was rolled back, so nothing is unsaved. Tell the person
+        // once instead of leaving a sticky "not safely stored" banner.
+        actionNotice = error.localizedDescription
     }
 
     private static func blankMarkup(for kind: LibraryItemKind) -> PaperMarkup {
@@ -2391,6 +2434,11 @@ public final class CanvasEditorModel {
         guard token == forcedSaveToken else { return }
         forcedSaveTask = nil
         await checkpointLatest()
+        // A failed save is not retried on a timer: a deterministic failure
+        // (limits, invalid snapshot) would re-encode the whole document every
+        // few seconds and make the banner flicker. The next edit, the Retry
+        // button, and lifecycle flushes all re-attempt.
+        if case .failed = saveState { return }
         if generation > committedGeneration {
             ensureForcedSave()
         }

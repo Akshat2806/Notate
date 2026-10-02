@@ -158,7 +158,9 @@ struct CanvasEditorView: View {
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .inactive || phase == .background {
-                startLifecycleFlush()
+                // Inactive (Control Center, app switcher peek) saves without
+                // killing an in-flight import; only a real background cancels it.
+                startLifecycleFlush(cancelsMedia: phase == .background)
             } else if phase == .active {
                 Task { await model.retryPendingLifecycleCheckpoint() }
             }
@@ -214,6 +216,15 @@ struct CanvasEditorView: View {
             sourceImage: imageWandSourceImage,
             onCompletion: acceptImageWandResult,
             onCancellation: cancelImageWand
+        )
+        .alert(
+            "Couldn't Complete That",
+            isPresented: Binding(
+                get: { model.actionNotice != nil },
+                set: { if $0 == false { model.actionNotice = nil } }
+            ),
+            actions: { Button("OK", role: .cancel) { model.actionNotice = nil } },
+            message: { Text(model.actionNotice ?? "") }
         )
         .alert(
             "Image Could Not Be Added",
@@ -729,13 +740,26 @@ struct CanvasEditorView: View {
         }
     }
 
-    private func startLifecycleFlush() {
-        let pendingMediaTask = mediaTaskGate.cancel()
+    private func startLifecycleFlush(cancelsMedia: Bool = true) {
         guard lifecycleFlushTask == nil else { return }
+        // Ask for background time before anything is awaited, so a slow
+        // import cannot eat the window the save needs.
+        var backgroundTask = UIBackgroundTaskIdentifier.invalid
+        backgroundTask = UIApplication.shared.beginBackgroundTask(
+            withName: "Canvas lifecycle flush"
+        ) {
+            UIApplication.shared.endBackgroundTask(backgroundTask)
+            backgroundTask = .invalid
+        }
+        let pendingMediaTask = cancelsMedia ? mediaTaskGate.cancel() : nil
         lifecycleFlushTask = Task {
-            await pendingMediaTask?.value
+            // Save first; the cancelled import only needs to wind down.
             await model.flushForLifecycle()
+            await pendingMediaTask?.value
             lifecycleFlushTask = nil
+            if backgroundTask != .invalid {
+                UIApplication.shared.endBackgroundTask(backgroundTask)
+            }
         }
     }
 
