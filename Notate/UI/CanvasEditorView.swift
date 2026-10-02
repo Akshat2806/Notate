@@ -299,13 +299,11 @@ struct CanvasEditorView: View {
             value: model.boundaryPagePull != nil
         )
         .overlay(alignment: .top) {
+            // Editing controls wait for a ready canvas, but Back must always
+            // work or a failed recovery would trap the person in the note.
             topChrome(availableWidth: availableSize.width)
-            .disabled(
-                model.launchState != .ready || model.isReaderModeTransitioning
-            )
-            .allowsHitTesting(
-                model.launchState == .ready && model.isReaderModeTransitioning == false
-            )
+            .disabled(model.isReaderModeTransitioning)
+            .allowsHitTesting(model.isReaderModeTransitioning == false)
         }
         .overlay(alignment: .bottomLeading) {
             if model.allowsAuthoring {
@@ -376,6 +374,7 @@ struct CanvasEditorView: View {
             placement: placement,
             onIntent: handleToolbarIntent
         )
+        .disabled(model.launchState != .ready)
     }
 
     private func editorIdentityAndActions(isStacked: Bool) -> some View {

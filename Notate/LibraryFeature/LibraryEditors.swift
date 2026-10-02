@@ -515,7 +515,6 @@ struct LibraryNotebookEditor: View {
                 .padding(.horizontal, 2)
                 .scrollIndicators(.hidden)
             }
-        }
         .frame(maxWidth: 620)
         .padding(
             .horizontal,
@@ -534,6 +533,7 @@ struct LibraryNotebookEditor: View {
                 Button("Create & Open", action: commit)
                     .disabled(trimmedName.isEmpty)
             }
+        }
         }
         .task {
             try? await Task.sleep(for: .milliseconds(120))
