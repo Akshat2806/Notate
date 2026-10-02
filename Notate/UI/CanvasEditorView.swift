@@ -316,6 +316,14 @@ struct CanvasEditorView: View {
             .disabled(model.isReaderModeTransitioning)
             .allowsHitTesting(model.isReaderModeTransitioning == false)
         }
+        .overlay(alignment: .bottomTrailing) {
+            if model.supportsPageStack, model.pageCount > 1,
+               model.isReaderMode == false, model.launchState == .ready {
+                pageIndicator
+                    .padding(.trailing, 16)
+                    .padding(.bottom, 16)
+            }
+        }
         .overlay(alignment: .bottomLeading) {
             if model.allowsAuthoring {
                 CanvasZoomControl(model: model)
@@ -449,6 +457,20 @@ struct CanvasEditorView: View {
         .transition(.opacity)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("canvas.wand.prompt")
+    }
+
+    /// Orientation without chrome: which page of the note is in view.
+    private var pageIndicator: some View {
+        Text("\(model.currentPageNumber) / \(model.pageCount)")
+            .font(.footnote.monospacedDigit().weight(.medium))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .notateGlassSurface(shape: Capsule())
+            .allowsHitTesting(false)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Page \(model.currentPageNumber) of \(model.pageCount)")
+            .accessibilityIdentifier("canvas.page.indicator")
     }
 
     private var readerButton: some View {
