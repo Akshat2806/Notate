@@ -414,6 +414,35 @@ struct LibraryBrowserView: View {
         }
     }
 
+    /// "3 selected" with a Select All toggle, so bulk actions never act on a
+    /// count the person has to guess.
+    private var selectionSummary: some View {
+        HStack(spacing: NotateDesign.Spacing.control) {
+            Text(
+                session.selectedItemIDs.isEmpty
+                    ? "Select items"
+                    : "\(session.selectedItemIDs.count) selected"
+            )
+            .font(.subheadline.weight(.semibold))
+            .monospacedDigit()
+            .lineLimit(1)
+            .accessibilityIdentifier("library.selection.count")
+
+            Button(session.allVisibleItemsSelected ? "Deselect All" : "Select All") {
+                session.toggleSelectAllVisibleItems()
+            }
+            .font(.subheadline.weight(.medium))
+            .disabled(session.selectableItemIDs.isEmpty)
+            .accessibilityIdentifier("library.selection.select-all")
+            .keyboardShortcut("a", modifiers: .command)
+        }
+        .padding(.trailing, NotateDesign.Spacing.compact)
+    }
+
+    private var selectedItems: [LibraryItemRecord] {
+        session.visibleItems.filter { session.selectedItemIDs.contains($0.id) }
+    }
+
     private var selectionActions: some View {
         GlassEffectContainer(spacing: NotateDesign.Spacing.control) {
             HStack(spacing: NotateDesign.Spacing.control) {
@@ -428,6 +457,30 @@ struct LibraryBrowserView: View {
                         session.clearSelection()
                     }
                 } else {
+                    let allFavorite = selectedItems.isEmpty == false
+                        && selectedItems.allSatisfy(\.isFavorite)
+                    selectionActionButton(
+                        title: allFavorite ? "Remove from Favorites" : "Add to Favorites",
+                        systemImage: allFavorite ? "star.slash" : "star",
+                        isDisabled: session.selectedItemIDs.isEmpty
+                    ) {
+                        // Bring every selected item to the same state rather
+                        // than flipping each one independently.
+                        for item in selectedItems where item.isFavorite == allFavorite {
+                            session.actions.toggleFavorite(item.id)
+                        }
+                        session.clearSelection()
+                    }
+                    selectionActionButton(
+                        title: "Duplicate",
+                        systemImage: "plus.square.on.square",
+                        isDisabled: selectedItems.contains { $0.kind != .folder } == false
+                    ) {
+                        for item in selectedItems where item.kind != .folder {
+                            session.actions.duplicateItem(item.id)
+                        }
+                        session.clearSelection()
+                    }
                     selectionActionButton(
                         title: "Move",
                         systemImage: "folder",
@@ -838,6 +891,9 @@ private struct LibraryBrowserHeader: View {
 
     private var libraryTools: some View {
         HStack(spacing: NotateDesign.Spacing.tight) {
+            if session.isSelectionMode {
+                selectionSummary
+            }
             if session.scope == .recent {
                 Menu {
                     Picker("Time Range", selection: Binding(
