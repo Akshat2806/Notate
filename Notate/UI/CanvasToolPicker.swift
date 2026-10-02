@@ -71,13 +71,15 @@ public struct CanvasToolPicker: View {
     }
 
     enum BarMetrics {
-        static let itemSize: CGFloat = NotateDesign.Control.standard
+        static let itemWidth: CGFloat = 38
+        static let itemHeight: CGFloat = 40
         static let itemSpacing: CGFloat = 2
-        static let horizontalPadding: CGFloat = 8
-        static let verticalPadding: CGFloat = 8
+        static let horizontalPadding: CGFloat = 6
+        static let verticalPadding: CGFloat = 2
         static let pipeSlot: CGFloat = 9
         static let itemCount = 11
         static let pipeCount = 3
+        static let selectionDiameter: CGFloat = 34
     }
 
     /// One 6-column grid for every panel so switching tools never changes its
@@ -110,10 +112,10 @@ public struct CanvasToolPicker: View {
         static let coordinateSpaceName = "TableSizePicker"
     }
 
-    /// Width the single-row bar needs. The editor stacks the bar under the
-    /// navigation buttons when the window is narrower than this.
+    /// Width the bar needs to show every control without scrolling. In
+    /// narrower windows the bar stays in the top row and scrolls sideways.
     static var preferredBarWidth: CGFloat {
-        CGFloat(BarMetrics.itemCount) * BarMetrics.itemSize
+        CGFloat(BarMetrics.itemCount) * BarMetrics.itemWidth
             + CGFloat(BarMetrics.pipeCount) * BarMetrics.pipeSlot
             + CGFloat(BarMetrics.itemCount + BarMetrics.pipeCount - 1) * BarMetrics.itemSpacing
             + 2 * BarMetrics.horizontalPadding
@@ -135,7 +137,6 @@ public struct CanvasToolPicker: View {
     public let activeGeometryTool: CanvasGeometryTool?
     public let canUndo: Bool
     public let canRedo: Bool
-    public let usesCompactLayout: Bool
     public let placement: Placement
     /// Horizontal centre of the control the panel belongs to, and the width
     /// of the area it may occupy. Only used by `.panel`.
@@ -172,7 +173,6 @@ public struct CanvasToolPicker: View {
         activeGeometryTool: CanvasGeometryTool?,
         canUndo: Bool,
         canRedo: Bool,
-        usesCompactLayout: Bool = false,
         placement: Placement = .bar,
         panelAnchorMidX: CGFloat? = nil,
         panelContainerWidth: CGFloat = 0,
@@ -184,7 +184,6 @@ public struct CanvasToolPicker: View {
         self.activeGeometryTool = activeGeometryTool
         self.canUndo = canUndo
         self.canRedo = canRedo
-        self.usesCompactLayout = usesCompactLayout
         self.placement = placement
         self.panelAnchorMidX = panelAnchorMidX
         self.panelContainerWidth = panelContainerWidth
@@ -212,23 +211,18 @@ public struct CanvasToolPicker: View {
 
     // MARK: Bar
 
-    @ViewBuilder private var toolBar: some View {
-        Group {
-            if usesCompactLayout || dynamicTypeSize.isAccessibilitySize {
-                LazyVGrid(
-                    columns: Array(repeating: GridItem(.flexible(), spacing: 2), count: 6),
-                    spacing: 2
-                ) {
-                    barItems
-                }
-            } else {
-                HStack(spacing: BarMetrics.itemSpacing) {
-                    barItems
-                }
+    /// The same pill the toolbar always had: a rounded rectangle with the
+    /// chrome corner radius, now one compact row in the top bar. Too narrow a
+    /// window scrolls it sideways instead of moving it to another row.
+    private var toolBar: some View {
+        ViewThatFits(in: .horizontal) {
+            barRow
+            ScrollView(.horizontal, showsIndicators: false) {
+                barRow
             }
         }
-        .padding(.horizontal, BarMetrics.horizontalPadding)
-        .padding(.vertical, BarMetrics.verticalPadding)
+        .frame(maxWidth: Self.preferredBarWidth)
+        .frame(height: BarMetrics.itemHeight + 2 * BarMetrics.verticalPadding)
         .glassEffect(
             .regular.interactive(),
             in: RoundedRectangle(
@@ -239,8 +233,12 @@ public struct CanvasToolPicker: View {
         .accessibilityIdentifier("canvas.tool.strip")
     }
 
-    private var stacksBar: Bool {
-        usesCompactLayout || dynamicTypeSize.isAccessibilitySize
+    private var barRow: some View {
+        HStack(spacing: BarMetrics.itemSpacing) {
+            barItems
+        }
+        .padding(.horizontal, BarMetrics.horizontalPadding)
+        .padding(.vertical, BarMetrics.verticalPadding)
     }
 
     // A view builder holds at most ten views, so the bar is built from groups.
@@ -277,15 +275,12 @@ public struct CanvasToolPicker: View {
         toolButton(.laserPointer)
     }
 
-    /// Visible only in the one-row bar; the stacked grid has no room for it.
-    @ViewBuilder private var barPipe: some View {
-        if stacksBar == false {
-            Rectangle()
-                .fill(Color.primary.opacity(0.22))
-                .frame(width: 1, height: 20)
-                .frame(width: BarMetrics.pipeSlot, height: BarMetrics.itemSize)
-                .accessibilityHidden(true)
-        }
+    private var barPipe: some View {
+        Rectangle()
+            .fill(Color.primary.opacity(0.22))
+            .frame(width: 1, height: 20)
+            .frame(width: BarMetrics.pipeSlot, height: BarMetrics.itemHeight)
+            .accessibilityHidden(true)
     }
 
     private var addButton: some View {
@@ -295,7 +290,7 @@ public struct CanvasToolPicker: View {
             Image(systemName: "plus")
                 .font(.system(size: 17, weight: .medium))
                 .foregroundStyle(.primary)
-                .frame(width: BarMetrics.itemSize, height: BarMetrics.itemSize)
+                .frame(width: BarMetrics.itemWidth, height: BarMetrics.itemHeight)
                 .background {
                     if isAddExpanded {
                         selectedToolBackground
@@ -325,7 +320,7 @@ public struct CanvasToolPicker: View {
                 tool: activeGeometryTool ?? preferredGeometryTool,
                 isSelected: isActive
             )
-            .frame(width: BarMetrics.itemSize, height: BarMetrics.itemSize)
+            .frame(width: BarMetrics.itemWidth, height: BarMetrics.itemHeight)
             .background {
                 if isActive {
                     selectedToolBackground
@@ -359,9 +354,9 @@ public struct CanvasToolPicker: View {
 
     private func chevron(isExpanded: Bool) -> some View {
         Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-            .font(.system(size: 7, weight: .bold))
+            .font(.system(size: 6, weight: .bold))
             .foregroundStyle(Color.secondary)
-            .padding(2)
+            .padding(1)
             .accessibilityHidden(true)
     }
 
@@ -379,7 +374,7 @@ public struct CanvasToolPicker: View {
             Image(systemName: systemImage)
                 .font(.system(size: 17, weight: .medium))
                 .foregroundStyle(.primary)
-                .frame(width: BarMetrics.itemSize, height: BarMetrics.itemSize)
+                .frame(width: BarMetrics.itemWidth, height: BarMetrics.itemHeight)
                 .contentShape(Rectangle())
         }
         .buttonStyle(CanvasCrispToolButtonStyle(reduceMotion: reduceMotion))
@@ -406,14 +401,11 @@ public struct CanvasToolPicker: View {
                 inkColor: Color(rgba: configuration?.color ?? .black),
                 isSelected: selected
             )
-                .frame(width: BarMetrics.itemSize, height: BarMetrics.itemSize)
+                .frame(width: BarMetrics.itemWidth, height: BarMetrics.itemHeight)
                 .background {
                     if selected {
                         selectedToolBackground
                     }
-                }
-                .overlay(alignment: .bottom) {
-                    toolIndicator(for: displayedTool, configuration: configuration)
                 }
                 .overlay(alignment: .bottomTrailing) {
                     if showsChevron {
@@ -442,33 +434,24 @@ public struct CanvasToolPicker: View {
         .help(label)
     }
 
-    @ViewBuilder
-    private func toolIndicator(
-        for tool: CanvasTool,
-        configuration: CanvasToolConfiguration?
-    ) -> some View {
-        if tool == .eraser {
-            Capsule()
-                .fill(Color.primary)
-                .frame(width: toolState.eraserMode == .pixel ? 3 : 8, height: 3)
-                .padding(.bottom, 2)
-        } else if let color = configuration?.color,
-                  tool != .lasso,
-                  tool != .laserPointer {
-            Capsule()
-                .fill(Color(rgba: color))
-                .frame(
-                    width: toolbarInkIndicatorWidth(configuration?.width ?? 2, for: tool),
-                    height: 3
-                )
-                .padding(.bottom, 2)
-        }
+    /// Selection is an outlined circle: a soft accent fill with a ring.
+    private var selectedToolBackground: some View {
+        selectionPlate(Circle())
+            .frame(
+                width: BarMetrics.selectionDiameter,
+                height: BarMetrics.selectionDiameter
+            )
     }
 
-    private var selectedToolBackground: some View {
-        let shape = RoundedRectangle(cornerRadius: NotateDesign.Radius.control, style: .continuous)
+    /// Wide panel segments use the same outline, stretched to a stadium.
+    private var selectedSegmentBackground: some View {
+        selectionPlate(Capsule())
+            .padding(.vertical, 3)
+            .padding(.horizontal, 3)
+    }
 
-        return ZStack {
+    private func selectionPlate<S: InsettableShape>(_ shape: S) -> some View {
+        ZStack {
             if reduceTransparency {
                 shape.fill(NotateDesign.Palette.background)
             }
@@ -485,11 +468,9 @@ public struct CanvasToolPicker: View {
                         ? 1
                         : NotateDesign.Hairline.selectedOpacity
                 ),
-                lineWidth: NotateDesign.Hairline.width(for: colorSchemeContrast)
+                lineWidth: colorSchemeContrast == .increased ? 2 : 1.5
             )
         }
-        .padding(.vertical, 2)
-        .padding(.horizontal, 1)
     }
 
     // MARK: Panel
@@ -622,7 +603,7 @@ public struct CanvasToolPicker: View {
             .frame(width: width, height: PanelMetrics.lineHeight)
             .background {
                 if isActive {
-                    selectedToolBackground
+                    selectedSegmentBackground
                 }
             }
             .contentShape(Rectangle())
@@ -775,7 +756,7 @@ public struct CanvasToolPicker: View {
                     .frame(width: segment, height: PanelMetrics.lineHeight)
                     .background {
                         if isSelected {
-                            selectedToolBackground
+                            selectedSegmentBackground
                         }
                     }
                     .contentShape(Rectangle())
@@ -829,7 +810,7 @@ public struct CanvasToolPicker: View {
             .frame(width: width, height: PanelMetrics.lineHeight)
             .background {
                 if isActive {
-                    selectedToolBackground
+                    selectedSegmentBackground
                 }
             }
             .contentShape(Rectangle())

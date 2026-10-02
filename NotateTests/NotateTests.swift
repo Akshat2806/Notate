@@ -193,12 +193,12 @@ final class NotateTests: XCTestCase {
     }
 
     @MainActor
-    func testToolBarKeepsElevenControlsAndThreePipesInOneRow() {
+    func testToolBarKeepsElevenControlsAndThreePipesInACompactRow() {
         // Undo Redo | Lasso Pen Pencil Brush Highlighter | Eraser Ruler Laser | +
         XCTAssertEqual(CanvasToolPicker.BarMetrics.itemCount, 11)
         XCTAssertEqual(CanvasToolPicker.BarMetrics.pipeCount, 3)
-        XCTAssertGreaterThan(CanvasToolPicker.preferredBarWidth, 500)
-        XCTAssertLessThan(CanvasToolPicker.preferredBarWidth, 640)
+        XCTAssertGreaterThan(CanvasToolPicker.preferredBarWidth, 460)
+        XCTAssertLessThan(CanvasToolPicker.preferredBarWidth, 520)
     }
 
     @MainActor

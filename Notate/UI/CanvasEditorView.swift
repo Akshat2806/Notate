@@ -12,27 +12,6 @@ private struct CanvasChromeHeightPreferenceKey: PreferenceKey {
     }
 }
 
-/// Keeps the canvas picker and the two editor action clusters in separate
-/// layout corridors. When the canvas becomes narrower (for example in iPad
-/// multitasking), the chrome moves to two rows before
-/// those corridors can overlap.
-enum CanvasEditorChromeLayout {
-    private static let outerHorizontalPadding: CGFloat = 16
-
-    static func usesStackedLayout(
-        availableWidth: CGFloat,
-        isAccessibilitySize: Bool
-    ) -> Bool {
-        isAccessibilitySize || availableWidth < minimumSingleRowWidth
-    }
-
-    /// The single-row tool bar needs its full width; below that it wraps onto
-    /// a six-column grid.
-    static var minimumSingleRowWidth: CGFloat {
-        CanvasToolPicker.preferredBarWidth + (2 * outerHorizontalPadding)
-    }
-}
-
 /// Serializes large image decode/insert pipelines and gives lifecycle saves a
 /// task they can cancel and drain. At most one decoded image can be retained by
 /// editor-owned import work at a time.
@@ -347,55 +326,39 @@ struct CanvasEditorView: View {
 
     @ViewBuilder
     private func topChrome(availableWidth: CGFloat) -> some View {
-        let isStacked = CanvasEditorChromeLayout.usesStackedLayout(
-            availableWidth: availableWidth,
-            isAccessibilitySize: dynamicTypeSize.isAccessibilitySize
-        )
-
-        // Only the navigation row and the tool bar are measured. The options
-        // panel floats beneath them as an overlay, so opening or closing it
-        // never changes the canvas inset (the page must not move).
-        VStack(spacing: NotateDesign.Spacing.compact) {
-            editorIdentityAndActions
-            if model.isReaderMode == false {
-                HStack(spacing: 0) {
-                    toolPicker(placement: .bar, isStacked: isStacked, availableWidth: availableWidth)
-                    if isStacked == false {
-                        Spacer(minLength: 0)
-                    }
+        // One row: Back, Pages, the tool bar (centred), Reader, More. Only this
+        // row is measured. The options panel floats beneath it as an overlay,
+        // so opening or closing it never changes the canvas inset.
+        editorIdentityAndActions(availableWidth: availableWidth)
+            .padding(.horizontal, 16)
+            .padding(.top, 8)
+            .frame(maxWidth: .infinity, alignment: .top)
+            .background {
+                GeometryReader { proxy in
+                    Color.clear.preference(
+                        key: CanvasChromeHeightPreferenceKey.self,
+                        value: proxy.size.height
+                    )
                 }
             }
-        }
-        .padding(.horizontal, 16)
-        .padding(.top, 8)
-        .frame(maxWidth: .infinity, alignment: .top)
-        .background {
-            GeometryReader { proxy in
-                Color.clear.preference(
-                    key: CanvasChromeHeightPreferenceKey.self,
-                    value: proxy.size.height
-                )
+            .coordinateSpace(name: CanvasToolPicker.barSpace)
+            .onPreferenceChange(CanvasToolFramesKey.self) { frames in
+                toolFrames = frames
             }
-        }
-        .coordinateSpace(name: CanvasToolPicker.barSpace)
-        .onPreferenceChange(CanvasToolFramesKey.self) { frames in
-            toolFrames = frames
-        }
-        .overlay(alignment: .bottomLeading) {
-            if model.isReaderMode == false, model.overlay != .none {
-                toolPicker(placement: .panel, isStacked: isStacked, availableWidth: availableWidth)
+            .overlay(alignment: .bottomLeading) {
+                if model.isReaderMode == false, model.overlay != .none {
+                    toolPicker(placement: .panel, availableWidth: availableWidth)
+                }
             }
-        }
-        .animation(
-            reduceMotion ? nil : .easeOut(duration: 0.15),
-            value: model.overlay
-        )
-        .accessibilityIdentifier("canvas.top.chrome")
+            .animation(
+                reduceMotion ? nil : .easeOut(duration: 0.15),
+                value: model.overlay
+            )
+            .accessibilityIdentifier("canvas.top.chrome")
     }
 
     private func toolPicker(
         placement: CanvasToolPicker.Placement,
-        isStacked: Bool,
         availableWidth: CGFloat
     ) -> some View {
         let anchorKey = CanvasToolPicker.anchorKey(
@@ -410,7 +373,6 @@ struct CanvasEditorView: View {
             activeGeometryTool: model.activeGeometryTool,
             canUndo: model.canUndo,
             canRedo: model.canRedo,
-            usesCompactLayout: isStacked,
             placement: placement,
             panelAnchorMidX: anchorKey.flatMap { toolFrames[$0]?.midX },
             panelContainerWidth: availableWidth,
@@ -419,7 +381,7 @@ struct CanvasEditorView: View {
         .disabled(model.launchState != .ready)
     }
 
-    private var editorIdentityAndActions: some View {
+    private func editorIdentityAndActions(availableWidth: CGFloat) -> some View {
         GlassEffectContainer(spacing: NotateDesign.Spacing.compact) {
             HStack(spacing: NotateDesign.Spacing.compact) {
                 if let onClose {
@@ -441,7 +403,11 @@ struct CanvasEditorView: View {
                         CanvasPageOverviewButton(model: model)
                     }
                 }
-                Spacer()
+                Spacer(minLength: NotateDesign.Spacing.compact)
+                if model.isReaderMode == false {
+                    toolPicker(placement: .bar, availableWidth: availableWidth)
+                    Spacer(minLength: NotateDesign.Spacing.compact)
+                }
                 if model.supportsPageStack {
                     readerButton
                 }
