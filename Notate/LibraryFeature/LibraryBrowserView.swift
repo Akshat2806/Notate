@@ -732,6 +732,7 @@ private struct LibraryBrowserHeader: View {
     private var topControls: some View {
         ViewThatFits(in: .horizontal) {
             HStack(spacing: NotateDesign.Spacing.control) {
+                LibraryRevealSidebarButton()
                 if session.breadcrumbItems.isEmpty == false {
                     breadcrumbs
                 }
@@ -741,6 +742,7 @@ private struct LibraryBrowserHeader: View {
             .frame(minHeight: 46)
 
             VStack(alignment: .leading, spacing: NotateDesign.Spacing.tight) {
+                LibraryRevealSidebarButton()
                 if session.breadcrumbItems.isEmpty == false {
                     breadcrumbs
                 }

@@ -1347,9 +1347,11 @@ struct LibrarySettingsView: View {
 
     private var settingsHeader: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Color.clear
-                .frame(height: 46)
-                .accessibilityHidden(true)
+            HStack {
+                LibraryRevealSidebarButton()
+                Spacer(minLength: 0)
+            }
+            .frame(minHeight: 46)
             Text("Settings")
                 .font(.largeTitle.weight(.bold))
                 .fontDesign(.serif)
