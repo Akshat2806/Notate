@@ -230,6 +230,14 @@ public final class CanvasEditorModel {
     /// if the person is still at that edge and has not started drawing.
     @ObservationIgnored private var pendingBoundaryInsertion: CanvasPageBoundary?
 
+    /// A deliberate, zero-pull way to add a page: after you scroll while on the
+    /// last page, an "Add Page" button appears for a few seconds. It is never
+    /// shown while writing, so a resting palm can't reach it.
+    public private(set) var showsAddPageAffordance = false
+    @ObservationIgnored private var addPageAffordanceDeadline = Date.distantPast
+    @ObservationIgnored private var addPageAffordanceTask: Task<Void, Never>?
+    @ObservationIgnored private var lastAddPageAt = Date.distantPast
+
     public static func live() -> CanvasEditorModel {
         do {
             return CanvasEditorModel(
@@ -1878,8 +1886,10 @@ public final class CanvasEditorModel {
         // PaperKit calls this after it has accepted Pencil-down. Dismissing the
         // overlay here cannot steal or shorten the first stroke.
         overlay = .none
-        // Starting to write cancels any remembered pull-to-add-page release.
+        // Starting to write cancels any remembered pull-to-add-page release
+        // and hides the Add Page button.
         pendingBoundaryInsertion = nil
+        hideAddPageAffordance()
         pendingProgrammaticFocusPageID = nil
         setFocusedPage(pageID, documentDidChange: true)
     }
@@ -2087,7 +2097,43 @@ public final class CanvasEditorModel {
                 markFreeformViewportChanged()
             }
             persistPreferencesSoon()
+            revealAddPageAffordanceIfAtEnd()
         }
+    }
+
+    private func revealAddPageAffordanceIfAtEnd() {
+        guard supportsPageStack,
+              isReaderMode == false,
+              currentPageNumber == pageCount,
+              Date().timeIntervalSince(lastAddPageAt) > 1.5 else { return }
+        addPageAffordanceDeadline = Date().addingTimeInterval(3)
+        if showsAddPageAffordance == false { showsAddPageAffordance = true }
+        guard addPageAffordanceTask == nil else { return }
+        addPageAffordanceTask = Task { @MainActor [weak self] in
+            while let self, Date() < self.addPageAffordanceDeadline {
+                try? await Task.sleep(for: .milliseconds(250))
+                if Task.isCancelled { return }
+            }
+            self?.showsAddPageAffordance = false
+            self?.addPageAffordanceTask = nil
+        }
+    }
+
+    private func hideAddPageAffordance() {
+        addPageAffordanceDeadline = .distantPast
+        if showsAddPageAffordance { showsAddPageAffordance = false }
+    }
+
+    /// Tapping the Add Page button that appears at the end of the note.
+    public func addPageAtEndFromAffordance() {
+        hideAddPageAffordance()
+        lastAddPageAt = Date()
+        guard supportsPageStack,
+              isReaderMode == false,
+              isReaderModeTransitioning == false,
+              isDurableInsertionInFlight == false,
+              pageTrashMutationsInFlight.isEmpty else { return }
+        addPage(at: .end, boundarySource: nil, animated: true)
     }
 
     /// A freeform viewport is part of the board snapshot because it defines
@@ -2157,6 +2203,8 @@ public final class CanvasEditorModel {
     }
 
     private func performBoundaryInsertion(at boundary: CanvasPageBoundary) {
+        lastAddPageAt = Date()
+        hideAddPageAffordance()
         let position: CanvasPageInsertionPosition = boundary == .start ? .start : .end
         addPage(at: position, boundarySource: boundary, animated: true)
     }

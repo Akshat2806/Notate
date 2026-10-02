@@ -129,27 +129,6 @@ final class NotateTests: XCTestCase {
         XCTAssertEqual(state.configuration(for: .pen)?.color, .black)
     }
 
-    func testBoundaryPullMustHoldBeforeItCanInsertOnePage() {
-        var gate = CanvasBoundaryPullGate()
-        let pull = CanvasBoundaryPagePull(boundary: .start, progress: 1)
-        gate.begin(eligibleBoundaries: [.start])
-
-        _ = gate.update(measuredPull: pull, now: 10)
-        XCTAssertTrue(gate.needsHoldTimer)
-        XCTAssertNil(gate.end(releaseVelocity: .zero))
-
-        gate.begin(eligibleBoundaries: [.start])
-        _ = gate.update(measuredPull: pull, now: 20)
-        let armed = gate.completeHold(
-            now: 20.25,
-            panVelocity: .zero,
-            isDragging: true
-        )
-        XCTAssertEqual(armed?.progress, 1)
-        XCTAssertEqual(gate.end(releaseVelocity: .zero), .start)
-        XCTAssertNil(gate.end(releaseVelocity: .zero))
-    }
-
 
     // MARK: - Tool model regression tests
 
@@ -243,7 +222,21 @@ final class NotateTests: XCTestCase {
     }
 
 
-    // MARK: - Pull-to-add-page must never trigger during normal scrolling
+    // MARK: - Pull-to-add-page: instant arm, never during normal scrolling
+
+    private func fullPull(_ boundary: CanvasPageBoundary) -> CanvasBoundaryPagePull {
+        CanvasBoundaryPagePull(boundary: boundary, progress: 1)
+    }
+
+    func testPullArmsTheMomentItReachesTheArmDistanceWithNoHold() {
+        var gate = CanvasBoundaryPullGate()
+        gate.begin(eligibleBoundaries: [.start])
+
+        let armed = gate.update(measuredPull: fullPull(.start), now: 1)
+
+        XCTAssertEqual(armed?.isArmed, true)
+        XCTAssertEqual(gate.end(releaseVelocity: .zero), .start)
+    }
 
     func testPullBetweenRevealAndArmNeverInsertsOnRelease() {
         var gate = CanvasBoundaryPullGate()
@@ -259,21 +252,17 @@ final class NotateTests: XCTestCase {
 
     func testArmedPullReleasedWithAFlickDoesNotInsert() {
         var gate = CanvasBoundaryPullGate()
-        let pull = CanvasBoundaryPagePull(boundary: .end, progress: 1)
         gate.begin(eligibleBoundaries: [.end])
-        _ = gate.update(measuredPull: pull, now: 10)
-        _ = gate.completeHold(now: 10.5, panVelocity: .zero, isDragging: true)
+        _ = gate.update(measuredPull: fullPull(.end), now: 10)
 
         XCTAssertNil(gate.end(releaseVelocity: CGPoint(x: 0, y: -900)))
     }
 
     func testDragThatDidNotStartAtAnEdgeNeverPulls() {
         var gate = CanvasBoundaryPullGate()
-        let pull = CanvasBoundaryPagePull(boundary: .start, progress: 1)
         gate.begin(eligibleBoundaries: [])
 
-        XCTAssertNil(gate.update(measuredPull: pull, now: 1))
-        XCTAssertNil(gate.completeHold(now: 2, panVelocity: .zero, isDragging: true))
+        XCTAssertNil(gate.update(measuredPull: fullPull(.start), now: 1))
         XCTAssertNil(gate.end(releaseVelocity: .zero))
     }
 
@@ -281,50 +270,54 @@ final class NotateTests: XCTestCase {
         var gate = CanvasBoundaryPullGate()
         gate.begin(eligibleBoundaries: [.start])
 
-        XCTAssertNil(gate.update(
-            measuredPull: CanvasBoundaryPagePull(boundary: .end, progress: 1),
-            now: 1
-        ))
+        XCTAssertNil(gate.update(measuredPull: fullPull(.end), now: 1))
         XCTAssertNil(gate.end(releaseVelocity: .zero))
     }
 
-    func testHoldCompletedAfterTheFingerLeavesDoesNotArm() {
+    func testPullingBackBelowDisarmCancelsTheInsertion() {
         var gate = CanvasBoundaryPullGate()
-        gate.begin(eligibleBoundaries: [.start])
-        _ = gate.update(
-            measuredPull: CanvasBoundaryPagePull(boundary: .start, progress: 1),
-            now: 1
+        gate.begin(eligibleBoundaries: [.end])
+        _ = gate.update(measuredPull: fullPull(.end), now: 1)
+        // Back below the reveal distance the layout reports no pull at all.
+        XCTAssertNil(gate.update(measuredPull: nil, now: 2))
+
+        XCTAssertNil(gate.end(releaseVelocity: .zero))
+    }
+
+    func testSmallReversalWhileArmedStaysArmed() {
+        var gate = CanvasBoundaryPullGate()
+        gate.begin(eligibleBoundaries: [.end])
+        _ = gate.update(measuredPull: fullPull(.end), now: 1)
+        // Progress 0.8 is above the disarm threshold (0.69), so it holds.
+        let steady = gate.update(
+            measuredPull: CanvasBoundaryPagePull(boundary: .end, progress: 0.8),
+            now: 2
         )
 
-        XCTAssertNil(gate.completeHold(now: 2, panVelocity: .zero, isDragging: false))
-        XCTAssertNil(gate.end(releaseVelocity: .zero))
+        XCTAssertEqual(steady?.isArmed, true)
+        XCTAssertEqual(gate.end(releaseVelocity: .zero), .end)
     }
 
     func testAValidPullInsertsExactlyOnePage() {
         var gate = CanvasBoundaryPullGate()
         gate.begin(eligibleBoundaries: [.end])
-        _ = gate.update(
-            measuredPull: CanvasBoundaryPagePull(boundary: .end, progress: 1),
-            now: 5
-        )
-        XCTAssertNotNil(gate.completeHold(now: 5.5, panVelocity: .zero, isDragging: true))
+        _ = gate.update(measuredPull: fullPull(.end), now: 5)
+
         XCTAssertEqual(gate.end(releaseVelocity: .zero), .end)
         XCTAssertNil(gate.end(releaseVelocity: .zero))
     }
 
-    func testArmedPullDoesNotNeedAnotherHoldTimer() {
-        var gate = CanvasBoundaryPullGate()
-        gate.begin(eligibleBoundaries: [.start])
-        _ = gate.update(
-            measuredPull: CanvasBoundaryPagePull(boundary: .start, progress: 1),
-            now: 1
+    func testPullDistancesAreDeliberateButShort() {
+        XCTAssertLessThanOrEqual(CanvasConstants.boundaryPullArmDistance, 60)
+        XCTAssertGreaterThanOrEqual(CanvasConstants.boundaryPullArmDistance, 48)
+        XCTAssertLessThan(
+            CanvasConstants.boundaryPullRevealDistance,
+            CanvasConstants.boundaryPullDisarmDistance
         )
-        XCTAssertTrue(gate.needsHoldTimer)
-        _ = gate.completeHold(now: 1.5, panVelocity: .zero, isDragging: true)
-
-        // The controller must not re-arm its timer once armed: a second
-        // completeHold in the armed phase cancels the whole gesture.
-        XCTAssertFalse(gate.needsHoldTimer)
+        XCTAssertLessThan(
+            CanvasConstants.boundaryPullDisarmDistance,
+            CanvasConstants.boundaryPullArmDistance
+        )
     }
 
     @MainActor
@@ -342,7 +335,7 @@ final class NotateTests: XCTestCase {
             zoomScale: 1
         )
         let belowReveal = CanvasStackLayout.boundaryPagePull(
-            contentOffset: CGPoint(x: 0, y: -100),
+            contentOffset: CGPoint(x: 0, y: -90),
             panTranslation: CGPoint(x: 0, y: 40),
             viewportSize: size,
             contentSize: content,

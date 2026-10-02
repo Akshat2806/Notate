@@ -335,7 +335,6 @@ private var lastPublishedViewport: CanvasViewportState?
 private var lastPublishedViewportPageID: UUID?
 private var activeBoundaryPagePull: CanvasBoundaryPagePull?
 private var boundaryPullGate = CanvasBoundaryPullGate()
-private var boundaryPullHoldTask: Task<Void, Never>?
 private var pendingBoundaryPageInsertion: CanvasPageBoundary?
 private var dragStartFocusedPageID: UUID?
 private var dragStartContentOffset: CGPoint?
@@ -4788,8 +4787,7 @@ private func updateBoundaryPagePull(
 contentOffset: CGPoint,
 panTranslation: CGPoint,
 isDragging: Bool,
-now: TimeInterval,
-schedulesHoldTimer: Bool
+now: TimeInterval
 ) {
 guard documentMode == .paged,
 isReaderModeEnabled == false,
@@ -4813,14 +4811,6 @@ measuredPull: measuredPull,
 now: now
 )
 setBoundaryPagePull(pull)
-if schedulesHoldTimer {
-if boundaryPullGate.needsHoldTimer {
-synchronizeBoundaryPullHoldTask()
-}
-} else {
-boundaryPullHoldTask?.cancel()
-boundaryPullHoldTask = nil
-}
 }
 private func beginBoundaryPagePullGesture(at contentOffset: CGPoint) {
 guard documentMode == .paged, isReaderModeEnabled == false else {
@@ -4839,44 +4829,9 @@ pageLayout: pageLayout
 boundaryPullGate.begin(eligibleBoundaries: eligibleBoundaries)
 boundaryPageFeedbackGenerator.prepare()
 }
-private func synchronizeBoundaryPullHoldTask() {
-boundaryPullHoldTask?.cancel()
-boundaryPullHoldTask = nil
-guard boundaryPullHoldTask == nil else { return }
-let sessionID = boundaryPullGate.sessionID
-boundaryPullHoldTask = Task { @MainActor [weak self] in
-do {
-try await Task.sleep(
-for: .milliseconds(CanvasConstants.boundaryPullHoldMilliseconds)
-)
-} catch {
-return
-}
-
-        guard let self,
-            self.boundaryPullGate.sessionID == sessionID else { return }
-        self.boundaryPullHoldTask = nil
-        let pull = self.boundaryPullGate.completeHold(
-            now: CACurrentMediaTime(),
-            panVelocity: self.scrollView.panGestureRecognizer.velocity(
-                in: self.scrollView
-            ),
-            isDragging: self.scrollView.isDragging
-        )
-        self.setBoundaryPagePull(pull)
-        // Only a still-holding gate needs another tick. Re-arming after the
-        // pull is armed would hit `completeHold` in the wrong phase and
-        // cancel the gesture before release could insert the page.
-        if self.boundaryPullGate.needsHoldTimer {
-            self.synchronizeBoundaryPullHoldTask()
-        }
-        }
-    }
     private func cancelBoundaryPagePullGesture(
         clearPendingInsertion: Bool = true
     ) {
-        boundaryPullHoldTask?.cancel()
-        boundaryPullHoldTask = nil
         boundaryPullGate.cancel()
         if clearPendingInsertion {
             pendingBoundaryPageInsertion = nil
@@ -4904,8 +4859,6 @@ guard isReaderModeEnabled == false else {
 cancelBoundaryPagePullGesture()
 return false
 }
-boundaryPullHoldTask?.cancel()
-boundaryPullHoldTask = nil
 pendingBoundaryPageInsertion = boundaryPullGate.end(
 releaseVelocity: releaseVelocity
 )
@@ -6135,21 +6088,8 @@ guard let retainedHost = hostsByPageID[pageID],
             contentOffset: contentOffset,
             panTranslation: panTranslation,
             isDragging: isDragging,
-            now: now,
-            schedulesHoldTimer: false
+            now: now
         )
-    }
-    func completeBoundaryPagePullHoldForTesting(
-        now: TimeInterval,
-        panVelocity: CGPoint = .zero,
-        isDragging: Bool = true
-    ) {
-        let pull = boundaryPullGate.completeHold(
-            now: now,
-            panVelocity: panVelocity,
-            isDragging: isDragging
-        )
-        setBoundaryPagePull(pull)
     }
     @discardableResult
     func prepareBoundaryPageInsertionForTesting(
@@ -6196,8 +6136,7 @@ extension PaperCanvasViewController: UIScrollViewDelegate {
             contentOffset: scrollView.contentOffset,
             panTranslation: scrollView.panGestureRecognizer.translation(in: scrollView),
             isDragging: scrollView.isDragging,
-            now: CACurrentMediaTime(),
-            schedulesHoldTimer: true
+            now: CACurrentMediaTime()
         )
         guard hasAppliedInitialViewport, isApplyingGeometry == false else { return }
         guard settledEnvironment == currentViewportEnvironment else {

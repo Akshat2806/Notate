@@ -315,7 +315,8 @@ struct CanvasEditorView: View {
             .allowsHitTesting(model.isReaderModeTransitioning == false)
         }
         .overlay(alignment: .bottomTrailing) {
-            if model.supportsPageStack, model.pageCount > 1,
+            if model.supportsPageStack,
+               model.pageCount > 1 || model.showsAddPageAffordance,
                model.isReaderMode == false, model.launchState == .ready {
                 pageIndicator
                     .padding(.trailing, 16)
@@ -385,6 +386,10 @@ struct CanvasEditorView: View {
                 toolPicker(placement: .panel, isStacked: isStacked, availableWidth: availableWidth)
             }
         }
+        .animation(
+            reduceMotion ? nil : .easeOut(duration: 0.15),
+            value: model.overlay
+        )
         .accessibilityIdentifier("canvas.top.chrome")
     }
 
@@ -472,16 +477,42 @@ struct CanvasEditorView: View {
 
     /// Orientation without chrome: which page of the note is in view.
     private var pageIndicator: some View {
-        Text("\(model.currentPageNumber) / \(model.pageCount)")
-            .font(.footnote.monospacedDigit().weight(.medium))
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .notateGlassSurface(shape: Capsule())
-            .allowsHitTesting(false)
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Page \(model.currentPageNumber) of \(model.pageCount)")
-            .accessibilityIdentifier("canvas.page.indicator")
+        HStack(spacing: NotateDesign.Spacing.compact) {
+            Text("\(model.currentPageNumber) / \(model.pageCount)")
+                .font(.footnote.monospacedDigit().weight(.medium))
+                .foregroundStyle(.secondary)
+                .allowsHitTesting(false)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Page \(model.currentPageNumber) of \(model.pageCount)")
+                .accessibilityIdentifier("canvas.page.indicator")
+
+            if model.showsAddPageAffordance {
+                Rectangle()
+                    .fill(Color.primary.opacity(0.22))
+                    .frame(width: 1, height: 16)
+                    .accessibilityHidden(true)
+                Button {
+                    model.addPageAtEndFromAffordance()
+                } label: {
+                    Label("Add Page", systemImage: "plus")
+                        .font(.footnote.weight(.semibold))
+                        .labelStyle(.titleAndIcon)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(NotateDesign.Palette.accent)
+                .accessibilityIdentifier("canvas.page.add")
+                .transition(.opacity)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, model.showsAddPageAffordance ? 10 : 6)
+        .notateGlassSurface(shape: Capsule())
+        .animation(
+            reduceMotion ? nil : NotateDesign.Motion.feedback,
+            value: model.showsAddPageAffordance
+        )
+        .sensoryFeedback(.impact(weight: .light), trigger: model.pageCount)
     }
 
     private var readerButton: some View {

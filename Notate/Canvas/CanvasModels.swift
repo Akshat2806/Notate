@@ -2070,16 +2070,13 @@ public enum CanvasConstants {
     public static let boundaryPullStartSlop: CGFloat = 10
     /// The 42-point affordance is not shown until it has 12 points of clear
     /// workspace between it and the page edge.
-    public static let boundaryPullRevealDistance: CGFloat = 54
-    public static let boundaryPullArmDistance: CGFloat = 96
+    public static let boundaryPullRevealDistance: CGFloat = 24
+    public static let boundaryPullArmDistance: CGFloat = 56
     /// Once armed, a little reversal is tolerated so the ready state does not
     /// chatter around the arming threshold.
-    public static let boundaryPullDisarmDistance: CGFloat = 78
-    public static let boundaryPullHoldMilliseconds: Int64 = 200
-    public static let boundaryPullMaximumHoldVelocityPointsPerSecond: CGFloat = 350
+    public static let boundaryPullDisarmDistance: CGFloat = 46
     public static let boundaryPullMaximumReleaseVelocityPointsPerSecond: CGFloat = 450
     public static let boundaryPullVerticalDominance: CGFloat = 1.25
-    public static let boundaryPullHoldingProgress: CGFloat = 0.98
     /// The neutral editing workspace behind authored notebook pages. This is
     /// deliberately close to paper in Light Mode; page elevation and the
     /// hairline carry the hierarchy without turning most of the editor into a

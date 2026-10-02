@@ -1581,7 +1581,6 @@ struct CanvasBoundaryPullGate {
     private enum Phase: Equatable {
         case idle
         case pulling(CanvasPageBoundary)
-        case holding(CanvasPageBoundary, startedAt: TimeInterval)
         case armed(CanvasPageBoundary)
     }
 
@@ -1594,11 +1593,6 @@ struct CanvasBoundaryPullGate {
 
     var eligibleBoundariesAtStart: Set<CanvasPageBoundary> {
         eligibleBoundaries
-    }
-
-    var needsHoldTimer: Bool {
-        if case .holding = phase { return true }
-        return false
     }
 
     mutating func begin(eligibleBoundaries: Set<CanvasPageBoundary>) {
@@ -1632,6 +1626,10 @@ struct CanvasBoundaryPullGate {
         }
         latestMeasuredPull = measuredPull
 
+        // Arms the instant the pull reaches the arm distance while the finger
+        // is still dragging. There is deliberately no "hold still" step: the
+        // edge-start, drag-only, direction, distance and release-speed gates
+        // already separate a deliberate pull from ordinary scrolling.
         if case let .armed(boundary) = phase,
            boundary == measuredPull.boundary {
             if measuredPull.progress >= Self.disarmProgress {
@@ -1646,44 +1644,8 @@ struct CanvasBoundaryPullGate {
             return measuredPull
         }
 
-        switch phase {
-        case let .holding(boundary, startedAt) where boundary == measuredPull.boundary:
-            phase = .holding(boundary, startedAt: startedAt)
-        default:
-            phase = .holding(measuredPull.boundary, startedAt: now)
-        }
-        return holdingPresentation(for: measuredPull.boundary)
-    }
-
-    mutating func completeHold(
-            now: TimeInterval,
-            panVelocity: CGPoint,
-            isDragging: Bool
-    ) -> CanvasBoundaryPagePull? {
-        guard isTracking,
-              isDragging,
-              case let .holding(boundary, startedAt) = phase,
-              let measuredPull = latestMeasuredPull,
-              measuredPull.boundary == boundary,
-              measuredPull.progress >= 1 else {
-            cancel()
-            return nil
-        }
-
-        let elapsed = now - startedAt
-        guard elapsed >= Self.holdDuration else {
-            return holdingPresentation(for: boundary)
-        }
-
-        guard hypot(panVelocity.x, panVelocity.y)
-                <= CanvasConstants.boundaryPullMaximumHoldVelocityPointsPerSecond else {
-            // A continuing fling must come to rest and complete a fresh hold.
-            phase = .holding(boundary, startedAt: now)
-            return holdingPresentation(for: boundary)
-        }
-
-        phase = .armed(boundary)
-        return CanvasBoundaryPagePull(boundary: boundary, progress: 1)
+        phase = .armed(measuredPull.boundary)
+        return CanvasBoundaryPagePull(boundary: measuredPull.boundary, progress: 1)
     }
 
     mutating func end(releaseVelocity: CGPoint) -> CanvasPageBoundary? {
@@ -1706,19 +1668,6 @@ struct CanvasBoundaryPullGate {
         lockedBoundary = nil
         latestMeasuredPull = nil
         phase = .idle
-    }
-
-    private func holdingPresentation(
-            for boundary: CanvasPageBoundary
-    ) -> CanvasBoundaryPagePull {
-        CanvasBoundaryPagePull(
-            boundary: boundary,
-            progress: CanvasConstants.boundaryPullHoldingProgress
-        )
-    }
-
-    private static var holdDuration: TimeInterval {
-        TimeInterval(CanvasConstants.boundaryPullHoldMilliseconds) / 1_000
     }
 
     private static var disarmProgress: CGFloat {
