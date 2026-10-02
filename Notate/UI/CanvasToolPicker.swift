@@ -45,7 +45,13 @@ public struct CanvasToolPicker: View {
         static let itemHeight: CGFloat = 40
         static let itemSpacing: CGFloat = 2
         static let horizontalPadding: CGFloat = 6
-        static let itemCount = 9
+        static let groupSpacing: CGFloat = 6
+        static let dividerWidth: CGFloat = 7
+        /// Draw group: lasso | pen pencil brush highlighter | eraser.
+        static let drawGroupItems = 6
+        static let drawGroupDividers = 2
+        /// Aids group: laser, ruler, add.
+        static let aidsGroupItems = 3
     }
 
     enum StripMetrics {
@@ -73,9 +79,19 @@ public struct CanvasToolPicker: View {
     /// The editor uses it to decide whether the pill can share the navigation
     /// row.
     static var preferredPillWidth: CGFloat {
-        let items = CGFloat(PillMetrics.itemCount) * PillMetrics.itemWidth
-        let gaps = CGFloat(PillMetrics.itemCount) * PillMetrics.itemSpacing
-        return items + gaps + (2 * PillMetrics.horizontalPadding)
+        func group(items: Int, dividers: Int) -> CGFloat {
+            let children = CGFloat(items + dividers)
+            return CGFloat(items) * PillMetrics.itemWidth
+                + CGFloat(dividers) * PillMetrics.dividerWidth
+                + (children - 1) * PillMetrics.itemSpacing
+                + (2 * PillMetrics.horizontalPadding)
+        }
+        return group(
+            items: PillMetrics.drawGroupItems,
+            dividers: PillMetrics.drawGroupDividers
+        )
+            + PillMetrics.groupSpacing
+            + group(items: PillMetrics.aidsGroupItems, dividers: 0)
     }
 
     /// Undo and redo share one small capsule.
@@ -168,16 +184,36 @@ public struct CanvasToolPicker: View {
         .accessibilityIdentifier("canvas.tool.strip")
     }
 
+    /// Segmented into two capsules so the row reads as "what I draw with"
+    /// and "what helps me", rather than one undifferentiated strip.
     @ViewBuilder private var pickerControls: some View {
-        toolButton(.lasso)
-        toolButton(.pen)
-        toolButton(.pencil)
-        toolButton(.fountainPen)
-        toolButton(.highlighter)
-        toolButton(.eraser)
-        toolButton(.laserPointer)
-        rulerButton
-        addButton
+        GlassEffectContainer(spacing: PillMetrics.groupSpacing) {
+            HStack(spacing: PillMetrics.groupSpacing) {
+                CanvasToolGroup {
+                    toolButton(.lasso)
+                    groupDivider
+                    toolButton(.pen)
+                    toolButton(.pencil)
+                    toolButton(.fountainPen)
+                    toolButton(.highlighter)
+                    groupDivider
+                    toolButton(.eraser)
+                }
+                CanvasToolGroup {
+                    toolButton(.laserPointer)
+                    rulerButton
+                    addButton
+                }
+            }
+        }
+    }
+
+    private var groupDivider: some View {
+        Rectangle()
+            .fill(Color.primary.opacity(0.14))
+            .frame(width: 1, height: 16)
+            .frame(width: PillMetrics.dividerWidth)
+            .accessibilityHidden(true)
     }
 
     private var historyPill: some View {
@@ -415,12 +451,28 @@ public struct CanvasToolPicker: View {
             }
             .accessibilityIdentifier("canvas.tool.options")
         } else if tool.toolbarFamilyVariants.count > 1 {
-            HStack(spacing: StripMetrics.sectionSpacing) {
-                styleChips(for: tool)
-                stripDivider
-                thicknessChips(for: tool)
-                stripDivider
-                colorChips(for: tool)
+            // Level 1: the styles of this family, named. Level 2: thickness
+            // beside color. Two short lines read faster than one long one.
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: StripMetrics.sectionSpacing) {
+                    styleChips(for: tool)
+                    Text(toolState.activeTool.title)
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .contentTransition(.opacity)
+                        .accessibilityHidden(true)
+                }
+                Rectangle()
+                    .fill(Color.primary.opacity(0.10))
+                    .frame(height: 1)
+                    .padding(.vertical, 2)
+                    .accessibilityHidden(true)
+                HStack(spacing: StripMetrics.sectionSpacing) {
+                    thicknessChips(for: tool)
+                    stripDivider
+                    colorChips(for: tool)
+                }
             }
             .accessibilityIdentifier("canvas.tool.options")
         } else {
@@ -1238,26 +1290,28 @@ private struct CanvasToolPillContainer<Content: View>: View {
     @ViewBuilder let content: Content
 
     var body: some View {
-        Group {
-            if scrolls {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    row
-                }
-                .frame(maxWidth: CanvasToolPicker.preferredPillWidth)
-            } else {
-                row
+        if scrolls {
+            ScrollView(.horizontal, showsIndicators: false) {
+                content
             }
+            .frame(maxWidth: CanvasToolPicker.preferredPillWidth)
+        } else {
+            content
         }
-        .frame(height: NotateDesign.Control.compactGlassDiameter)
-        .glassEffect(.regular.interactive(), in: Capsule())
     }
+}
 
-    private var row: some View {
+/// One glass capsule holding a related set of controls.
+private struct CanvasToolGroup<Content: View>: View {
+    @ViewBuilder let content: Content
+
+    var body: some View {
         HStack(spacing: CanvasToolPicker.PillMetrics.itemSpacing) {
             content
         }
         .padding(.horizontal, CanvasToolPicker.PillMetrics.horizontalPadding)
         .frame(height: NotateDesign.Control.compactGlassDiameter)
+        .glassEffect(.regular.interactive(), in: Capsule())
     }
 }
 
