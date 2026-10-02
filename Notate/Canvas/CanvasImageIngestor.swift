@@ -67,13 +67,30 @@ struct CanvasImageTransfer: Transferable, Sendable {
 
 // MARK: - Ingestion error domain
 
-enum CanvasImageIngestionError: Error, Sendable {
+enum CanvasImageIngestionError: Error, LocalizedError, Sendable {
   case unreadableSource
   case sourceFileTooLarge(actualBytes: Int, maximumBytes: Int)
   case sourcePixelBudgetExceeded(actualPixels: Int, maximumPixels: Int)
   case decodedPixelBudgetExceeded(height: Int, maximumPixels: Int)
   case invalidDimensions(width: Int, height: Int)
   case decodeFailed
+
+  var errorDescription: String? {
+    switch self {
+    case .unreadableSource:
+      "This image could not be read. Try another photo or file."
+    case .sourceFileTooLarge:
+      "This image file is too large to add."
+    case .sourcePixelBudgetExceeded:
+      "This image has too many pixels to add. Try a smaller version."
+    case .decodedPixelBudgetExceeded:
+      "This image is too large to add, even after shrinking it."
+    case .invalidDimensions:
+      "This image has invalid dimensions."
+    case .decodeFailed:
+      "This image could not be decoded. It may be damaged or in an unsupported format."
+    }
+  }
 }
 
 // MARK: - Metadata / validator
@@ -285,24 +302,19 @@ func ingestImage(
   let decodedBudget = policy.maximumDecodedPixelCount
   let maxDim = policy.maximumDecodedDimension
 
-  // Compute initial half‑open interval [1 , min(longestEdge, maxDim)]
+  // The thumbnail API takes a maximum *edge length*, so scale the longest
+  // edge by sqrt(budget / pixels) to land under the decoded pixel budget.
   let longestEdge = max(rawWidth, rawHeight)
-  var lowerBound = 1
-  var upperBound = min(longestEdge, maxDim)
-
-  // Binary search for the largest scale whose short‑edge-squared stays under budget
-  while lowerBound < upperBound {
-    let candidate = lowerBound + (upperBound - lowerBound + 1) / 2
-  let scaledPixelCount = rawWidth / candidate * (rawHeight / candidate)
-    if scaledPixelCount <= decodedBudget {
-      lowerBound = candidate
-    } else {
-      upperBound = candidate - 1
-    }
-  }
+  let areaScale = rawWidth > 0 && rawHeight > 0
+    ? min(1, (Double(decodedBudget) / (Double(rawWidth) * Double(rawHeight))).squareRoot())
+    : 1
+  // Shave 1% so rounding in ImageIO cannot tip the result over budget.
+  let budgetEdge = Int((Double(longestEdge) * areaScale * 0.99).rounded(.down))
+  let lowerBound = max(1, min(budgetEdge, min(longestEdge, maxDim)))
 
   // --- 6. Generate thumbnail (oriented, decoded) ---------------------------
   let decodeOptions: [CFString: Any] = [
+    kCGImageSourceCreateThumbnailFromImageAlways: true,
     kCGImageSourceCreateThumbnailWithTransform: true,
     kCGImageSourceShouldCacheImmediately: true,
     kCGImageSourceThumbnailMaxPixelSize: lowerBound,
