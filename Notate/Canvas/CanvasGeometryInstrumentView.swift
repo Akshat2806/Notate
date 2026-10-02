@@ -7,6 +7,9 @@ import UIKit
 /// through every other visible part of the instrument.
 @MainActor
 final class CanvasGeometryInstrumentView: UIView {
+    var topChromeHeight: CGFloat = CanvasConstants.toolbarTopPadding + CanvasConstants.toolbarHeight {
+        didSet { setNeedsLayout() }
+    }
     private enum Metrics {
         static let canvasInset: CGFloat = 16
         static let handleHitDiameter: CGFloat = 66
@@ -204,12 +207,8 @@ final class CanvasGeometryInstrumentView: UIView {
 
     private var instrumentSafeRect: CGRect {
         let safeBounds = bounds.inset(by: safeAreaInsets)
-        let topChromeExclusion = CanvasConstants.toolbarTopPadding
-            + CanvasConstants.toolbarHeight
+        let topChromeExclusion = topChromeHeight
             + CanvasConstants.firstPageToolbarGap
-            + (traitCollection.accessibilityCategory.isAccessibilityCategory
-                ? CanvasConstants.toolBarContentHeight + 8
-                : 0)
         var preferred = safeBounds.insetBy(dx: Metrics.canvasInset, dy: Metrics.canvasInset)
         preferred.origin.y += topChromeExclusion
         preferred.size.height -= topChromeExclusion
@@ -870,7 +869,7 @@ final class CanvasGeometryInstrumentView: UIView {
             (CGFloat(3.2), accent.withAlphaComponent(0.82))
         ] {
             context.setLineWidth(width)
-            context.setStrokeColor(color)
+            context.setStrokeColor(color.cgColor)
             context.move(to: hinge)
             context.addLine(to: pivot)
             context.move(to: hinge)
@@ -1104,4 +1103,3 @@ final class CanvasGeometryInstrumentView: UIView {
         return result
     }
 }
-

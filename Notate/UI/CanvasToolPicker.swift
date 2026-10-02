@@ -38,7 +38,6 @@ public struct CanvasToolPicker: View {
         static let itemSpacing: CGFloat = 2
         static let horizontalPadding: CGFloat = 8
         static let verticalPadding: CGFloat = 8
-        static let dividerWidth: CGFloat = 1
     }
 
     enum ToolOptionsMetrics {
@@ -50,20 +49,6 @@ public struct CanvasToolPicker: View {
     enum InsertTrayMetrics {
         static let horizontalPadding: CGFloat = 8
         static let verticalPadding: CGFloat = 8
-        static func compactContentWidth(isAccessibilitySize: Bool) -> CGFloat {
-            isAccessibilitySize ? 344 : 252
-        }
-    }
-
-    enum GeometryPickerMetrics {
-        static let itemSpacing: CGFloat = 2
-        static func compactContentWidth(isAccessibilitySize: Bool) -> CGFloat {
-            isAccessibilitySize ? 344 : 252
-        }
-    }
-
-    static func compactContentWidth(isAccessibilitySize: Bool) -> CGFloat {
-        isAccessibilitySize ? 344 : 252
     }
 
     enum TableSizePickerMetrics {
@@ -79,24 +64,27 @@ public struct CanvasToolPicker: View {
     }
 
     public let toolState: CanvasToolState
-    public let overlay: CanvasToolPickerOverlay
+    public let overlay: CanvasOverlay
     public let preferredGeometryTool: CanvasGeometryTool
     public let activeGeometryTool: CanvasGeometryTool?
     public let canUndo: Bool
     public let canRedo: Bool
-    public let onIntent: (CanvasToolPickerIntent) -> Void
+    public let usesCompactLayout: Bool
+    public let onIntent: (CanvasToolbarIntent) -> Void
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.colorSchemeContrast) private var colorSchemeContrast
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    private var reduceTransparency: Bool { UIAccessibility.isReduceTransparencyEnabled }
+    private var voiceOverEnabled: Bool { UIAccessibility.isVoiceOverRunning }
 
     @AccessibilityFocusState private var isAddButtonFocused: Bool
-    @AccessibilityFocusState(for: CanvasTool.self) private var focusedTool: CanvasTool?
-    @AccessibilityFocusState(for: CanvasShape.self) private var focusedShape: CanvasShape?
-    @AccessibilityFocusState(for: CanvasTableSize.self) private var focusedTableSize: CanvasTableSize?
+    @AccessibilityFocusState private var focusedTool: CanvasTool?
+    @AccessibilityFocusState private var focusedShape: CanvasShape?
+    @AccessibilityFocusState private var focusedTableSize: CanvasTableSize?
     @AccessibilityFocusState private var isTableStepperFocused: Bool
-    @AccessibilityFocusState(for: CanvasGeometryTool.self) private var focusedGeometryTool: CanvasGeometryTool?
+    @AccessibilityFocusState private var focusedGeometryTool: CanvasGeometryTool?
     @AccessibilityFocusState private var isGeometrySlotFocused: Bool
 
     @FocusState private var keyboardFocusedTableSize: CanvasTableSize?
@@ -109,12 +97,13 @@ public struct CanvasToolPicker: View {
 
     public init(
         toolState: CanvasToolState,
-        overlay: CanvasToolPickerOverlay,
+        overlay: CanvasOverlay,
         preferredGeometryTool: CanvasGeometryTool,
         activeGeometryTool: CanvasGeometryTool?,
         canUndo: Bool,
         canRedo: Bool,
-        onIntent: @escaping (CanvasToolPickerIntent) -> Void
+        usesCompactLayout: Bool = false,
+        onIntent: @escaping (CanvasToolbarIntent) -> Void
     ) {
         self.toolState = toolState
         self.overlay = overlay
@@ -122,6 +111,7 @@ public struct CanvasToolPicker: View {
         self.activeGeometryTool = activeGeometryTool
         self.canUndo = canUndo
         self.canRedo = canRedo
+        self.usesCompactLayout = usesCompactLayout
         self.onIntent = onIntent
     }
 
@@ -129,6 +119,7 @@ public struct CanvasToolPicker: View {
         GlassEffectContainer(spacing: PickerBarMetrics.itemSpacing) {
             VStack(alignment: .leading, spacing: PickerBarMetrics.itemSpacing) {
                 adaptivePickerBar
+                    .frame(maxWidth: .infinity)
                     .glassEffect(
                         .regular.interactive(),
                         in: RoundedRectangle(
@@ -138,6 +129,7 @@ public struct CanvasToolPicker: View {
                     )
                 adaptiveAccessorySurface
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .onChange(of: overlay) { _, newValue in
             if case .insert = newValue {
@@ -155,46 +147,42 @@ public struct CanvasToolPicker: View {
     }
 
     private var adaptivePickerBar: some View {
-        HStack(spacing: PickerBarMetrics.itemSpacing) {
-            utilityButton(
-                title: "Undo",
-                systemImage: "arrow.uturn.backward",
-                isEnabled: canUndo
-            ) {
-                onIntent(.undo)
+        Group {
+            if usesCompactLayout || dynamicTypeSize.isAccessibilitySize {
+                LazyVGrid(
+                    columns: Array(repeating: GridItem(.flexible(), spacing: 2), count: 6),
+                    spacing: 2
+                ) {
+                    pickerControls
+                }
+                .accessibilityIdentifier("canvas.tool.strip")
+            } else {
+                HStack(spacing: PickerBarMetrics.itemSpacing) {
+                    pickerControls
+                }
+                .frame(maxWidth: .infinity)
+                .accessibilityIdentifier("canvas.tool.strip")
             }
-            utilityButton(
-                title: "Redo",
-                systemImage: "arrow.uturn.forward",
-                isEnabled: canRedo
-            ) {
-                onIntent(.redo)
-            }
-            pickerDivider
-            ScrollView(.horizontal) {
-                pickerToolStrip
-            }
-            .frame(maxWidth: CanvasToolPicker.compactContentWidth(isAccessibilitySize: dynamicTypeSize.isAccessibilitySize))
-            .accessibilityIdentifier("canvas.tool.strip")
-            pickerDivider
-            addButton
         }
         .padding(.horizontal, PickerBarMetrics.horizontalPadding)
         .padding(.vertical, PickerBarMetrics.verticalPadding)
     }
 
-    private var pickerToolStrip: some View {
-        HStack(spacing: PickerBarMetrics.itemSpacing) {
+    @ViewBuilder private var pickerControls: some View {
+            utilityButton(title: "Undo", systemImage: "arrow.uturn.backward", isEnabled: canUndo) {
+                onIntent(.undo)
+            }
+            utilityButton(title: "Redo", systemImage: "arrow.uturn.forward", isEnabled: canRedo) {
+                onIntent(.redo)
+            }
             toolButton(.lasso)
-            pickerDivider
             toolButton(.pen)
             toolButton(.pencil)
             toolButton(.fountainPen)
             toolButton(.highlighter)
             toolButton(.eraser)
-            pickerDivider
             toolButton(.laserPointer)
-        }
+            addButton
     }
 
     private var addButton: some View {
@@ -284,13 +272,16 @@ public struct CanvasToolPicker: View {
         let displayedTool = displayedToolbarTool(for: toolbarTool)
         let selected = toolState.activeTool.toolbarFamilyRoot == toolbarTool
         let configuration = toolState.configuration(for: displayedTool)
-        let color = configuration?.color
-        let label = displayedTool.label
-        let hasFamilyVariants = displayedTool.toolbarFamilyVariants?.isEmpty == false
+        let label = displayedTool.title
+        let hasFamilyVariants = displayedTool.toolbarFamilyVariants.count > 1
         let familyOptionsExpanded = isFamilyOptionsExpanded(for: toolbarTool)
 
         return Button { activate(displayedTool) } label: {
-            ToolGlyph(tool: displayedTool, isSelected: selected)
+            ToolGlyph(
+                tool: displayedTool,
+                inkColor: Color(rgba: configuration?.color ?? .black),
+                isSelected: selected
+            )
                 .frame(width: NotateDesign.Control.standard, height: NotateDesign.Control.standard)
                 .background {
                     if selected {
@@ -298,25 +289,7 @@ public struct CanvasToolPicker: View {
                     }
                 }
                 .overlay(alignment: .bottom) {
-                    if displayedTool == .eraser {
-                        if toolState.eraserMode == .pixel {
-                            Circle()
-                                .fill(Color.primary)
-                                .frame(width: 3, height: 3)
-                                .padding(.bottom, 2)
-                        } else {
-                            Capsule()
-                                .fill(Color.primary)
-                                .frame(width: 8, height: 3)
-                                .padding(.bottom, 2)
-                        }
-                    } else if let color, displayedTool != .lasso, displayedTool != .laserPointer {
-                        let inkWidth = toolbarInkIndicatorWidth(configuration?.width ?? 2, for: displayedTool)
-                        Capsule()
-                            .fill(Color(rgba: color))
-                            .frame(width: inkWidth, height: 3)
-                            .padding(.bottom, 2)
-                    }
+                    toolIndicator(for: displayedTool, configuration: configuration)
                 }
                 .overlay(alignment: .bottomTrailing) {
                     if hasFamilyVariants {
@@ -343,12 +316,27 @@ public struct CanvasToolPicker: View {
         .help(label)
     }
 
-    private var pickerDivider: some View {
-        Rectangle()
-            .fill(Color.primary.opacity(0.12))
-            .frame(width: 1, height: 22)
-            .padding(.horizontal, 3)
-            .accessibilityHidden(true)
+    @ViewBuilder
+    private func toolIndicator(
+        for tool: CanvasTool,
+        configuration: CanvasToolConfiguration?
+    ) -> some View {
+        if tool == .eraser {
+            Capsule()
+                .fill(Color.primary)
+                .frame(width: toolState.eraserMode == .pixel ? 3 : 8, height: 3)
+                .padding(.bottom, 2)
+        } else if let color = configuration?.color,
+                  tool != .lasso,
+                  tool != .laserPointer {
+            Capsule()
+                .fill(Color(rgba: color))
+                .frame(
+                    width: toolbarInkIndicatorWidth(configuration?.width ?? 2, for: tool),
+                    height: 3
+                )
+                .padding(.bottom, 2)
+        }
     }
 
     private var selectedToolBackground: some View {
@@ -379,7 +367,7 @@ public struct CanvasToolPicker: View {
 
     private func toolOptions(for tool: CanvasTool) -> some View {
         Group {
-            if let variants = tool.toolbarFamilyVariants, !variants.isEmpty {
+            if tool.toolbarFamilyVariants.count > 1 {
                 familyToolOptionControls(for: tool)
             } else {
                 toolVariantOptions(for: tool)
@@ -399,15 +387,11 @@ public struct CanvasToolPicker: View {
             Text("Style")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(Color.secondary)
-            ScrollView(.horizontal) {
-                HStack(spacing: ToolOptionsMetrics.itemSpacing) {
-                    ForEach(tool.allVariants ?? [], id: \.self) { variant in
-                        toolVariantButton(variant)
-                    }
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 48, maximum: 64))], spacing: 4) {
+                ForEach(tool.toolbarFamilyVariants, id: \.self) { variant in
+                    toolVariantButton(variant)
                 }
             }
-            .frame(maxWidth: CanvasToolPicker.compactContentWidth(isAccessibilitySize: dynamicTypeSize.isAccessibilitySize))
-            .scrollIndicators(.hidden)
             .accessibilityIdentifier("canvas.tool.variants")
             toolOptionControls(for: tool)
         }
@@ -432,9 +416,13 @@ public struct CanvasToolPicker: View {
             }
         } label: {
             VStack(spacing: 2) {
-                ToolGlyph(tool: tool, isSelected: tool == toolState.activeTool)
+                ToolGlyph(
+                    tool: tool,
+                    inkColor: Color(rgba: toolState.configuration(for: tool)?.color ?? .black),
+                    isSelected: tool == toolState.activeTool
+                )
                     .frame(height: 36)
-                Text(tool.variantLabel ?? tool.label)
+                Text(tool.title)
                     .font(.caption2.weight(.medium))
                     .lineLimit(dynamicTypeSize.isAccessibilitySize ? 2 : 1)
                     .multilineTextAlignment(.center)
@@ -451,11 +439,11 @@ public struct CanvasToolPicker: View {
         }
         .buttonStyle(CanvasCrispToolButtonStyle(reduceMotion: reduceMotion))
         .accessibilityFocused($focusedTool, equals: tool)
-        .accessibilityLabel(tool.variantLabel ?? tool.label)
+        .accessibilityLabel(tool.title)
         .accessibilityIdentifier("canvas.tool.\(tool.rawValue)")
         .accessibilityValue(tool == toolState.activeTool ? "Selected" : "Not selected")
         .accessibilityAddTraits(tool == toolState.activeTool ? .isSelected : [])
-        .help(tool.variantLabel ?? tool.label)
+        .help(tool.title)
     }
 
     private var laserPointerStyles: some View {
@@ -503,25 +491,17 @@ public struct CanvasToolPicker: View {
     }
 
     private func widthOptions(for tool: CanvasTool) -> some View {
-        ScrollView(.horizontal) {
-            widthOptionButtons(for: tool)
-        }
-        .fixedSize(horizontal: false, vertical: true)
-        .scrollIndicators(.hidden)
-        .frame(minWidth: NotateDesign.Control.standard, idealWidth: 299, maxWidth: 299, alignment: .leading)
+        widthOptionButtons(for: tool)
+            .frame(maxWidth: 299, alignment: .leading)
     }
 
     private func familyWidthOptions(for tool: CanvasTool) -> some View {
-        ScrollView(.horizontal) {
-            widthOptionButtons(for: tool)
-        }
-        .fixedSize(horizontal: false, vertical: true)
-        .scrollIndicators(.hidden)
-        .frame(minWidth: NotateDesign.Control.standard, idealWidth: 299, maxWidth: 299, alignment: .leading)
+        widthOptionButtons(for: tool)
+            .frame(maxWidth: 299, alignment: .leading)
     }
 
     private func widthOptionButtons(for tool: CanvasTool) -> some View {
-        HStack(spacing: 7) {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: NotateDesign.Control.standard))], spacing: 4) {
             ForEach(CanvasToolState.widthPresets(for: tool), id: \.self) { width in
                 widthButton(width, for: tool)
             }
@@ -558,35 +538,41 @@ public struct CanvasToolPicker: View {
     private func colorOptions(for tool: CanvasTool) -> some View {
         ViewThatFits(in: .horizontal) {
             HStack(spacing: ToolOptionsMetrics.itemSpacing) {
-                colorSwatches(CanvasToolState.colorPalette(for: tool), current: toolState.configuration(for: tool)?.color ?? .black, for: tool)
+                colorSwatches(colorPalette(for: tool), current: toolState.configuration(for: tool)?.color ?? .black, for: tool)
                 customColorPicker(current: toolState.configuration(for: tool)?.color ?? .black, for: tool)
             }
             VStack(alignment: .leading, spacing: ToolOptionsMetrics.itemSpacing) {
-                colorSwatches(CanvasToolState.colorPalette(for: tool), current: toolState.configuration(for: tool)?.color ?? .black, for: tool)
+                colorSwatches(colorPalette(for: tool), current: toolState.configuration(for: tool)?.color ?? .black, for: tool)
                 customColorPicker(current: toolState.configuration(for: tool)?.color ?? .black, for: tool)
             }
         }
     }
 
+    private func colorPalette(for tool: CanvasTool) -> [RGBAColor] {
+        tool == .highlighter ? RGBAColor.highlighterPalette : RGBAColor.inkPalette
+    }
+
     private func familyColorOptions(for tool: CanvasTool) -> some View {
-        HStack(spacing: ToolOptionsMetrics.itemSpacing) {
-            colorSwatches(CanvasToolState.colorPalette(for: tool), current: toolState.configuration(for: tool)?.color ?? .black, for: tool)
-                .frame(minWidth: NotateDesign.Control.standard, idealWidth: 248, maxWidth: 248)
-            customColorPicker(current: toolState.configuration(for: tool)?.color ?? .black, for: tool)
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: ToolOptionsMetrics.itemSpacing) {
+                colorSwatches(colorPalette(for: tool), current: toolState.configuration(for: tool)?.color ?? .black, for: tool)
+                    .frame(minWidth: NotateDesign.Control.standard, idealWidth: 248, maxWidth: 248)
+                customColorPicker(current: toolState.configuration(for: tool)?.color ?? .black, for: tool)
+            }
+            VStack(alignment: .leading, spacing: ToolOptionsMetrics.itemSpacing) {
+                colorSwatches(colorPalette(for: tool), current: toolState.configuration(for: tool)?.color ?? .black, for: tool)
+                customColorPicker(current: toolState.configuration(for: tool)?.color ?? .black, for: tool)
+            }
         }
     }
 
     private func colorSwatches(_ palette: [RGBAColor], current: RGBAColor, for tool: CanvasTool) -> some View {
-        ScrollView(.horizontal) {
-            LazyHStack(spacing: NotateDesign.Spacing.tight) {
-                ForEach(palette.indices, id: \.self) { index in
-                    colorButton(palette[index], name: colorName(at: index, for: tool), current: current, for: tool)
-                }
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 38, maximum: 44))], spacing: 2) {
+            ForEach(palette.indices, id: \.self) { index in
+                colorButton(palette[index], name: colorName(at: index, for: tool), current: current, for: tool)
             }
-            .padding(.vertical, NotateDesign.Spacing.tight)
         }
-        .scrollIndicators(.hidden)
-        .frame(height: NotateDesign.Control.standard)
+        .frame(maxWidth: 300, alignment: .leading)
     }
 
     private func customColorPicker(current: RGBAColor, for tool: CanvasTool) -> some View {
@@ -657,18 +643,15 @@ public struct CanvasToolPicker: View {
     }
 
     private var insertTray: some View {
-        ScrollView(.horizontal) {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 88, maximum: 144))], spacing: 4) {
             insertTrayButtons
         }
-        .fixedSize(horizontal: false, vertical: true)
-        .scrollIndicators(.hidden)
-        .frame(maxWidth: InsertTrayMetrics.compactContentWidth(isAccessibilitySize: dynamicTypeSize.isAccessibilitySize), alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Add")
     }
 
-    private var insertTrayButtons: some View {
-        HStack(spacing: 4) {
+    @ViewBuilder private var insertTrayButtons: some View {
             CanvasInsertTrayButton(title: "Text", glyph: .text) {
                 onIntent(.insertText)
                 isAddButtonFocused = true
@@ -732,7 +715,6 @@ public struct CanvasToolPicker: View {
             .tint(Color.primary)
             .accessibilityLabel("Insert image")
             .help("Insert image")
-        }
     }
 
     private var geometryToolSlot: some View {
@@ -793,21 +775,12 @@ public struct CanvasToolPicker: View {
     }
 
     private var geometryToolPicker: some View {
-        ScrollView(.horizontal) {
-            HStack(spacing: GeometryPickerMetrics.itemSpacing) {
-                ForEach(CanvasGeometryTool.allCases, id: \.self) { tool in
-                    geometryToolOption(tool)
-                }
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 112, maximum: 176))], spacing: 4) {
+            ForEach(CanvasGeometryTool.allCases, id: \.self) { tool in
+                geometryToolOption(tool)
             }
-            .fixedSize(horizontal: true, vertical: false)
         }
-        .scrollIndicators(.hidden)
-        .frame(
-            maxWidth: GeometryPickerMetrics.compactContentWidth(
-                isAccessibilitySize: dynamicTypeSize.isAccessibilitySize
-            ),
-            alignment: .leading
-        )
+        .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Geometry tools")
         .accessibilityIdentifier("canvas.geometry.picker")
@@ -867,9 +840,8 @@ public struct CanvasToolPicker: View {
     }
 
     private var shapeCatalog: some View {
-        ScrollView(.horizontal) {
-            HStack(spacing: 2) {
-                ForEach(CanvasShape.allCases, id: \.self) { shape in
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: NotateDesign.Control.standard))], spacing: 2) {
+            ForEach(CanvasShape.allCases, id: \.self) { shape in
                     Button {
                         onIntent(.insertShape(shape))
                         isAddButtonFocused = true
@@ -886,12 +858,9 @@ public struct CanvasToolPicker: View {
                     .accessibilityFocused($focusedShape, equals: shape)
                     .accessibilityLabel(shape.title)
                     .help(shape.title)
-                }
             }
         }
-        .scrollIndicators(.hidden)
-        .frame(idealWidth: 300, maxWidth: 300)
-        .frame(height: NotateDesign.Control.standard)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Shapes")
     }

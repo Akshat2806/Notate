@@ -131,7 +131,8 @@ public enum LibraryRecentPeriod: Int, CaseIterable, Identifiable, Sendable {
     }
 
     public func cutoff(relativeTo date: Date, calendar: Calendar = .autoupdatingCurrent) -> Date {
-        ?? date.addingTimeInterval(-TimeInterval(rawValue) * 24 * 60 * 60)
+        calendar.date(byAdding: .day, value: -rawValue, to: date)
+            ?? date.addingTimeInterval(-TimeInterval(rawValue) * 24 * 60 * 60)
     }
 }
 
@@ -144,14 +145,21 @@ public enum LibraryPresetTag: String, CaseIterable, Identifiable, Sendable {
     public var id: UUID {
         switch self {
         case .work:
-            UUID(uuids: [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1])
+            UUID(uuid: (0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1))
         case .study:
-            UUID(uuids: [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 2])
+            UUID(uuid: (0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 2))
         case .personal:
-            UUID(uuids: [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 3])
+            UUID(uuid: (0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 3))
         case .ideas:
-            UUID(uuids: [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 4])
+            UUID(uuid: (0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 4))
         }
+    }
+
+    /// Resolves the preset tag that owns `tagID`, if any. Preset tags are
+    /// installed with stable identifiers so they remain recognizable across
+    /// launches and cannot be renamed or deleted from the sidebar.
+    public static func resolve(tagID: UUID) -> Self? {
+        allCases.first { $0.id == tagID }
     }
 
     public var title: String {
@@ -373,9 +381,9 @@ public struct LibraryPurgeResult: Codable, Equatable, Hashable, Sendable {
     public var deletedPageAssets: [LibraryDeletedPageAsset]
 
     public init(
-        itemIDs: [UUID],
-        deletedPageCount: Int,
-        deletedPageAssets: [LibraryDeletedPageAsset]
+        itemIDs: [UUID] = [],
+        deletedPageCount: Int = 0,
+        deletedPageAssets: [LibraryDeletedPageAsset] = []
     ) {
         self.itemIDs = itemIDs
         self.deletedPageCount = deletedPageCount
@@ -392,7 +400,7 @@ private extension Double {
     }
 }
 
-private extension String {
+extension String {
     var nilIfLibraryBlank: String? {
         let value = trimmingCharacters(in: .whitespacesAndNewlines)
         return value.isEmpty ? nil : value

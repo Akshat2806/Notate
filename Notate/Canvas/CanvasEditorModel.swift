@@ -139,6 +139,7 @@ public final class CanvasEditorModel {
     public private(set) var isZoomInteractionActive = false
     public private(set) var boundaryPagePull: CanvasBoundaryPagePull?
     public private(set) var imageWandRequest: CanvasImageWandRequest?
+    public private(set) var isImageWandSelectionActive = false
     /// True while a one-shot generated image is being serialized and then
     /// committed to Canvas Core. Page topology/rotation controls use this to
     /// avoid building replacements from a pre-insertion snapshot.
@@ -191,7 +192,7 @@ public final class CanvasEditorModel {
     @ObservationIgnored private var inFlightGenerations: Set<Int64> = []
     @ObservationIgnored private var checkpointCompletionWaiters: [
         Int64: [CheckedContinuation<Void, Never>]
-    ] = []
+    ] = [:]
     @ObservationIgnored private var detachedControllerDrainTask: Task<Bool, Never>?
     @ObservationIgnored private var detachedControllerDrainSequence: UInt64 = 0
     @ObservationIgnored private var canvasControllerIsSnapshotReady = true
@@ -474,7 +475,7 @@ public final class CanvasEditorModel {
             snapshotContactEnded: { [weak self] in
                 self?.snapshotContactDidEnd()
             },
-            programmacticInsertionFailed: { [weak self] error in
+            programmaticInsertionFailed: { [weak self] error in
                 self?.programmaticInsertionDidFail(error)
             },
             presentationInteractionBegan: { [weak self] in
@@ -2040,7 +2041,7 @@ public final class CanvasEditorModel {
     /// existing trailing task are reused until the next checkpoint captures
     /// the latest settled viewport.
     private func markFreeformViewportChanged() {
-        if generation <= committedGeneration || inflightGenerations.contains(generation) {
+        if generation <= committedGeneration || inFlightGenerations.contains(generation) {
             generation += 1
         }
         saveState = .saving

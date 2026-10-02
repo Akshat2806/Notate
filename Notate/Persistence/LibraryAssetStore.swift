@@ -151,6 +151,25 @@ enum LibraryAssetRecoveryDiscardAuthority: Sendable {
     case catalogRecordsAbsent
 }
 
+/// Portable relative-path validation for asset-store payloads. Relative
+/// paths are persisted in the catalog and re-resolved against an item root,
+/// so anything that could escape that root (absolute paths, parent
+/// references, or separators that hide components) is rejected up front.
+enum LibraryAssetPath {
+    static func isSafeRelative(_ path: String) -> Bool {
+        guard path.isEmpty == false,
+            path.hasPrefix("/") == false,
+            path.hasPrefix("\\") == false,
+            path.hasPrefix("~") == false,
+            path.contains(":") == false
+        else { return false }
+        let components = path.split(separator: "/", omittingEmptySubsequences: false)
+        return components.allSatisfy { component in
+            component.isEmpty == false && component != "." && component != ".."
+        }
+    }
+}
+
 public enum LibraryAssetStoreError: Error, Equatable, LocalizedError {
     case invalidRelativePath(String)
     case sourceNotFound(URL)
@@ -429,7 +448,7 @@ enum LibraryBoundedFileReader {
 
     private static func fileIdentity(
         _ descriptor: Int32,
-        _ source: URL,
+        source: URL,
         maximumByteCount: Int
     ) throws -> LibraryRegularFileIdentity {
         var information = stat()
@@ -1001,7 +1020,7 @@ public actor LibraryAssetStore {
                     kind: intent.kind,
                     itemID: intent.itemID,
                     relativePath: intent.relativePath,
-                    sourceWasPresent: intent.type != nil,
+                    sourceWasPresent: type != nil,
                     isRequired: intent.isRequired
                 ))
             }
@@ -1037,7 +1056,7 @@ public actor LibraryAssetStore {
                     manifestData,
                     to: recoveryManifestURL(in: preparing)
                 )
-                try synchronizeDirectory(preparing, to: destination)
+                try synchronizeDirectory(preparing)
                 try fileManager.moveItem(at: preparing, to: destination)
                 try synchronizeDirectory(recoveryTransactionsDirectory)
             } catch {
@@ -1435,7 +1454,7 @@ public actor LibraryAssetStore {
     }
 
     private func normalizedRecoveryAnchors(
-        anchors: [LibraryAssetTrashManifest.CatalogAnchor]
+        _ anchors: [LibraryAssetTrashManifest.CatalogAnchor]
     ) throws -> [LibraryAssetTrashManifest.CatalogAnchor] {
         guard anchors.isEmpty == false,
             Set(anchors).count == anchors.count else {
@@ -1476,7 +1495,7 @@ public actor LibraryAssetStore {
             case .itemRelativeAsset:
                 guard let relativePath = intent.relativePath,
                     LibraryAssetPath.isSafeRelative(relativePath) else {
-                    throw LibraryAssetStoreError.invalidRecoveryTransaction(
+                    throw LibraryAssetStoreError.invalidRelativePath(
                         intent.relativePath ?? ""
                     )
                 }

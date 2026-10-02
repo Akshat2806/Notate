@@ -7,6 +7,7 @@
 
 import XCTest
 @testable import Notate
+import UIKit
 
 final class NotateTests: XCTestCase {
 
@@ -33,6 +34,120 @@ final class NotateTests: XCTestCase {
         self.measure {
             // Put the code you want to measure the time of here.
         }
+    }
+
+    @MainActor
+    func testCanvasClearanceUsesMeasuredChromeHeight() {
+        let safeArea = UIEdgeInsets(top: 24, left: 0, bottom: 0, right: 0)
+        let measuredChrome: CGFloat = 168
+
+        XCTAssertEqual(
+            CanvasStackLayout.topClearance(
+                safeAreaInsets: safeArea,
+                topChromeHeight: measuredChrome
+            ),
+            safeArea.top + measuredChrome + CanvasConstants.firstPageToolbarGap
+        )
+    }
+
+    @MainActor
+    func testExpandedChromeDoesNotScaleWithCanvasZoom() {
+        let viewport = CGSize(width: 1_000, height: 800)
+        let safeArea = UIEdgeInsets(top: 24, left: 0, bottom: 0, right: 0)
+        let regular = CanvasStackLayout.contentInset(
+            viewportSize: viewport,
+            safeAreaInsets: safeArea,
+            zoomScale: 0.5,
+            contentWidth: 300,
+            topChromeHeight: 80
+        )
+        let expanded = CanvasStackLayout.contentInset(
+            viewportSize: viewport,
+            safeAreaInsets: safeArea,
+            zoomScale: 0.5,
+            contentWidth: 300,
+            topChromeHeight: 176
+        )
+
+        XCTAssertEqual(expanded.top - regular.top, 96)
+    }
+
+    @MainActor
+    func testBoundaryPullRequiresDeliberateRevealAtBothEndsAndAxes() {
+        let insets = UIEdgeInsets(top: 80, left: 20, bottom: 20, right: 20)
+        let verticalSize = CGSize(width: 500, height: 700)
+        let verticalContent = CGSize(width: 500, height: 1_000)
+        let verticalStart = CanvasStackLayout.boundaryPagePull(
+            contentOffset: CGPoint(x: 0, y: -150),
+            panTranslation: CGPoint(x: 0, y: 80),
+            viewportSize: verticalSize,
+            contentSize: verticalContent,
+            contentInset: insets,
+            zoomScale: 1
+        )
+        let ordinaryVerticalBounce = CanvasStackLayout.boundaryPagePull(
+            contentOffset: CGPoint(x: 0, y: -40),
+            panTranslation: CGPoint(x: 0, y: 25),
+            viewportSize: verticalSize,
+            contentSize: verticalContent,
+            contentInset: insets,
+            zoomScale: 1
+        )
+
+        let horizontalLayout = CanvasPageLayoutPreferences(
+            scrollDirection: .horizontal
+        )
+        let horizontalStart = CanvasStackLayout.boundaryPagePull(
+            contentOffset: CGPoint(x: -90, y: 0),
+            panTranslation: CGPoint(x: 80, y: 0),
+            viewportSize: CGSize(width: 900, height: 600),
+            contentSize: CGSize(width: 1_400, height: 700),
+            contentInset: insets,
+            zoomScale: 1,
+            pageLayout: horizontalLayout
+        )
+        let horizontalEnd = CanvasStackLayout.boundaryPagePull(
+            contentOffset: CGPoint(x: 590, y: 0),
+            panTranslation: CGPoint(x: -80, y: 0),
+            viewportSize: CGSize(width: 900, height: 600),
+            contentSize: CGSize(width: 1_400, height: 700),
+            contentInset: insets,
+            zoomScale: 1,
+            pageLayout: horizontalLayout
+        )
+
+        XCTAssertEqual(verticalStart?.boundary, .start)
+        XCTAssertNil(ordinaryVerticalBounce)
+        XCTAssertEqual(horizontalStart?.boundary, .start)
+        XCTAssertEqual(horizontalEnd?.boundary, .end)
+    }
+
+    func testNewCanvasToolStateStartsWithBlackPen() {
+        let state = CanvasToolState()
+
+        XCTAssertEqual(state.activeTool, .pen)
+        XCTAssertEqual(state.configuration(for: .pen)?.color, .black)
+    }
+
+    func testBoundaryPullMustHoldBeforeItCanInsertOnePage() {
+        var gate = CanvasBoundaryPullGate()
+        let pull = CanvasBoundaryPagePull(boundary: .start, progress: 1)
+        gate.begin(eligibleBoundaries: [.start])
+
+        _ = gate.update(measuredPull: pull, now: 10)
+        XCTAssertTrue(gate.needsHoldTimer)
+        XCTAssertNil(gate.end(releaseVelocity: .zero))
+
+        gate.begin(eligibleBoundaries: [.start])
+        _ = gate.update(measuredPull: pull, now: 20)
+        let armed = gate.completeHold(
+            now: 20.25,
+            panVelocity: .zero,
+            isDragging: true
+        )
+        XCTAssertEqual(armed?.progress, 1)
+        XCTAssertEqual(gate.end(releaseVelocity: .zero), .start)
+        XCTAssertNil(gate.end(releaseVelocity: .zero))
     }
 
 }

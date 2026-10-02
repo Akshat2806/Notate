@@ -32,8 +32,6 @@ enum LibraryEmptyArtworkKind: Hashable, Sendable {
         }
     }
 
-    }
-
     /// These stable names let the illustration set evolve independently from
     /// the empty-state layout. Missing assets fall back gracefully at runtime.
     var preferredAssetName: String? {

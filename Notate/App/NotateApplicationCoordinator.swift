@@ -1507,11 +1507,11 @@ final class NotateApplicationCoordinator {
                 _ = try repository.completeDuplication(prepared)
             } catch {
                 if isCatalogWritable, let plan {
-                    let targetIDs = (try? repository.cancelDuplication(plan)
-                        ?? Array(plan.sourceToDuplicateItemIDs.values))
+                    let targetIDs = (try? repository.cancelDuplication(plan))
+                        ?? Array(plan.sourceToDuplicateItemIDs.values)
                     for targetID in targetIDs {
                         if let recovery = try? await assetStore.moveItemAssetsToRecoveryTrash(
-                            id: targetID
+                            itemID: targetID
                         ) {
                             try? await assetStore.discardRecoveryItem(at: recovery)
                         }

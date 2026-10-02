@@ -410,13 +410,13 @@ final class LibraryAppSession {
 
     init(
         repository: LibraryRepository,
-        actions: LibraryUIActions = LibraryUIActions(),
-        thumbnailStore: LibraryAutomaticThumbnailStore = .shared,
+        actions: LibraryUIActions? = nil,
+        thumbnailStore: LibraryAutomaticThumbnailStore? = nil,
         currentDate: @escaping () -> Date = { .now }
     ) {
         self.repository = repository
-        self.actions = actions
-        self.thumbnailStore = thumbnailStore
+        self.actions = actions ?? LibraryUIActions()
+        self.thumbnailStore = thumbnailStore ?? .shared
         self.currentDate = currentDate
     }
 

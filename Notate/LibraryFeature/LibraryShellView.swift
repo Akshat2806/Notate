@@ -1,5 +1,6 @@
 import SwiftUI
 
+@MainActor
 struct LibraryShellView: View {
     @State private var session: LibraryAppSession
     private let itemTransitionNamespace: Namespace.ID?
@@ -12,10 +13,12 @@ struct LibraryShellView: View {
 
     init(
         repository: LibraryRepository,
-        actions: LibraryUIActions = LibraryUIActions(),
+        actions: LibraryUIActions? = nil,
         itemTransitionNamespace: Namespace.ID? = nil
     ) {
-        _session = State(initialValue: LibraryAppSession(repository: repository, actions: actions))
+        _session = State(
+            initialValue: LibraryAppSession(repository: repository, actions: actions)
+        )
         self.itemTransitionNamespace = itemTransitionNamespace
     }
 

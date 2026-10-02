@@ -14,7 +14,7 @@ public final class LibraryItemRecord {
     public var payloadFailureDescription: String?
     public var folderSettings: LibraryFolderSettings?
     public var createdAt: Date
-    public var modifiedAt: Date?
+    public var modifiedAt: Date
     public var lastOpenedAt: Date?
     public var isFavorite: Bool
     public var manualOrder: Double
@@ -69,7 +69,7 @@ public final class LibraryItemRecord {
         self.payloadFailureDescription = payloadFailureDescription
         self.folderSettings = folderSettings
         self.createdAt = createdAt
-        self.modifiedAt = modifiedAt
+        self.modifiedAt = modifiedAt ?? createdAt
         self.lastOpenedAt = lastOpenedAt
         self.isFavorite = isFavorite
         self.manualOrder = manualOrder
@@ -118,9 +118,6 @@ public final class TagRecord {
         self.modifiedAt = modifiedAt ?? createdAt
     }
     
-    public static func makeRelationshipKey(itemID: UUID, tagID: UUID) -> String {
-        "\(itemID.uuidString.lowercased())::\(tagID.uuidString.lowercased())"
-    }
 }
 
 // MARK: - TagAssignment
@@ -131,6 +128,10 @@ public final class TagAssignment {
     public var itemID: UUID
     public var tagID: UUID
     public var createdAt: Date
+
+    public static func makeRelationshipKey(itemID: UUID, tagID: UUID) -> String {
+        "\(itemID.uuidString.lowercased())::\(tagID.uuidString.lowercased())"
+    }
     
     public init(
         id: UUID = UUID(),
@@ -143,10 +144,6 @@ public final class TagAssignment {
         self.itemID = itemID
         self.tagID = tagID
         self.createdAt = createdAt
-    }
-    
-    public static func makeRelationshipKey(itemID: UUID, tagID: UUID) -> String {
-        "\(itemID.uuidString.lowercased())::\(tagID.uuidString.lowercased())"
     }
 }
 
@@ -199,72 +196,4 @@ public enum LibrarySchemaV1: VersionedSchema {
 public enum LibrarySchemaMigrationPlan: SchemaMigrationPlan {
     public static var schemas: [VersionedSchema.Type] { [LibrarySchemaV1.self] }
     public static var stages: [MigrationStage] { [] }
-}
-
-// MARK: - Supporting Types
-public enum LibraryItemKind: String, Codable, CaseIterable {
-    case folder
-    case document
-    case page
-}
-
-public enum LibraryCoverChoice: String, Codable {
-    case automatic
-    case custom
-}
-
-public enum LibraryPayloadState: String, Codable {
-    case creating
-    case ready
-    case error
-}
-
-public struct LibraryFolderSettings: Codable {
-    public var sortOrder: SortOrder?
-    
-    public init(sortOrder: SortOrder? = nil) {
-        self.sortOrder = sortOrder
-    }
-}
-
-public enum SortOrder: String, Codable {
-    case nameAscending
-    case nameDescending
-    case dateCreatedAscending
-    case dateCreatedDescending
-    case dateModifiedAscending
-    case dateModifiedDescending
-    case manual
-}
-
-public struct LibraryTrashMetadata: Codable {
-    public var deletedAt: Date
-    public var deletedBy: String?
-    
-    public init(deletedAt: Date = .now, deletedBy: String? = nil) {
-        self.deletedAt = deletedAt
-        self.deletedBy = deletedBy
-    }
-}
-
-public struct LibraryRGBAColor: Codable {
-    public var red: Double
-    public var green: Double
-    public var blue: Double
-    public var alpha: Double
-    
-    public init(red: Double, green: Double, blue: Double, alpha: Double = 1.0) {
-        self.red = max(0, min(1, red))
-        self.green = max(0, min(1, green))
-        self.blue = max(0, min(1, blue))
-        self.alpha = max(0, min(1, alpha))
-    }
-}
-
-// MARK: - Helper Extensions
-private extension String {
-    var nilIfLibraryBlank: String? {
-        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
-    }
 }

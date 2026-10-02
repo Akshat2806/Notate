@@ -286,6 +286,7 @@ struct LibraryFolderEditor: View {
         name.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    @ViewBuilder
     private var folderColorGrid: some View {
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 50))], spacing: 10) {
             ForEach(LibraryColorDraft.folderPalette, id: \.self) { color in
@@ -328,9 +329,7 @@ struct LibraryFolderEditor: View {
             .onChange(of: customColor) { _, value in
                 selectedColor = LibraryColorDraft(value)
             }
-    }
-
-        .padding(.vertical, 6)
+            .padding(.vertical, 6)
     }
 
     private var folderIconGrid: some View {
@@ -365,11 +364,11 @@ struct LibraryFolderEditor: View {
                         lineWidth: symbolName == symbol.name ? 1.5 : 0.8
                     )
                 }
+                .buttonStyle(.plain)
+                .accessibilityLabel(symbol.label)
+                .accessibilityValue(symbolName == symbol.name ? "Selected" : "")
+                .accessibilityAddTraits(symbolName == symbol.name ? .isSelected : [])
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel(symbol.label)
-            .accessibilityValue(symbolName == symbol.name ? "Selected" : "")
-            .accessibilityAddTraits(symbolName == symbol.name ? .isSelected : [])
         }
         .padding(.vertical, 6)
     }
@@ -602,9 +601,10 @@ struct LibraryNotebookEditor: View {
                 from: transfer.fileURL
             )
             let draft = LibraryCustomCoverDraft(data: normalized)
-            withAnimation(reduceMotion ? nil : NotateDesign.Motion.selection)
-            customCover = draft
-            coverChoice = .customAsset(relativePath: draft.itemRelativePath)
+            withAnimation(reduceMotion ? nil : NotateDesign.Motion.selection) {
+                customCover = draft
+                coverChoice = .customAsset(relativePath: draft.itemRelativePath)
+            }
         } catch {
             coverImportError = error.localizedDescription
         }
@@ -774,10 +774,11 @@ struct LibraryCoverPicker: View {
                 from: transfer.fileURL
             )
             let draft = LibraryCustomCoverDraft(data: normalized)
-            withAnimation(reduceMotion ? nil : NotateDesign.Motion.selection)
-            customCover = draft
-            customPreviewData = normalized
-            selectedChoice = .customAsset(relativePath: draft.itemRelativePath)
+            withAnimation(reduceMotion ? nil : NotateDesign.Motion.selection) {
+                customCover = draft
+                customPreviewData = normalized
+                selectedChoice = .customAsset(relativePath: draft.itemRelativePath)
+            }
         } catch {
             coverImportError = error.localizedDescription
         }

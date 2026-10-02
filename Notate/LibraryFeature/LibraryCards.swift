@@ -311,8 +311,9 @@ struct LibraryGridCard: View {
                 VStack(alignment: .center, spacing: 3) {
                     HStack(spacing: 6) {
                         Text(item.name)
-                            .font(.body.weight(.medium))
-                            .foregroundStyle(.primary)
+                            .font(.system(.body, design: .rounded).weight(.semibold))
+                            .foregroundStyle(Color(uiColor: .label))
+                            .tint(Color(uiColor: .label))
                             .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 1)
                             .multilineTextAlignment(.center)
                             .fixedSize(
@@ -547,7 +548,9 @@ struct LibraryListRow: View {
                     VStack(alignment: .leading, spacing: 4) {
                         HStack(spacing: 6) {
                             Text(item.name)
-                                .font(.headline)
+                                .font(.system(.headline, design: .rounded).weight(.semibold))
+                                .foregroundStyle(Color(uiColor: .label))
+                                .tint(Color(uiColor: .label))
                                 .lineLimit(dynamicTypeSize.isAccessibilitySize ? 2 : 1)
                             if item.isFavorite {
                                 NotateAppGlyph(
@@ -627,7 +630,7 @@ struct LibraryListRow: View {
     }
 
     private var listMetadata: String {
-        if session.showsFolderPath(for: item) {
+        if session.showsFolderPath {
             return session.folderPath(for: item)
         }
         guard item.kind == .folder else { return item.kind.libraryTitle }
@@ -1333,7 +1336,7 @@ enum LibraryBoundedImageDecoder {
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceShouldCacheImmediately: true,
-            kCGImageSourceCreateThumbnailMaxPixelSize: policy.maximumDecodedPixelDimension,
+            kCGImageSourceThumbnailMaxPixelSize: policy.maximumDecodedPixelDimension,
         ]
         guard let image = CGImageSourceCreateThumbnailAtIndex(
             source,
@@ -1379,20 +1382,17 @@ actor LibraryAutomaticThumbnailStore {
     private let maximumCachedItemCount: Int
     private let maximumCachedByteCount: Int
     private let maximumEncodedByteCount: Int
-    private let maximumDecodedByteCount: Int
 
     init(
         libraryRoot: URL? = nil,
         maximumCachedItemCount: Int = defaultMaximumCachedItemCount,
         maximumCachedByteCount: Int = defaultMaximumCachedByteCount,
-        maximumEncodedByteCount: Int = LibraryImageDecodePolicy.durableThumbnail.maximumEncodedByteCount,
-        maximumDecodedByteCount: Int = LibraryImageDecodePolicy.durableThumbnail.maximumDecodedPixelDimension
+        maximumEncodedByteCount: Int = LibraryImageDecodePolicy.durableThumbnail.maximumEncodedByteCount
     ) {
         self.libraryRoot = libraryRoot?.standardizedFileURL
         self.maximumCachedItemCount = max(1, maximumCachedItemCount)
         self.maximumCachedByteCount = max(1, maximumCachedByteCount)
         self.maximumEncodedByteCount = max(1, maximumEncodedByteCount)
-        self.maximumDecodedByteCount = max(1, maximumDecodedByteCount)
     }
 
     func data(for itemID: UUID) -> Data? {
@@ -1419,8 +1419,7 @@ actor LibraryAutomaticThumbnailStore {
         guard let boundedRead = try? LibraryBoundedFileReader.read(
             at: url,
             inside: root,
-            maximumByteCount: maximumEncodedByteCount,
-            maximumDecodedByteCount: maximumDecodedByteCount
+            maximumByteCount: maximumEncodedByteCount
         ), LibraryArtworkResolver.isValidThumbnailData(boundedRead.data) else {
             removeCachedItem(itemID)
             return nil
@@ -1757,6 +1756,7 @@ private struct LibraryFolderPreviewArtwork: View {
         }
     }
 
+    @ViewBuilder
     private var semanticFallback: some View {
         switch item.kind {
         case .folder:
@@ -1780,7 +1780,7 @@ private struct LibraryFolderPreviewArtwork: View {
                 contentTypeIdentifier: item.sourceContentTypeIdentifier,
                 filename: item.sourceFilename
             )
-            return ZStack {
+            ZStack {
                 fallback.accentColor.opacity(0.12)
                 Image(systemName: fallback.symbolName)
                     .font(.system(size: 16, weight: .semibold))
@@ -1915,23 +1915,24 @@ struct LibraryCoverArtwork: View {
     var title: String? = nil
     var customImageData: Data? = nil
 
-    @ViewBuilder
     var body: some View {
-        switch choice {
-        case .automatic:
-            LibraryAutomaticCoverArtwork(title: title)
-        case let .preset(preset):
-            if let cover = LibraryCuratedCover.curated.first(where: { $0.preset == preset }) {
-                LibraryPhysicalCoverArtwork(cover: cover, title: title)
-            } else {
+        Group {
+            switch choice {
+            case .automatic:
                 LibraryAutomaticCoverArtwork(title: title)
-            }
-        case .customAsset:
-            LibraryDecodedCoverImage(
-                imageData: customImageData,
-                cacheKey: customImageCacheKey
-            ) {
-                LibraryCustomCoverPlaceholder(title: title)
+            case let .preset(preset):
+                if let cover = LibraryCuratedCover.curated.first(where: { $0.preset == preset }) {
+                    LibraryPhysicalCoverArtwork(cover: cover, title: title)
+                } else {
+                    LibraryAutomaticCoverArtwork(title: title)
+                }
+            case .customAsset:
+                LibraryDecodedCoverImage(
+                    imageData: customImageData,
+                    cacheKey: customImageCacheKey
+                ) {
+                    LibraryCustomCoverPlaceholder(title: title)
+                }
             }
         }
         .clipShape(
@@ -2726,4 +2727,3 @@ private extension LibraryItemKind {
         }
     }
 }
-

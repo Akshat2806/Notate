@@ -448,10 +448,12 @@ enum CanvasStackLayout {
         }
     }
 
-    static func topClearance(safeAreaInsets: UIEdgeInsets) -> CGFloat {
+    static func topClearance(
+        safeAreaInsets: UIEdgeInsets,
+        topChromeHeight: CGFloat = CanvasConstants.toolbarTopPadding + CanvasConstants.toolbarHeight
+    ) -> CGFloat {
         safeAreaInsets.top
-            + CanvasConstants.toolbarTopPadding
-            + CanvasConstants.toolbarHeight
+            + max(topChromeHeight, 0)
             + CanvasConstants.firstPageToolbarGap
     }
 
@@ -461,7 +463,8 @@ enum CanvasStackLayout {
             viewportSize: CGSize,
             safeAreaInsets: UIEdgeInsets,
             zoomScale: CGFloat,
-            contentWidth: CGFloat = CanvasConstants.a4PortraitSize.width
+            contentWidth: CGFloat = CanvasConstants.a4PortraitSize.width,
+            topChromeHeight: CGFloat = CanvasConstants.toolbarTopPadding + CanvasConstants.toolbarHeight
     ) -> UIEdgeInsets {
         let resolvedScale = max(zoomScale, 0.0001)
         let availableWidth = max(
@@ -471,7 +474,7 @@ enum CanvasStackLayout {
         let scaledPageWidth = max(contentWidth, 1) * resolvedScale
         let horizontalCentering = max((availableWidth - scaledPageWidth) / 2, 0)
         return UIEdgeInsets(
-            top: topClearance(safeAreaInsets: safeAreaInsets),
+            top: topClearance(safeAreaInsets: safeAreaInsets, topChromeHeight: topChromeHeight),
             left: safeAreaInsets.left + horizontalCentering,
             bottom: safeAreaInsets.bottom + CanvasConstants.pageGap,
             right: safeAreaInsets.right + horizontalCentering
@@ -484,19 +487,21 @@ enum CanvasStackLayout {
             zoomScale: CGFloat,
             contentSize: CGSize,
             pageSizes: [CGSize] = [],
-            pageLayout: CanvasPageLayoutPreferences
+            pageLayout: CanvasPageLayoutPreferences,
+            topChromeHeight: CGFloat = CanvasConstants.toolbarTopPadding + CanvasConstants.toolbarHeight
     ) -> UIEdgeInsets {
         guard pageLayout.scrollDirection == .horizontal else {
             return contentInset(
                 viewportSize: viewportSize,
                 safeAreaInsets: safeAreaInsets,
                 zoomScale: zoomScale,
-                contentWidth: contentSize.width
+                contentWidth: contentSize.width,
+                topChromeHeight: topChromeHeight
             )
         }
 
         let resolvedScale = max(zoomScale, 0.0001)
-        let top = topClearance(safeAreaInsets: safeAreaInsets)
+        let top = topClearance(safeAreaInsets: safeAreaInsets, topChromeHeight: topChromeHeight)
         let availableHeight = max(
             viewportSize.height - top - safeAreaInsets.bottom,
             0
@@ -538,19 +543,21 @@ enum CanvasStackLayout {
             viewportSize: CGSize,
             safeAreaInsets: UIEdgeInsets,
             zoomScale: CGFloat,
-            layoutPlan: LayoutPlan
+            layoutPlan: LayoutPlan,
+            topChromeHeight: CGFloat = CanvasConstants.toolbarTopPadding + CanvasConstants.toolbarHeight
     ) -> UIEdgeInsets {
         guard layoutPlan.pageLayout.scrollDirection == .horizontal else {
             return contentInset(
                 viewportSize: viewportSize,
                 safeAreaInsets: safeAreaInsets,
                 zoomScale: zoomScale,
-                contentWidth: layoutPlan.contentSize.width
+                contentWidth: layoutPlan.contentSize.width,
+                topChromeHeight: topChromeHeight
             )
         }
 
         let resolvedScale = max(zoomScale, 0.0001)
-        let top = topClearance(safeAreaInsets: safeAreaInsets)
+        let top = topClearance(safeAreaInsets: safeAreaInsets, topChromeHeight: topChromeHeight)
         let availableHeight = max(
             viewportSize.height - top - safeAreaInsets.bottom,
             0
@@ -583,9 +590,10 @@ enum CanvasStackLayout {
 
     static func unobscuredViewportRect(
             viewportSize: CGSize,
-            safeAreaInsets: UIEdgeInsets
+            safeAreaInsets: UIEdgeInsets,
+            topChromeHeight: CGFloat = CanvasConstants.toolbarTopPadding + CanvasConstants.toolbarHeight
     ) -> CGRect {
-        let top = topClearance(safeAreaInsets: safeAreaInsets)
+        let top = topClearance(safeAreaInsets: safeAreaInsets, topChromeHeight: topChromeHeight)
         return CGRect(
             x: safeAreaInsets.left,
             y: top,
@@ -598,12 +606,14 @@ enum CanvasStackLayout {
             contentOffset: CGPoint,
             viewportSize: CGSize,
             safeAreaInsets: UIEdgeInsets,
-            zoomScale: CGFloat
+            zoomScale: CGFloat,
+            topChromeHeight: CGFloat = CanvasConstants.toolbarTopPadding + CanvasConstants.toolbarHeight
     ) -> CGRect {
         let scale = max(zoomScale, 0.0001)
         let viewport = unobscuredViewportRect(
             viewportSize: viewportSize,
-            safeAreaInsets: safeAreaInsets
+            safeAreaInsets: safeAreaInsets,
+            topChromeHeight: topChromeHeight
         )
         return CGRect(
             x: (contentOffset.x + viewport.minX) / scale,
@@ -792,17 +802,20 @@ enum CanvasStackLayout {
             viewportSize: CGSize,
             safeAreaInsets: UIEdgeInsets,
             zoomScale: CGFloat,
-            pageCount: Int
+            pageCount: Int,
+            topChromeHeight: CGFloat = CanvasConstants.toolbarTopPadding + CanvasConstants.toolbarHeight
     ) -> CGPoint {
         let page = pageFrame(at: pageIndex)
         let unobscured = unobscuredViewportRect(
             viewportSize: viewportSize,
-            safeAreaInsets: safeAreaInsets
+            safeAreaInsets: safeAreaInsets,
+            topChromeHeight: topChromeHeight
         )
         let insets = contentInset(
             viewportSize: viewportSize,
             safeAreaInsets: safeAreaInsets,
-            zoomScale: zoomScale
+            zoomScale: zoomScale,
+            topChromeHeight: topChromeHeight
         )
 
         let proposed: CGPoint
@@ -837,7 +850,8 @@ enum CanvasStackLayout {
             safeAreaInsets: UIEdgeInsets,
             zoomScale: CGFloat,
             pageSizes: [CGSize],
-            pageLayout: CanvasPageLayoutPreferences
+            pageLayout: CanvasPageLayoutPreferences,
+            topChromeHeight: CGFloat = CanvasConstants.toolbarTopPadding + CanvasConstants.toolbarHeight
     ) -> CGPoint {
         targetContentOffset(
             pageIndex: pageIndex,
@@ -848,7 +862,8 @@ enum CanvasStackLayout {
             layoutPlan: layoutPlan(
                 pageSizes: pageSizes,
                 pageLayout: pageLayout
-            )
+            ),
+            topChromeHeight: topChromeHeight
         )
     }
 
@@ -858,19 +873,22 @@ enum CanvasStackLayout {
             viewportSize: CGSize,
             safeAreaInsets: UIEdgeInsets,
             zoomScale: CGFloat,
-            layoutPlan: LayoutPlan
+            layoutPlan: LayoutPlan,
+            topChromeHeight: CGFloat = CanvasConstants.toolbarTopPadding + CanvasConstants.toolbarHeight
     ) -> CGPoint {
         let page = layoutPlan.pageFrame(at: pageIndex)
         guard page.isNull == false else { return .zero }
         let unobscured = unobscuredViewportRect(
             viewportSize: viewportSize,
-            safeAreaInsets: safeAreaInsets
+            safeAreaInsets: safeAreaInsets,
+            topChromeHeight: topChromeHeight
         )
         let insets = contentInset(
             viewportSize: viewportSize,
             safeAreaInsets: safeAreaInsets,
             zoomScale: zoomScale,
-            layoutPlan: layoutPlan
+            layoutPlan: layoutPlan,
+            topChromeHeight: topChromeHeight
         )
 
         let proposed: CGPoint
@@ -1411,12 +1429,14 @@ enum FreeformCanvasLayout {
             y: CGFloat(viewport.normalizedCenterY) * oldSize.height
         )
         return CanvasViewportState(
-            normalizedCenterX: Double(
-                (oldCenter.x + translation.x) / newSize.width).clamped(to: 0...1)
-            ,
-            normalizedCenterY: Double(
-                (oldCenter.y + translation.y) / newSize.height).clamped(to: 0...1)
-            ,
+            normalizedCenterX: min(
+                max(Double((oldCenter.x + translation.x) / newSize.width), 0),
+                1
+            ),
+            normalizedCenterY: min(
+                max(Double((oldCenter.y + translation.y) / newSize.height), 0),
+                1
+            ),
             visibleWidth: viewport.visibleWidth,
             // A rebase must remain centered on the same logical point instead
             // of re-entering the launch-only fit-page behavior.
@@ -1713,4 +1733,3 @@ private extension CGFloat {
         Swift.min(Swift.max(self, range.lowerBound), range.upperBound)
     }
 }
-

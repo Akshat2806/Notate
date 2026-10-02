@@ -4,24 +4,24 @@ import SwiftUI
 import UniformTypeIdentifiers
 import UIKit
 
+private struct CanvasChromeHeightPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
 /// Keeps the canvas picker and the two editor action clusters in separate
 /// layout corridors. When the canvas becomes narrower (for example in iPad
 /// multitasking), the chrome moves to two rows before
 /// those corridors can overlap.
 enum CanvasEditorChromeLayout {
     private static let outerHorizontalPadding: CGFloat = 16
-    private static let pickerToActionsGap = NotateDesign.Spacing.content
-    /// Reader and More form the larger trailing cluster. Reserving the
-    /// larger side symmetrically keeps the centered picker clear in LTR and RTL.
-    private static let actionCountPerSide: CGFloat = 2
-
-    /// Undo, redo, one visible scrolling tool, Add, the picker divider, and
-    /// the picker's own tight horizontal padding.
     private static let minimumPickerWidth =
-        (3 * NotateDesign.Control.standard)
-        + NotateDesign.Control.minimumHitTarget
-        + 7
-        + (2 * NotateDesign.Spacing.tight)
+        (10 * NotateDesign.Control.standard)
+        + (9 * 2)
+        + (2 * 8)
 
     static func usesStackedLayout(
         availableWidth: CGFloat,
@@ -32,14 +32,7 @@ enum CanvasEditorChromeLayout {
 
     static var minimumSingleRowWidth: CGFloat {
         minimumPickerWidth
-            + (2 * pickerHorizontalClearance)
             + (2 * outerHorizontalPadding)
-    }
-
-    static var pickerHorizontalClearance: CGFloat {
-        let actionWidths = actionCountPerSide * NotateDesign.Control.minimumHitTarget
-        let actionSpacing = (actionCountPerSide - 1) * NotateDesign.Spacing.compact
-        return actionWidths + actionSpacing + pickerToActionsGap
     }
 }
 
@@ -109,6 +102,8 @@ struct CanvasEditorView: View {
     @State private var isImageWandPresented = false
     @State private var lifecycleFlushTask: Task<Void, Never>?
     @State private var mediaTaskGate = CanvasEditorMediaTaskGate()
+    @State private var topChromeHeight: CGFloat =
+        CanvasConstants.toolbarTopPadding + CanvasConstants.toolbarHeight
 
     private var importErrorPresentation: Binding<Bool> {
         Binding(
@@ -255,6 +250,7 @@ struct CanvasEditorView: View {
                     initialInputMode: model.inputMode,
                     initialPageLayout: model.pageLayout,
                     documentMode: model.documentMode,
+                    topChromeHeight: topChromeHeight,
                     callbacks: model.callbacks,
                     onAttach: model.attachCanvasController,
                     onDetach: model.detachCanvasController
@@ -319,38 +315,36 @@ struct CanvasEditorView: View {
         .overlay(alignment: .bottom) {
             statusChrome
         }
+        .onPreferenceChange(CanvasChromeHeightPreferenceKey.self) { height in
+            guard height.isFinite, height > 0,
+                  abs(topChromeHeight - height) > 0.5 else { return }
+            topChromeHeight = height
+        }
     }
 
     @ViewBuilder
     private func topChrome(availableWidth: CGFloat) -> some View {
-        Group {
-            if model.isReaderMode {
-                editorIdentityAndActions
-            } else if CanvasEditorChromeLayout.usesStackedLayout(
-                availableWidth: availableWidth,
-                isAccessibilitySize: dynamicTypeSize.isAccessibilitySize
-            ) {
-                VStack(spacing: NotateDesign.Spacing.compact) {
-                    editorIdentityAndActions
-                    editorPicker
-                }
-            } else {
-                ZStack(alignment: .top) {
-                    editorPicker
-                        .padding(
-                            .horizontal,
-                            CanvasEditorChromeLayout.pickerHorizontalClearance
-                        )
-                    editorIdentityAndActions
-                }
+        VStack(spacing: NotateDesign.Spacing.compact) {
+            editorIdentityAndActions
+            if model.isReaderMode == false {
+                editorPicker(availableWidth: availableWidth)
             }
         }
         .padding(.horizontal, 16)
         .padding(.top, 8)
         .frame(maxWidth: .infinity, alignment: .top)
+        .background {
+            GeometryReader { proxy in
+                Color.clear.preference(
+                    key: CanvasChromeHeightPreferenceKey.self,
+                    value: proxy.size.height
+                )
+            }
+        }
+        .accessibilityIdentifier("canvas.top.chrome")
     }
 
-    private var editorPicker: some View {
+    private func editorPicker(availableWidth: CGFloat) -> some View {
         CanvasToolPicker(
             toolState: model.toolState,
             overlay: model.overlay,
@@ -358,6 +352,10 @@ struct CanvasEditorView: View {
             activeGeometryTool: model.activeGeometryTool,
             canUndo: model.canUndo,
             canRedo: model.canRedo,
+            usesCompactLayout: CanvasEditorChromeLayout.usesStackedLayout(
+                availableWidth: availableWidth,
+                isAccessibilitySize: dynamicTypeSize.isAccessibilitySize
+            ),
             onIntent: handleToolbarIntent
         )
     }
@@ -503,10 +501,9 @@ struct CanvasEditorView: View {
                         }
                     }
                     .padding(.horizontal, CanvasConstants.pageGap)
-                    .padding(
-                        .top,
-                        CanvasConstants.toolbarTopPadding
-                            + CanvasConstants.toolbarHeight
+                        .padding(
+                            .top,
+                            topChromeHeight
                     )
                 } else {
                     VStack {
@@ -520,8 +517,7 @@ struct CanvasEditorView: View {
                     }
                     .padding(
                         .top,
-                        CanvasConstants.toolbarTopPadding
-                            + CanvasConstants.toolbarHeight
+                        topChromeHeight
                             + CanvasConstants.firstPageToolbarGap / 2
                     )
                     .padding(.bottom, CanvasConstants.pageGap)

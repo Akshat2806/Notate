@@ -1762,6 +1762,7 @@ public struct PaperCanvasCallbacks {
     ) {
         self.init(
             markupChanged: markupChanged,
+            pageReplaced: { _ in },
             paperTemplateChanged: { _, _ in },
             interactionBegan: { _ in interactionBegan() },
             undoAvailabilityChanged: { _, canUndo, canRedo in
@@ -2170,7 +2171,7 @@ public enum CanvasNativeToolMapper {
     private static func inkingTool(
         _ ink: PKInkingTool.InkType,
         state: CanvasToolState,
-        tool: CanvasTool,
+        tool: CanvasTool
     ) -> PKInkingTool {
         guard let configuration = state.configuration(for: tool)
             ?? CanvasToolState.defaults[tool] else {

@@ -9,6 +9,7 @@ struct PaperCanvasRepresentable: UIViewControllerRepresentable {
     let initialInputMode: CanvasInputMode
     let initialPageLayout: CanvasPageLayoutPreferences
     let documentMode: CanvasDocumentMode
+    let topChromeHeight: CGFloat
     let callbacks: PaperCanvasCallbacks
     let onAttach: @MainActor (any PaperCanvasCommanding) -> Void
     let onDetach: @MainActor (any PaperCanvasCommanding) -> Void
@@ -20,6 +21,7 @@ struct PaperCanvasRepresentable: UIViewControllerRepresentable {
         initialInputMode: CanvasInputMode,
         initialPageLayout: CanvasPageLayoutPreferences = .default,
         documentMode: CanvasDocumentMode = .paged,
+        topChromeHeight: CGFloat = CanvasConstants.toolbarTopPadding + CanvasConstants.toolbarHeight,
         callbacks: PaperCanvasCallbacks,
         onAttach: @escaping @MainActor (any PaperCanvasCommanding) -> Void,
         onDetach: @escaping @MainActor (any PaperCanvasCommanding) -> Void
@@ -30,6 +32,7 @@ struct PaperCanvasRepresentable: UIViewControllerRepresentable {
         self.initialInputMode = initialInputMode
         self.initialPageLayout = initialPageLayout
         self.documentMode = documentMode
+        self.topChromeHeight = topChromeHeight
         self.callbacks = callbacks
         self.onAttach = onAttach
         self.onDetach = onDetach
@@ -44,6 +47,7 @@ struct PaperCanvasRepresentable: UIViewControllerRepresentable {
         initialInputMode: CanvasInputMode,
         initialPageLayout: CanvasPageLayoutPreferences = .default,
         documentMode: CanvasDocumentMode = .paged,
+        topChromeHeight: CGFloat = CanvasConstants.toolbarTopPadding + CanvasConstants.toolbarHeight,
         callbacks: PaperCanvasCallbacks,
         onAttach: @escaping @MainActor (any PaperCanvasCommanding) -> Void,
         onDetach: @escaping @MainActor (any PaperCanvasCommanding) -> Void
@@ -61,6 +65,7 @@ struct PaperCanvasRepresentable: UIViewControllerRepresentable {
             initialInputMode: initialInputMode,
             initialPageLayout: initialPageLayout,
             documentMode: documentMode,
+            topChromeHeight: topChromeHeight,
             callbacks: callbacks,
             onAttach: onAttach,
             onDetach: onDetach
@@ -94,6 +99,7 @@ struct PaperCanvasRepresentable: UIViewControllerRepresentable {
         // Only refresh the one-way event closures retained by UIKit.
         context.coordinator.parent = self
         uiViewController.updateCallbacks(callbacks)
+        uiViewController.updateTopChromeHeight(topChromeHeight)
     }
 
     static func dismantleUIViewController(
