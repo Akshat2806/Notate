@@ -21,7 +21,8 @@ enum CanvasEditorChromeLayout {
     /// Back, pages, reader, and more share the row with the tool pill.
     private static let navigationClusterWidth =
         (4 * NotateDesign.Control.minimumHitTarget)
-        + (5 * NotateDesign.Spacing.compact)
+        + CanvasToolPicker.preferredHistoryWidth
+        + (7 * NotateDesign.Spacing.compact)
 
     static func usesStackedLayout(
         availableWidth: CGFloat,
@@ -314,7 +315,12 @@ struct CanvasEditorView: View {
             }
         }
         .overlay(alignment: .bottom) {
-            statusChrome
+            VStack(spacing: NotateDesign.Spacing.compact) {
+                if model.isImageWandSelectionActive {
+                    imageWandPrompt
+                }
+                statusChrome
+            }
         }
         .onPreferenceChange(CanvasChromeHeightPreferenceKey.self) { height in
             guard height.isFinite, height > 0,
@@ -399,6 +405,9 @@ struct CanvasEditorView: View {
                     toolPicker(placement: .pill, isStacked: false)
                     Spacer(minLength: NotateDesign.Spacing.compact)
                 }
+                if model.isReaderMode == false {
+                    toolPicker(placement: .history, isStacked: isStacked)
+                }
                 if model.supportsPageStack {
                     readerButton
                 }
@@ -409,6 +418,27 @@ struct CanvasEditorView: View {
                 )
             }
         }
+    }
+
+    /// Wand is a one-shot mode, so it announces itself and offers a way out
+    /// without covering the page.
+    private var imageWandPrompt: some View {
+        HStack(spacing: NotateDesign.Spacing.control) {
+            Image(systemName: "wand.and.stars")
+                .foregroundStyle(NotateDesign.Palette.accent)
+            Text("Circle what you want to transform")
+                .font(.subheadline.weight(.medium))
+            Button("Cancel") { cancelImageWand() }
+                .font(.subheadline.weight(.semibold))
+                .accessibilityIdentifier("canvas.wand.cancel")
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .notateGlassSurface(shape: Capsule())
+        .padding(.bottom, 24)
+        .transition(.opacity)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("canvas.wand.prompt")
     }
 
     private var readerButton: some View {

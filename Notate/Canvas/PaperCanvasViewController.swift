@@ -3262,6 +3262,42 @@ private func configureRegionSelection() {
     ])
 }
 
+    /// Starts Wand's one-shot circling mode over the focused page. Page,
+    /// scroll, laser, and instrument interaction is suspended until the
+    /// selection completes or is cancelled.
+    func beginImageWandSelection(checkpointGeneration: Int64) {
+        guard isReaderModeEnabled == false,
+            let host = hostsByPageID[focusedPageID],
+            host.controller.view.superview != nil,
+            regionSelectionView.superview != nil else { return }
+
+        resetRegionSelection()
+        let pageFrame = regionSelectionView.convert(
+            host.controller.view.bounds,
+            from: host.controller.view
+        )
+        // Keep the circling area clear of the floating top chrome.
+        var available = pageFrame.intersection(regionSelectionView.bounds)
+        let chromeInset = max(view.safeAreaInsets.top, topChromeHeight)
+        if available.minY < chromeInset {
+            let delta = chromeInset - available.minY
+            available.origin.y += delta
+            available.size.height -= delta
+        }
+        guard available.isNull == false,
+            available.width >= 20,
+            available.height >= 20 else { return }
+
+        regionSelectionPageID = host.id
+        regionSelectionCheckpointGeneration = checkpointGeneration
+        suspendInteractionForRegionSelection()
+        regionSelectionView.begin(selectionBounds: available)
+    }
+
+    func cancelImageWandSelection() {
+        resetRegionSelection()
+    }
+
     private func completeImageWandRegionSelection(_ overlayPath: CGPath) {
     guard let pageID = regionSelectionPageID,
         pageID == focusedPageID,
@@ -4716,7 +4752,9 @@ now: now
 )
 setBoundaryPagePull(pull)
 if schedulesHoldTimer {
+if boundaryPullGate.needsHoldTimer {
 synchronizeBoundaryPullHoldTask()
+}
 } else {
 boundaryPullHoldTask?.cancel()
 boundaryPullHoldTask = nil
@@ -4764,7 +4802,12 @@ return
             isDragging: self.scrollView.isDragging
         )
         self.setBoundaryPagePull(pull)
-        self.synchronizeBoundaryPullHoldTask()
+        // Only a still-holding gate needs another tick. Re-arming after the
+        // pull is armed would hit `completeHold` in the wrong phase and
+        // cancel the gesture before release could insert the page.
+        if self.boundaryPullGate.needsHoldTimer {
+            self.synchronizeBoundaryPullHoldTask()
+        }
         }
     }
     private func cancelBoundaryPagePullGesture(
@@ -5257,7 +5300,7 @@ return false
 #endif
 guard let retainedHost = hostsByPageID[pageID],
     ObjectIdentifier(retainedHost.controller) == controllerIdentity,
-    retainedHost.controller.markup == originalMarkup else {
+    retainedHost.controller.markup == insertedMarkup else {
     await restoreFailedInsertion(
         on: paperController,
         originalMarkup: originalMarkup,

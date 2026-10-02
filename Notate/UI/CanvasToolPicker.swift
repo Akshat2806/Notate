@@ -36,6 +36,7 @@ public struct CanvasToolPicker: View {
     /// opens directly beneath it.
     public enum Placement: Sendable {
         case pill
+        case history
         case options
     }
 
@@ -44,8 +45,7 @@ public struct CanvasToolPicker: View {
         static let itemHeight: CGFloat = 40
         static let itemSpacing: CGFloat = 2
         static let horizontalPadding: CGFloat = 6
-        static let dividerWidth: CGFloat = 9
-        static let itemCount = 11
+        static let itemCount = 9
     }
 
     enum StripMetrics {
@@ -75,7 +75,12 @@ public struct CanvasToolPicker: View {
     static var preferredPillWidth: CGFloat {
         let items = CGFloat(PillMetrics.itemCount) * PillMetrics.itemWidth
         let gaps = CGFloat(PillMetrics.itemCount) * PillMetrics.itemSpacing
-        return items + gaps + PillMetrics.dividerWidth
+        return items + gaps + (2 * PillMetrics.horizontalPadding)
+    }
+
+    /// Undo and redo share one small capsule.
+    static var preferredHistoryWidth: CGFloat {
+        (2 * PillMetrics.itemWidth) + PillMetrics.itemSpacing
             + (2 * PillMetrics.horizontalPadding)
     }
 
@@ -144,6 +149,8 @@ public struct CanvasToolPicker: View {
                         isAddButtonFocused = true
                     }
                 }
+        case .history:
+            historyPill
         case .options:
             GlassEffectContainer(spacing: NotateDesign.Spacing.compact) {
                 accessorySurface
@@ -162,13 +169,6 @@ public struct CanvasToolPicker: View {
     }
 
     @ViewBuilder private var pickerControls: some View {
-        utilityButton(title: "Undo", systemImage: "arrow.uturn.backward", isEnabled: canUndo) {
-            onIntent(.undo)
-        }
-        utilityButton(title: "Redo", systemImage: "arrow.uturn.forward", isEnabled: canRedo) {
-            onIntent(.redo)
-        }
-        pillDivider
         toolButton(.lasso)
         toolButton(.pen)
         toolButton(.pencil)
@@ -180,12 +180,21 @@ public struct CanvasToolPicker: View {
         addButton
     }
 
-    private var pillDivider: some View {
-        Rectangle()
-            .fill(Color.primary.opacity(0.14))
-            .frame(width: 1, height: 18)
-            .frame(width: PillMetrics.dividerWidth)
-            .accessibilityHidden(true)
+    private var historyPill: some View {
+        HStack(spacing: PillMetrics.itemSpacing) {
+            utilityButton(title: "Undo", systemImage: "arrow.uturn.backward", isEnabled: canUndo) {
+                onIntent(.undo)
+            }
+            utilityButton(title: "Redo", systemImage: "arrow.uturn.forward", isEnabled: canRedo) {
+                onIntent(.redo)
+            }
+        }
+        .padding(.horizontal, PillMetrics.horizontalPadding)
+        .frame(height: NotateDesign.Control.compactGlassDiameter)
+        .glassEffect(.regular.interactive(), in: Capsule())
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("History")
+        .accessibilityIdentifier("canvas.history")
     }
 
     private var addButton: some View {
@@ -216,14 +225,7 @@ public struct CanvasToolPicker: View {
         let isExpanded = overlay == .geometryTools
 
         return Button {
-            let opensChooser = activeGeometryTool != nil && overlay != .geometryTools
             onIntent(.tapGeometryToolSlot)
-            if opensChooser {
-                Task { @MainActor in
-                    await Task.yield()
-                    focusedGeometryTool = activeGeometryTool
-                }
-            }
         } label: {
             CanvasGeometryToolGlyph(
                 tool: activeGeometryTool ?? preferredGeometryTool,
@@ -238,6 +240,9 @@ public struct CanvasToolPicker: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(CanvasCrispToolButtonStyle(reduceMotion: reduceMotion))
+        .highPriorityGesture(LongPressGesture(minimumDuration: 0.4).onEnded { _ in
+            onIntent(.showGeometryChooser)
+        })
         .accessibilityFocused($isGeometrySlotFocused)
         .accessibilityLabel("Ruler")
         .accessibilityValue(
@@ -247,7 +252,7 @@ public struct CanvasToolPicker: View {
         )
         .accessibilityHint(
             isActive
-                ? "Opens the ruler, protractor, and compass chooser"
+                ? "Switches to the next instrument, then turns instruments off. Touch and hold to choose."
                 : "Turns on the \(preferredGeometryTool.title.lowercased())"
         )
         .accessibilityAddTraits(isActive ? .isSelected : [])

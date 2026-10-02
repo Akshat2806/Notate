@@ -680,16 +680,22 @@ public final class CanvasEditorModel {
                 : .insert
 
         case .tapGeometryToolSlot:
-            // First tap selects the preferred instrument (the ruler by
-            // default) and reveals its siblings; later taps collapse or
-            // re-expand the strip without changing the selection.
-            if activeGeometryTool == nil {
-                activeGeometryTool = preferredGeometryTool
-                overlay = .geometryTools
-                canvasController?.setGeometryTool(activeGeometryTool)
+            // One slot, one tap target: off -> ruler -> protractor ->
+            // compass -> off. The chooser strip is a long-press shortcut.
+            let order = CanvasGeometryTool.allCases
+            if let active = activeGeometryTool,
+               let index = order.firstIndex(of: active) {
+                let next = order.index(after: index)
+                activeGeometryTool = next < order.endIndex ? order[next] : nil
             } else {
-                overlay = overlay == .geometryTools ? .none : .geometryTools
+                activeGeometryTool = preferredGeometryTool
             }
+            if let activeGeometryTool { preferredGeometryTool = activeGeometryTool }
+            overlay = .none
+            canvasController?.setGeometryTool(activeGeometryTool)
+
+        case .showGeometryChooser:
+            overlay = overlay == .geometryTools ? .none : .geometryTools
 
         case let .toggleGeometryTool(tool):
             toggleGeometryTool(tool)

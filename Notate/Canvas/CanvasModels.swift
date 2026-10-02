@@ -1011,6 +1011,7 @@ public enum CanvasToolbarIntent: Sendable {
     case setLaserPointerStyle(CanvasLaserPointerStyle)
     case toggleInsert
     case tapGeometryToolSlot
+    case showGeometryChooser
     case toggleGeometryTool(CanvasGeometryTool)
     // Kept as a source-compatible alias for existing callers and tests.
     case toggleRuler
