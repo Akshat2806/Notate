@@ -414,31 +414,6 @@ struct LibraryBrowserView: View {
         }
     }
 
-    /// "3 selected" with a Select All toggle, so bulk actions never act on a
-    /// count the person has to guess.
-    private var selectionSummary: some View {
-        HStack(spacing: NotateDesign.Spacing.control) {
-            Text(
-                session.selectedItemIDs.isEmpty
-                    ? "Select items"
-                    : "\(session.selectedItemIDs.count) selected"
-            )
-            .font(.subheadline.weight(.semibold))
-            .monospacedDigit()
-            .lineLimit(1)
-            .accessibilityIdentifier("library.selection.count")
-
-            Button(session.allVisibleItemsSelected ? "Deselect All" : "Select All") {
-                session.toggleSelectAllVisibleItems()
-            }
-            .font(.subheadline.weight(.medium))
-            .disabled(session.selectableItemIDs.isEmpty)
-            .accessibilityIdentifier("library.selection.select-all")
-            .keyboardShortcut("a", modifiers: .command)
-        }
-        .padding(.trailing, NotateDesign.Spacing.compact)
-    }
-
     private var selectedItems: [LibraryItemRecord] {
         session.visibleItems.filter { session.selectedItemIDs.contains($0.id) }
     }
@@ -887,6 +862,31 @@ private struct LibraryBrowserHeader: View {
             .scrollIndicators(.hidden)
             .frame(height: NotateLibraryDesign.minimumHitTarget)
         }
+    }
+
+    /// "3 selected" with a Select All toggle, so bulk actions never act on a
+    /// count the person has to guess.
+    private var selectionSummary: some View {
+        HStack(spacing: NotateDesign.Spacing.control) {
+            Text(
+                session.selectedItemIDs.isEmpty
+                    ? "Select items"
+                    : "\(session.selectedItemIDs.count) selected"
+            )
+            .font(.subheadline.weight(.semibold))
+            .monospacedDigit()
+            .lineLimit(1)
+            .accessibilityIdentifier("library.selection.count")
+
+            Button(session.allVisibleItemsSelected ? "Deselect All" : "Select All") {
+                session.toggleSelectAllVisibleItems()
+            }
+            .font(.subheadline.weight(.medium))
+            .disabled(session.selectableItemIDs.isEmpty)
+            .accessibilityIdentifier("library.selection.select-all")
+            .keyboardShortcut("a", modifiers: .command)
+        }
+        .padding(.trailing, NotateDesign.Spacing.compact)
     }
 
     private var libraryTools: some View {
