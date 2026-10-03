@@ -18,31 +18,28 @@ public struct CanvasAutosaveTiming: Sendable {
     }
 }
 
-public enum CanvasPageTrashError: Error, LocalizedError, Equatable {
+public enum CanvasPageDeletionError: Error, LocalizedError, Equatable {
     case unavailable
     case pageNotFound
     case solePage
     case operationInProgress
     case removalRejected
     case checkpointFailed(String)
-    case rollbackFailed(String)
 
     public var errorDescription: String? {
         switch self {
         case .unavailable:
-            "This page cannot be moved to Trash until its notebook storage is ready."
+            "This page cannot be deleted until its notebook storage is ready."
         case .pageNotFound:
             "The page is no longer available."
         case .solePage:
             "A document must keep at least one page."
         case .operationInProgress:
-            "This page is already being moved to Trash."
+            "This page is already being deleted."
         case .removalRejected:
-            "The page changed while it was being moved to Trash. Please try again."
+            "The page changed before it could be deleted. Please try again."
         case let .checkpointFailed(description):
-            "The page removal was not safely stored, so Notate restored the page. \(description)"
-        case let .rollbackFailed(description):
-            "The page stayed in the document, but its Trash record could not be cancelled. \(description)"
+            "The permanent deletion was not safely stored, so Notate restored the page. \(description)"
         }
     }
 }
@@ -1512,64 +1509,52 @@ public final class CanvasEditorModel {
         return currentPageOverviewSnapshot()
     }
 
-    /// Crash-safe user-facing deletion. The page archive and tombstone are
-    /// durable before the ordinary in-memory/controller removal is attempted.
-    public func movePageToTrashFromOverview(
+    /// Permanently removes a page after its updated document has been verified
+    /// on disk. If saving fails, restore the page and verify that recovery too.
+    public func deletePagePermanentlyFromOverview(
         id: UUID
     ) async throws -> CanvasDocumentSnapshot {
-        guard supportsPageStack else { throw CanvasPageTrashError.solePage }
-        guard launchState == .ready else { throw CanvasPageTrashError.pageNotFound }
-        guard allowsAuthoring else { throw CanvasPageTrashError.operationInProgress }
-        guard pages.count > 1 else { throw CanvasPageTrashError.solePage }
+        guard supportsPageStack else { throw CanvasPageDeletionError.solePage }
+        guard launchState == .ready else { throw CanvasPageDeletionError.pageNotFound }
+        guard allowsAuthoring else { throw CanvasPageDeletionError.operationInProgress }
+        guard pages.count > 1 else { throw CanvasPageDeletionError.solePage }
         guard isDurableInsertionInFlight == false,
             pageTrashMutationsInFlight.isEmpty else {
-            throw CanvasPageTrashError.operationInProgress
+            throw CanvasPageDeletionError.operationInProgress
         }
         guard pageTrashMutationsInFlight.insert(id).inserted else {
-            throw CanvasPageTrashError.operationInProgress
+            throw CanvasPageDeletionError.operationInProgress
         }
         defer { pageTrashMutationsInFlight.remove(id) }
         guard captureLatestControllerDocumentIfNeeded(),
             let index = pages.firstIndex(where: { $0.id == id }) else {
-            throw CanvasPageTrashError.pageNotFound
+            throw CanvasPageDeletionError.pageNotFound
         }
-        guard let deletedPageArchiver,
-            let deletedPageArchiveRollback else { throw CanvasPageTrashError.unavailable }
 
-        let archivedPage = pages[index]
+        let deletedPage = pages[index]
         let previouslyFocusedPageID = currentPageID
-        let tombstoneID = try await deletedPageArchiver(archivedPage, index)
-        guard pages.indices.contains(index),
-            pages[index] == archivedPage else {
-            do {
-                try await deletedPageArchiveRollback(tombstoneID)
-            } catch {
-                throw CanvasPageTrashError.rollbackFailed(error.localizedDescription)
-            }
-            throw CanvasPageTrashError.removalRejected
+        guard pages.indices.contains(index), pages[index] == deletedPage else {
+            throw CanvasPageDeletionError.removalRejected
         }
         authorizedPageTrashRemovalID = id
         let didRemovePage = deletePageFromOverview(id: id) != nil
         authorizedPageTrashRemovalID = nil
         guard didRemovePage else {
-            do {
-                try await deletedPageArchiveRollback(tombstoneID)
-            } catch {
-                throw CanvasPageTrashError.rollbackFailed(error.localizedDescription)
-            }
-            throw CanvasPageTrashError.removalRejected
+            throw CanvasPageDeletionError.removalRejected
         }
         let deletionGeneration = generation
         await checkpointLatest()
-        // A normal edit can advance the live generation while the deletion
-        // checkpoint is suspended. That must not turn an already-verified
-        // deletion into a rollback merely because the newest edit is dirty.
-        // Also drain every later checkpoint captured while the page is absent:
-        // one of those snapshots can durably acknowledge the deletion, and no
-        // such snapshot may still commit after we discard its tombstone.
         await waitForCheckpoints(atOrAfter: deletionGeneration)
         if hasVerifiedCheckpoint(atOrAfter: deletionGeneration) {
-            return currentPageOverviewSnapshot()
+            // Publish the page-free document once more so both recovery slots
+            // no longer contain a pre-deletion copy of the page.
+            markDocumentChanged()
+            let recoveryGeneration = generation
+            await checkpointLatest()
+            await waitForCheckpoints(atOrAfter: recoveryGeneration)
+            if hasVerifiedCheckpoint(atOrAfter: recoveryGeneration) {
+                return currentPageOverviewSnapshot()
+            }
         }
 
         let deletionFailureReason: String
@@ -1578,8 +1563,8 @@ public final class CanvasEditorModel {
         } else {
             deletionFailureReason = "The verified checkpoint did not advance."
         }
-        restorePageAfterFailedTrash(
-            archivedPage,
+        restorePageAfterFailedDeletion(
+            deletedPage,
             at: index,
             previouslyFocusedPageID: previouslyFocusedPageID
         )
@@ -1587,9 +1572,6 @@ public final class CanvasEditorModel {
         await checkpointLatest()
         await waitForCheckpoints(atOrAfter: restorationGeneration)
 
-        // The archive is the only crash-safe copy until a verified snapshot
-        // contains the restored page. If that compensating checkpoint fails,
-        // retain the archive/tombstone for startup reconciliation.
         guard hasVerifiedCheckpoint(atOrAfter: restorationGeneration) else {
             let restorationFailureReason: String
             if case let .failed(message) = saveState {
@@ -1597,17 +1579,12 @@ public final class CanvasEditorModel {
             } else {
                 restorationFailureReason = "The restored page could not be verified on disk."
             }
-            throw CanvasPageTrashError.checkpointFailed(restorationFailureReason)
+            throw CanvasPageDeletionError.checkpointFailed(restorationFailureReason)
         }
-        do {
-            try await deletedPageArchiveRollback(tombstoneID)
-        } catch {
-            throw CanvasPageTrashError.rollbackFailed(error.localizedDescription)
-        }
-        throw CanvasPageTrashError.checkpointFailed(deletionFailureReason)
+        throw CanvasPageDeletionError.checkpointFailed(deletionFailureReason)
     }
 
-    private func restorePageAfterFailedTrash(
+    private func restorePageAfterFailedDeletion(
         _ page: CanvasPageSnapshot,
         at requestedIndex: Int,
         previouslyFocusedPageID: UUID

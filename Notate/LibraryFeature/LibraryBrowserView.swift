@@ -9,6 +9,10 @@ struct LibraryBrowserView: View {
     @State private var shouldRestoreAddFocus = false
     @State private var confirmsEmptyTrash = false
     @State private var isAddPanelLaunchingDestination = false
+    @State private var hasDismissedFirstCreateCoachmark = false
+    @AppStorage("notate.library.hasCreatedFirstItem") private var hasCreatedFirstLibraryItem = false
+    @AppStorage("notate.library.gridZoom") private var gridZoom = 0.84
+    @State private var gridMagnificationStart: CGFloat?
     @AccessibilityFocusState private var isAddButtonAccessibilityFocused: Bool
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -23,7 +27,8 @@ struct LibraryBrowserView: View {
             VStack(spacing: 0) {
                 LibraryBrowserHeader(
                     session: session,
-                    folderNavigationNamespace: folderNavigationNamespace
+                    folderNavigationNamespace: folderNavigationNamespace,
+                    gridZoom: $gridZoom
                 )
                 browserContent
             }
@@ -60,6 +65,22 @@ struct LibraryBrowserView: View {
         if session.isSelectionMode {
             selectionActions
         } else if session.canCreateContent {
+            if shouldShowFirstCreateCoachmark {
+                LibraryAddCoachmark {
+                    hasDismissedFirstCreateCoachmark = true
+                }
+                .padding(.trailing, horizontalSizeClass == .compact ? 18 : 26)
+                .padding(
+                    .bottom,
+                    22 + NotateLibraryDesign.floatingActionSize + NotateDesign.Spacing.compact
+                )
+                .transition(
+                    reduceMotion
+                        ? .opacity
+                        : .move(edge: .bottom).combined(with: .opacity)
+                )
+                .zIndex(1)
+            }
             addControls
         }
     }
@@ -91,6 +112,10 @@ struct LibraryBrowserView: View {
                 restoreAddFocusWhenReady()
             }
         }
+        .onAppear(perform: recordExistingLibraryItems)
+        .onChange(of: successfullyCreatedItemIDs) { _, itemIDs in
+            if itemIDs.isEmpty == false { hasCreatedFirstLibraryItem = true }
+        }
     }
 
     @ViewBuilder
@@ -99,13 +124,7 @@ struct LibraryBrowserView: View {
             LibraryEmptyStateView(
                 scope: session.scope,
                 searchQuery: session.searchQuery,
-                onPrimaryAction: primaryEmptyAction,
-                onNewNotebook: session.canCreateContent
-                    ? { session.sheet = .newNotebook(parentID: session.parentID) }
-                    : nil,
-                onImportDocument: session.canCreateContent
-                    ? { session.actions.importDocuments(session.parentID) }
-                    : nil
+                onPrimaryAction: primaryEmptyAction
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if session.scope == .trash {
@@ -212,6 +231,7 @@ struct LibraryBrowserView: View {
                 .frame(maxWidth: .infinity)
             }
             .scrollEdgeEffectStyle(.soft, for: .top)
+            .scrollPosition(id: scrollPositionBinding)
         }
     }
 
@@ -247,6 +267,7 @@ struct LibraryBrowserView: View {
         .scrollContentBackground(.hidden)
         .contentMargins(.bottom, 100, for: .scrollContent)
         .scrollEdgeEffectStyle(.soft, for: .top)
+        .scrollPosition(id: scrollPositionBinding)
     }
 
     private func trashSectionHeader(_ title: String) -> some View {
@@ -284,6 +305,18 @@ struct LibraryBrowserView: View {
                 .frame(maxWidth: .infinity)
             }
             .scrollEdgeEffectStyle(.soft, for: .top)
+            .scrollPosition(id: scrollPositionBinding)
+            .simultaneousGesture(
+                MagnifyGesture()
+                    .onChanged { value in
+                        let start = gridMagnificationStart ?? CGFloat(gridZoom)
+                        gridMagnificationStart = start
+                        gridZoom = Double(min(max(start * value.magnification, 0.72), 1.48))
+                    }
+                    .onEnded { _ in
+                        gridMagnificationStart = nil
+                    }
+            )
         }
     }
 
@@ -298,13 +331,12 @@ struct LibraryBrowserView: View {
     private func gridColumns(for totalWidth: CGFloat) -> [GridItem] {
         let cappedWidth = min(totalWidth, NotateLibraryDesign.contentMaximumWidth)
         let contentWidth = max(0, cappedWidth - (gridHorizontalPadding * 2))
-        let regularTwoColumnMinimum =
-            (NotateLibraryDesign.cardMinimumWidth * 2) + NotateDesign.Spacing.section
+        let twoColumnMinimum = (gridCardMinimumWidth * 2) + 22
 
         // Regular-width split-view columns can still be narrower than two
         // comfortable cards. Accessibility sizes also benefit from a single
         // reading column instead of compressed metadata.
-        if dynamicTypeSize.isAccessibilitySize || contentWidth < regularTwoColumnMinimum {
+        if dynamicTypeSize.isAccessibilitySize || contentWidth < twoColumnMinimum {
             return [
                 GridItem(
                     .fixed(
@@ -319,18 +351,34 @@ struct LibraryBrowserView: View {
             ]
         }
 
-        return [
-            GridItem(
-                .adaptive(
-                    minimum: horizontalSizeClass == .compact
-                    ? 164
-                    : NotateLibraryDesign.cardMinimumWidth,
-                    maximum: NotateLibraryDesign.cardMaximumWidth
-                ),
-                spacing: 22,
+        let columnSpacing: CGFloat = 22
+        let fittingColumnCount = max(
+            1,
+            Int((contentWidth + columnSpacing) / (gridCardMinimumWidth + columnSpacing))
+        )
+        // Five columns keep the library feeling like a deliberate document
+        // shelf on iPad and desktop while the pinch gesture still changes the
+        // number of visible tiles at every zoom level.
+        let columnCount = min(fittingColumnCount, 5)
+        let columnWidth = max(
+            gridCardMinimumWidth,
+            (contentWidth - columnSpacing * CGFloat(columnCount - 1)) / CGFloat(columnCount)
+        )
+        return Array(
+            repeating: GridItem(
+                .flexible(minimum: gridCardMinimumWidth, maximum: columnWidth),
+                spacing: columnSpacing,
                 alignment: .top
             ),
-        ]
+            count: columnCount
+        )
+    }
+
+    private var gridCardMinimumWidth: CGFloat {
+        let compactMinimum: CGFloat = 144
+        let compactMaximum: CGFloat = horizontalSizeClass == .compact ? 220 : 248
+        return compactMinimum + (compactMaximum - compactMinimum)
+            * CGFloat((gridZoom - 0.72) / (1.48 - 0.72))
     }
 
     private var list: some View {
@@ -360,6 +408,14 @@ struct LibraryBrowserView: View {
         .scrollContentBackground(.hidden)
         .contentMargins(.bottom, 100, for: .scrollContent)
         .scrollEdgeEffectStyle(.soft, for: .top)
+        .scrollPosition(id: scrollPositionBinding)
+    }
+
+    private var scrollPositionBinding: Binding<UUID?> {
+        Binding(
+            get: { session.scrollPositionID },
+            set: { session.scrollPositionID = $0 }
+        )
     }
 
     private var addControls: some View {
@@ -416,6 +472,36 @@ struct LibraryBrowserView: View {
 
     private var selectedItems: [LibraryItemRecord] {
         session.visibleItems.filter { session.selectedItemIDs.contains($0.id) }
+    }
+
+    private var shouldShowFirstCreateCoachmark: Bool {
+        guard hasCreatedFirstLibraryItem == false,
+              hasDismissedFirstCreateCoachmark == false,
+              session.repository.items.contains(where: isPreviouslyCreatedItem) == false,
+              session.visibleItems.isEmpty,
+              session.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              session.canCreateContent else { return false }
+        return true
+    }
+
+    private func recordExistingLibraryItems() {
+        if session.repository.items.contains(where: isPreviouslyCreatedItem) {
+            hasCreatedFirstLibraryItem = true
+        }
+    }
+
+    private var successfullyCreatedItemIDs: [UUID] {
+        session.repository.items
+            .filter { $0.payloadState == .ready }
+            .map(\.id)
+            .sorted { $0.uuidString < $1.uuidString }
+    }
+
+    private func isPreviouslyCreatedItem(_ item: LibraryItemRecord) -> Bool {
+        // Missing and failed records can be left by older versions or an
+        // interrupted recovery. They still represent a library the person has
+        // already used, while in-flight creation/import rows do not.
+        item.payloadState == .ready || item.payloadState == .missing || item.payloadState == .failed
     }
 
     private var selectionActions: some View {
@@ -528,12 +614,15 @@ struct LibraryBrowserView: View {
             return
         }
 
-        if session.canCreateContent == false {
+        switch session.scope {
+        case .favorites, .recent, .tag:
             withAnimation(reduceMotion ? nil : NotateDesign.Motion.navigation) {
                 session.selectScope(.home)
             }
-        } else {
-            session.sheet = .newNotebook(parentID: session.parentID)
+        case .home, .folder:
+            session.isAddPanelPresented = true
+        case .trash, .settings:
+            break
         }
     }
 
@@ -567,6 +656,42 @@ private struct LibraryFloatingAddButtonStyle: ButtonStyle {
                 reduceMotion ? nil : NotateDesign.Motion.feedback,
                 value: configuration.isPressed
             )
+    }
+}
+
+private struct LibraryAddCoachmark: View {
+    let onDismiss: () -> Void
+
+    var body: some View {
+        HStack(spacing: NotateDesign.Spacing.compact) {
+            Text("Tap + to create your first item")
+                .font(.footnote.weight(.medium))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+            Button(action: onDismiss) {
+                Image(systemName: "xmark")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 28, height: 28)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Dismiss hint")
+        }
+        .padding(.leading, NotateDesign.Spacing.compact)
+        .padding(.trailing, 4)
+        .padding(.vertical, 4)
+        .background(
+            .regularMaterial,
+            in: RoundedRectangle(cornerRadius: NotateDesign.Radius.control, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: NotateDesign.Radius.control, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.8)
+        }
+        .shadow(color: .black.opacity(0.05), radius: 8, y: 3)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("library.add.coachmark")
     }
 }
 
@@ -730,10 +855,28 @@ private struct LibraryDeletedPageRow: View {
 private struct LibraryBrowserHeader: View {
     let session: LibraryAppSession
     let folderNavigationNamespace: Namespace.ID
+    @Binding var gridZoom: Double
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @FocusState private var isSearchFocused: Bool
+
+    private var tileSizeSelection: Binding<Int> {
+        Binding<Int>(
+            get: {
+                if gridZoom < 0.88 { return 0 }
+                if gridZoom > 1.18 { return 2 }
+                return 1
+            },
+            set: { selection in
+                gridZoom = switch selection {
+                case 0: 0.72
+                case 2: 1.48
+                default: 0.84
+                }
+            }
+        )
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -784,17 +927,12 @@ private struct LibraryBrowserHeader: View {
 
     private var title: some View {
         VStack(alignment: .leading, spacing: NotateDesign.Spacing.tight) {
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 10) {
-                    folderHeaderArtwork
-                    titleText
-                }
-
-                VStack(alignment: .leading, spacing: NotateDesign.Spacing.compact) {
-                    folderHeaderArtwork
-                    titleText
-                }
+            HStack(alignment: .center, spacing: 10) {
+                folderHeaderIcon
+                titleText
+                    .layoutPriority(1)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             if let subtitle {
                 Text(subtitle)
@@ -806,10 +944,18 @@ private struct LibraryBrowserHeader: View {
     }
 
     @ViewBuilder
-    private var folderHeaderArtwork: some View {
+    private var folderHeaderIcon: some View {
         if let folderHeaderItem {
-            LibraryItemArtwork(item: folderHeaderItem)
-                .frame(width: 50, height: 35)
+            let tint = (folderHeaderItem.folderSettings?.color ?? .folderBlue).swiftUIColor
+            Image(systemName: folderHeaderItem.folderSettings?.symbolName ?? "folder")
+                .symbolRenderingMode(.hierarchical)
+                .font(.system(size: 19, weight: .semibold))
+                .foregroundStyle(tint)
+                .frame(width: 34, height: 34)
+                .background(
+                    tint.opacity(0.13),
+                    in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                )
                 .notateFolderGeometryTransition(
                     itemID: folderHeaderItem.id,
                     in: folderNavigationNamespace,
@@ -822,7 +968,6 @@ private struct LibraryBrowserHeader: View {
     private var titleText: some View {
         Text(session.scopeTitle)
             .font(.largeTitle.weight(.bold))
-            .fontDesign(.serif)
             .lineLimit(dynamicTypeSize.isAccessibilitySize ? 2 : 1)
             .minimumScaleFactor(dynamicTypeSize.isAccessibilitySize ? 1 : 0.78)
             .fixedSize(horizontal: false, vertical: true)
@@ -840,7 +985,7 @@ private struct LibraryBrowserHeader: View {
                     }
                     .buttonStyle(.plain)
                     .font(.subheadline.weight(.medium))
-                    .foregroundStyle(NotateLibraryDesign.accent)
+                    .foregroundStyle(.secondary)
                     .notateMinimumHitTarget()
 
                     ForEach(session.breadcrumbItems) { item in
@@ -994,6 +1139,17 @@ private struct LibraryBrowserHeader: View {
                         .tag(style)
                     }
                 }
+                if session.viewStyle == .grid {
+                    Divider()
+                    Picker("Tile Size", selection: tileSizeSelection) {
+                        Label("Small", systemImage: "square.grid.3x3")
+                            .tag(0)
+                        Label("Comfortable", systemImage: "square.grid.2x2")
+                            .tag(1)
+                        Label("Large", systemImage: "rectangle")
+                            .tag(2)
+                    }
+                }
             } label: {
                 NotateAppGlyph(
                     kind: session.viewStyle == .grid ? .grid : .list,
@@ -1110,9 +1266,6 @@ private struct LibraryBrowserHeader: View {
         if case .folder = session.scope {
             return "Folder level \(session.currentFolderDepth) of \(LibraryRepository.maximumFolderDepth)"
         }
-        if session.scope == .recent {
-            return session.recentPeriod.title
-        }
         return nil
     }
 
@@ -1169,11 +1322,11 @@ private struct LibraryAddPanel: View {
 
     private var panelContent: some View {
         VStack(alignment: .leading, spacing: NotateDesign.Spacing.compact) {
-            if presentation == .sheet {
-                HStack(spacing: NotateDesign.Spacing.control) {
-                    Text("Add to Library")
-                        .font(.title3.weight(.semibold))
-                        .accessibilityAddTraits(.isHeader)
+            HStack(spacing: NotateDesign.Spacing.control) {
+                Text(presentation == .sheet ? "Add to Library" : "Create")
+                    .font(.title3.weight(.semibold))
+                    .accessibilityAddTraits(.isHeader)
+                if presentation == .sheet {
                     Spacer(minLength: 0)
                     Button {
                         session.isAddPanelPresented = false
@@ -1264,7 +1417,7 @@ private struct LibraryAddPanel: View {
                 }
 
                 Text(kind.title)
-                    .font(.system(.body, design: .rounded, weight: .semibold))
+                    .font(.body.weight(.semibold))
                     .foregroundStyle(
                         colorSchemeContrast == .increased
                             ? Color.primary
@@ -1298,13 +1451,13 @@ private struct LibraryAddPanel: View {
     private func rowTint(for kind: LibraryAddKind) -> Color {
         switch kind {
         case .quickNote:
-            Color(red: 0.56, green: 0.34, blue: 0.82)
+            return LibraryColorDraft.coral.color
         case .notebook:
-            Color(red: 0.20, green: 0.46, blue: 0.96)
+            return LibraryColorDraft.violet.color
         case .folder:
-            Color(red: 0.90, green: 0.34, blue: 0.43)
+            return LibraryColorDraft.folderAmber.color
         case .documents:
-            Color(red: 0.12, green: 0.53, blue: 0.93)
+            return LibraryColorDraft.folderTeal.color
         }
     }
 }

@@ -26,8 +26,8 @@ extension View {
         .contentShape(Rectangle())
     }
 
-    /// Connects a folder's library artwork to the compact folder artwork in
-    /// the destination header. Exactly one endpoint is the geometry source;
+    /// Connects a folder's library artwork to its selected glyph beside the
+    /// destination heading. Exactly one endpoint is the geometry source;
     /// Reduce Motion removes the spatial morph entirely.
     func notateFolderGeometryTransition(
         itemID: UUID?,

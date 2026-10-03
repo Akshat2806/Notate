@@ -1076,7 +1076,7 @@ final class NotateApplicationCoordinator {
         )
         model.configureDeletedPageArchiver(
             { [weak self] page, originalIndex in
-                guard let self else { throw CanvasPageTrashError.unavailable }
+                guard let self else { throw CanvasPageDeletionError.unavailable }
                 return try await self.archiveDeletedPage(
                     page,
                     originalIndex: originalIndex,
@@ -1084,7 +1084,7 @@ final class NotateApplicationCoordinator {
                 )
             },
             rollback: { [weak self] recordID in
-                guard let self else { throw CanvasPageTrashError.unavailable }
+                guard let self else { throw CanvasPageDeletionError.unavailable }
                 try await self.rollbackArchivedPage(recordID: recordID)
             }
         )

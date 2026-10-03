@@ -27,13 +27,7 @@ enum NotateDesign {
         static let background = Color(uiColor: .systemBackground)
         static let cardBackground = Color(uiColor: .secondarySystemGroupedBackground)
 
-        static let sidebarBackground = Color(
-            uiColor: UIColor { traits in
-                traits.userInterfaceStyle == .dark
-                    ? UIColor(red: 18 / 255, green: 18 / 255, blue: 19 / 255, alpha: 1)
-                    : .secondarySystemBackground
-            }
-        )
+        static let sidebarBackground = Color(uiColor: .secondarySystemBackground)
 
         static let selectionFillOpacity = 0.13
         static let opaqueSelectionFillOpacity = 0.20

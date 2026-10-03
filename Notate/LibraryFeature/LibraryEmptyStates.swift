@@ -81,10 +81,6 @@ struct LibraryEmptyStateView: View {
     let scope: LibraryScope
     let searchQuery: String
     let onPrimaryAction: () -> Void
-    /// Offered on Home and in folders, where creating something is the
-    /// obvious next step. Nil hides the buttons.
-    var onNewNotebook: (() -> Void)? = nil
-    var onImportDocument: (() -> Void)? = nil
 
     private var artworkKind: LibraryEmptyArtworkKind {
         .resolve(scope: scope, searchQuery: searchQuery)
@@ -92,11 +88,6 @@ struct LibraryEmptyStateView: View {
 
     private var isSearching: Bool {
         searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-    }
-
-    private var offersCreation: Bool {
-        if case .folder = scope { return true }
-        return scope == .home
     }
 
     private var scopeIsTag: Bool {
@@ -114,7 +105,7 @@ struct LibraryEmptyStateView: View {
                     Text("This Folder is Empty")
                         .font(.headline)
                         .foregroundStyle(.primary)
-                    Text("Add something new or move an item here.")
+                    Text("Tap + to add here, or move an item in.")
                         .font(.body)
                         .foregroundStyle(.secondary)
                 }
@@ -133,22 +124,6 @@ struct LibraryEmptyStateView: View {
             if isSearching {
                 Button("Clear Search", action: onPrimaryAction)
                     .buttonStyle(.bordered)
-            } else if let onNewNotebook, offersCreation {
-                HStack(spacing: 12) {
-                    Button(action: onNewNotebook) {
-                        Label("New Notebook", systemImage: "plus")
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .accessibilityIdentifier("library.empty.new-notebook")
-                    if let onImportDocument {
-                        Button(action: onImportDocument) {
-                            Label("Import PDF", systemImage: "square.and.arrow.down")
-                        }
-                        .buttonStyle(.bordered)
-                        .accessibilityIdentifier("library.empty.import")
-                    }
-                }
-                .padding(.top, 4)
             } else if scope == .favorites || scope == .recent || scopeIsTag {
                 Button("Open Home", action: onPrimaryAction)
                     .buttonStyle(.bordered)
@@ -164,19 +139,19 @@ struct LibraryEmptyStateView: View {
         }
         return switch scope {
         case .home:
-            "Start creating your first note here."
+            "A clear page for your next idea."
         case .favorites:
-            "Your favorites will appear here."
+            "Star a note or folder to keep it close."
         case .recent:
-            "No notes were used in this time range."
+            "Open a note and it will appear here."
         case .tag:
-            "No notes with this tag yet."
+            "Add this tag to a note to see it here."
         case .trash:
             "Trash is empty."
         case .settings:
             ""
         case .folder:
-            "This folder is empty. Add something new or move an item here."
+            "Add something with +, or move an item into this folder."
         }
     }
 }
@@ -189,10 +164,9 @@ private struct LibraryEmptyArtwork: View {
 
     var body: some View {
         artwork
-            .frame(
-                width: kind.illustrationSize.width,
-                height: kind.illustrationSize.height
-            )
+            .frame(maxWidth: kind.illustrationSize.width)
+            .frame(maxWidth: .infinity)
+            .frame(height: kind.illustrationSize.height)
             .opacity(hasAppeared ? 0.96 : 0)
             .scaleEffect(reduceMotion || hasAppeared ? 1 : 0.978)
             .offset(y: reduceMotion || hasAppeared ? 0 : 6)
@@ -229,9 +203,8 @@ private struct LibraryEmptyArtwork: View {
     }
 
     private func rasterArtwork(named assetName: String) -> some View {
-        // The editorial assets carry their own restrained cream, ink, and
-        // pastel palette. Rendering those authored colors unchanged keeps skin
-        // tones and background fields stable in both Light and Dark Mode.
+        // Each asset catalog entry supplies a matching luminosity variant,
+        // allowing UIImage to resolve coordinated artwork in either mode.
         rasterImage(named: assetName)
     }
 
@@ -241,11 +214,12 @@ private struct LibraryEmptyArtwork: View {
             .interpolation(.high)
             .antialiased(true)
             .scaledToFit()
+            .frame(maxWidth: kind.illustrationSize.width)
     }
 }
 
-/// A temporary flat composition used only until `NotateEmptyFolder` is added
-/// to the asset catalog. It deliberately avoids texture and heavy shadows.
+/// A small native fallback if the folder illustration asset cannot be loaded.
+/// It deliberately avoids texture and heavy shadows.
 private struct LibraryEmptyFolderIllustration: View {
     @Environment(\.colorScheme) private var colorScheme
 

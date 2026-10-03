@@ -103,9 +103,15 @@ public struct LibraryRGBAColor: Codable, Equatable, Hashable, Sendable {
     }
 
     public static let folderBlue = LibraryRGBAColor(
-        red: 0.55,
-        green: 0.78,
-        blue: 1.00
+        red: 0.12,
+        green: 0.46,
+        blue: 0.96
+    )
+
+    public static let folderOrange = LibraryRGBAColor(
+        red: 0.93,
+        green: 0.32,
+        blue: 0.12
     )
 }
 

@@ -53,6 +53,11 @@ enum LibraryViewStyle: String, CaseIterable, Identifiable, Sendable {
     var title: String { self == .grid ? "Grid" : "List" }
 }
 
+struct LibraryScopeBrowsingState {
+    var viewStyle: LibraryViewStyle = .grid
+    var scrollPositionID: UUID?
+}
+
 enum LibraryAddKind: String, CaseIterable, Identifiable, Sendable {
     case quickNote
     case notebook
@@ -109,27 +114,37 @@ struct LibraryColorDraft: Hashable, Sendable {
     }
 
     static let folderDefault = LibraryColorDraft(
-        red: 0.55,
-        green: 0.78,
-        blue: 1.00
+        red: 0.12,
+        green: 0.46,
+        blue: 0.96
     )
-    static let blue = folderDefault
+    static let blue = LibraryColorDraft(red: 0.55, green: 0.78, blue: 1.00)
     static let coral = LibraryColorDraft(red: 0.96, green: 0.48, blue: 0.43)
     static let amber = LibraryColorDraft(red: 0.94, green: 0.67, blue: 0.24)
     static let mint = LibraryColorDraft(red: 0.33, green: 0.75, blue: 0.59)
     static let violet = LibraryColorDraft(red: 0.58, green: 0.46, blue: 0.88)
     static let rose = LibraryColorDraft(red: 0.89, green: 0.43, blue: 0.67)
 
+    // Folder swatches are intentionally a little quieter than the cover art.
+    // They remain recognizable on the large folder cards without competing
+    // with colorful notebook covers or the library's semantic navigation tints.
+    static let folderRed = LibraryColorDraft(red: 0.81, green: 0.35, blue: 0.37)
+    static let folderAmber = LibraryColorDraft(red: 0.78, green: 0.58, blue: 0.27)
+    static let folderGreen = LibraryColorDraft(red: 0.29, green: 0.50, blue: 0.42)
+    static let folderTeal = LibraryColorDraft(red: 0.31, green: 0.52, blue: 0.54)
+    static let folderBlue = LibraryColorDraft(red: 0.12, green: 0.46, blue: 0.96)
+    static let folderViolet = LibraryColorDraft(red: 0.47, green: 0.42, blue: 0.61)
+    static let folderRose = LibraryColorDraft(red: 0.72, green: 0.40, blue: 0.50)
+
     static let palette: [LibraryColorDraft] = [.blue, .coral, .amber, .mint, .violet, .rose]
     static let folderPalette: [LibraryColorDraft] = [
+        .folderRed,
         .folderDefault,
-        LibraryColorDraft(red: 1.00, green: 0.73, blue: 0.67),
-        LibraryColorDraft(red: 1.00, green: 0.85, blue: 0.52),
-        LibraryColorDraft(red: 0.61, green: 0.90, blue: 0.75),
-        LibraryColorDraft(red: 0.76, green: 0.68, blue: 0.98),
-        LibraryColorDraft(red: 1.00, green: 0.69, blue: 0.83),
-        LibraryColorDraft(red: 0.55, green: 0.88, blue: 0.90),
-        LibraryColorDraft(red: 0.66, green: 0.75, blue: 1.00),
+        .folderAmber,
+        .folderGreen,
+        .folderTeal,
+        .folderViolet,
+        .folderRose,
     ]
 }
 
@@ -394,7 +409,17 @@ final class LibraryAppSession {
     @ObservationIgnored private let currentDate: () -> Date
 
     var scope: LibraryScope = .home
-    var viewStyle: LibraryViewStyle = .grid
+    private var scopeBrowsingStates: [LibraryScope: LibraryScopeBrowsingState] = [:]
+    var viewStyle: LibraryViewStyle {
+        get { scopeBrowsingStates[scope]?.viewStyle ?? .grid }
+        set { scopeBrowsingStates[scope, default: LibraryScopeBrowsingState()].viewStyle = newValue }
+    }
+    var scrollPositionID: UUID? {
+        get { scopeBrowsingStates[scope]?.scrollPositionID }
+        set {
+            scopeBrowsingStates[scope, default: LibraryScopeBrowsingState()].scrollPositionID = newValue
+        }
+    }
     var sortField: LibrarySortField = .activity
     var sortOrder: LibrarySortDirection = .descending
     var recentPeriod: LibraryRecentPeriod = .thirtyDays
