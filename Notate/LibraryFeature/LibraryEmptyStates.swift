@@ -226,9 +226,10 @@ private struct LibraryEmptyFolderIllustration: View {
     var body: some View {
         ZStack {
             LibraryFolderArtwork(
-                symbolName: "folder",
+                symbolName: "basketball",
                 color: LibraryRGBAColor.folderBlue.swiftUIColor,
-                showsBackdrop: false
+                showsBackdrop: false,
+                placesGlyphOnFront: true
             )
             .frame(width: 214, height: 146)
             .offset(y: 22)

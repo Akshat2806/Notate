@@ -113,13 +113,22 @@ public struct LibraryRGBAColor: Codable, Equatable, Hashable, Sendable {
         green: 0.32,
         blue: 0.12
     )
+
+    public static let folderPink = LibraryRGBAColor(
+        red: 0.93,
+        green: 0.36,
+        blue: 0.68
+    )
 }
 
 public struct LibraryFolderSettings: Codable, Equatable, Hashable, Sendable {
     public var color: LibraryRGBAColor
     public var symbolName: String?
 
-    public init(color: LibraryRGBAColor = .folderBlue, symbolName: String? = nil) {
+    public init(
+        color: LibraryRGBAColor = .folderBlue,
+        symbolName: String? = "basketball"
+    ) {
         self.color = color
         self.symbolName = symbolName?.nilIfLibraryBlank
     }

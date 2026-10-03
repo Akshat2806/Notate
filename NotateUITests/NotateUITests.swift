@@ -35,9 +35,17 @@ final class NotateUITests: XCTestCase {
 
     @MainActor
     func testLaunchPerformance() throws {
-        // This measures how long it takes to launch your application.
+        let app = XCUIApplication()
+        app.launchEnvironment["NOTATE_UI_TESTING"] = "1"
         measure(metrics: [XCTApplicationLaunchMetric()]) {
-            XCUIApplication().launch()
+            app.launch()
+            XCTAssertTrue(
+                app.descendants(matching: .any)
+                    .matching(identifier: "library-browser")
+                    .firstMatch
+                    .waitForExistence(timeout: 10),
+                "The library should appear while required recovery work runs."
+            )
         }
     }
 }

@@ -153,12 +153,20 @@ struct LibraryFolderEditor: View {
     @State private var name: String
     @State private var selectedColor: LibraryColorDraft
     @State private var customColor: Color
+    @State private var hexColor: String
     @State private var symbolName: String
     @State private var appearanceTab: AppearanceTab = .color
     @FocusState private var isNameFocused: Bool
 
     private let symbols = [
         SymbolOption(name: "folder", label: "Folder"),
+        SymbolOption(name: "sparkles", label: "Sparkles"),
+        SymbolOption(name: "book.closed.fill", label: "Book"),
+        SymbolOption(name: "doc.text.fill", label: "Document"),
+        SymbolOption(name: "calendar", label: "Calendar"),
+        SymbolOption(name: "checklist", label: "Checklist"),
+        SymbolOption(name: "heart.fill", label: "Favorites"),
+        SymbolOption(name: "star.fill", label: "Star"),
         SymbolOption(name: "graduationcap", label: "Study"),
         SymbolOption(name: "briefcase", label: "Work"),
         SymbolOption(name: "paintpalette", label: "Art"),
@@ -167,13 +175,22 @@ struct LibraryFolderEditor: View {
         SymbolOption(name: "chevron.left.forwardslash.chevron.right", label: "Coding"),
         SymbolOption(name: "lightbulb", label: "Ideas"),
         SymbolOption(name: "person.crop.circle", label: "Personal"),
+        SymbolOption(name: "leaf.fill", label: "Nature"),
+        SymbolOption(name: "globe.americas.fill", label: "World"),
+        SymbolOption(name: "pencil", label: "Writing"),
+        SymbolOption(name: "wrench.and.screwdriver.fill", label: "Tools"),
+        SymbolOption(name: "cart.fill", label: "Shopping"),
+        SymbolOption(name: "fork.knife", label: "Food"),
+        SymbolOption(name: "house.fill", label: "Home"),
+        SymbolOption(name: "clock.fill", label: "Time"),
+        SymbolOption(name: "photo.fill", label: "Photos"),
     ]
 
     init(
         title: String,
         initialName: String = "",
         initialColor: LibraryColorDraft = .folderDefault,
-        initialSymbolName: String = "folder",
+        initialSymbolName: String = "basketball",
         initialItemCount: Int = 0,
         initialPreviewItems: [LibraryFolderPreviewItem] = [],
         thumbnailStore: LibraryAutomaticThumbnailStore = .shared,
@@ -187,6 +204,7 @@ struct LibraryFolderEditor: View {
         _name = State(initialValue: initialName)
         _selectedColor = State(initialValue: initialColor)
         _customColor = State(initialValue: initialColor.color)
+        _hexColor = State(initialValue: initialColor.hexadecimal)
         _symbolName = State(initialValue: initialSymbolName)
     }
 
@@ -317,6 +335,7 @@ struct LibraryFolderEditor: View {
                 Button {
                     selectedColor = color
                     customColor = color.color
+                    hexColor = color.hexadecimal
                 } label: {
                     Circle()
                         .fill(color.color)
@@ -357,10 +376,35 @@ struct LibraryFolderEditor: View {
             .accessibilityLabel("Custom folder color")
             .onChange(of: customColor) { _, value in
                 selectedColor = LibraryColorDraft(value)
+                hexColor = selectedColor.hexadecimal
             }
         }
+
+        HStack(spacing: 10) {
+            Text("HEX")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            TextField("#RRGGBB", text: $hexColor)
+                .font(.system(.body, design: .monospaced))
+                .textInputAutocapitalization(.characters)
+                .autocorrectionDisabled()
+                .submitLabel(.done)
+                .accessibilityLabel("Exact folder color hex value")
+                .onChange(of: hexColor) { _, value in
+                    guard let color = LibraryColorDraft(hexadecimal: value) else { return }
+                    selectedColor = color
+                    customColor = color.color
+                }
+            RoundedRectangle(cornerRadius: 8)
+                .fill(selectedColor.color)
+                .frame(width: 42, height: 28)
+                .overlay { RoundedRectangle(cornerRadius: 8).stroke(.primary.opacity(0.14)) }
+                .accessibilityHidden(true)
+        }
+        .padding(.horizontal, 4)
     }
 
+    @ViewBuilder
     private var folderIconGrid: some View {
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 58))], spacing: 10) {
             ForEach(symbols) { symbol in
@@ -399,6 +443,8 @@ struct LibraryFolderEditor: View {
             }
         }
         .padding(.vertical, 6)
+
+
     }
 
     private func commit() {
@@ -407,7 +453,7 @@ struct LibraryFolderEditor: View {
             LibraryFolderDraft(
                 name: trimmedName,
                 color: selectedColor,
-                symbolName: symbolName
+                symbolName: symbolName,
             )
         )
         dismiss()
@@ -432,8 +478,7 @@ private struct LibraryFolderEditorPreview: View {
                 previewItems: previewItems,
                 thumbnailStore: thumbnailStore
             )
-            .aspectRatio(4.0 / 3.0, contentMode: .fit)
-            .scaleEffect(0.62)
+            .aspectRatio(NotateDesign.Library.Shelf.artworkAspectRatio, contentMode: .fit)
 
             Text(title)
                 .font(.system(.subheadline, weight: .semibold))
@@ -1711,6 +1756,22 @@ private struct LibrarySettingsSection: View {
 
 
 
+private extension LibraryColorDraft {
+    var hexadecimal: String {
+        String(format: "#%02X%02X%02X", Int((red * 255).rounded()),
+               Int((green * 255).rounded()), Int((blue * 255).rounded()))
+    }
+
+    init?(hexadecimal: String) {
+        let digits = hexadecimal.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "#", with: "")
+        guard digits.count == 6, let value = UInt32(digits, radix: 16) else { return nil }
+        self.init(red: Double((value >> 16) & 0xFF) / 255,
+                  green: Double((value >> 8) & 0xFF) / 255,
+                  blue: Double(value & 0xFF) / 255)
+    }
+}
+
 private struct LibraryPrivacyPolicyView: View {
     private let policy: AttributedString
 
@@ -1787,8 +1848,8 @@ extension LibraryColorDraft {
         if self == .rose { return "Rose" }
 
         let folderNames = [
-            "Red", "Blue", "Amber", "Green",
-            "Teal", "Violet", "Rose",
+            "Blue", "Yellow", "Orange", "Red", "Green",
+            "Teal", "Violet", "Pink", "Rose",
         ]
         if let index = Self.folderPalette.firstIndex(of: self) {
             return folderNames[index]

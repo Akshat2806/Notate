@@ -62,7 +62,7 @@ struct LibraryBrowserView: View {
             .zIndex(1)
         }
 
-        if session.isSelectionMode {
+        if session.isSelectionMode && session.canMutate {
             selectionActions
         } else if session.canCreateContent {
             if shouldShowFirstCreateCoachmark {
@@ -112,10 +112,14 @@ struct LibraryBrowserView: View {
                 restoreAddFocusWhenReady()
             }
         }
-        .onAppear(perform: recordExistingLibraryItems)
-        .onChange(of: successfullyCreatedItemIDs) { _, itemIDs in
-            if itemIDs.isEmpty == false { hasCreatedFirstLibraryItem = true }
+        .onAppear {
+            NotateLaunchInstrumentation.endLaunchToLibraryVisibility()
+            recordExistingLibraryItems()
         }
+        .onChange(of: session.repository.readyItemCount) { _, count in
+            if count > 0 { hasCreatedFirstLibraryItem = true }
+        }
+        .accessibilityIdentifier("library-browser")
     }
 
     @ViewBuilder
@@ -158,6 +162,7 @@ struct LibraryBrowserView: View {
                 }
                 .font(.footnote.weight(.semibold))
                 .accessibilityIdentifier("library.trash.empty")
+                .disabled(session.canMutate == false)
             }
         }
         .padding(.horizontal, NotateDesign.Spacing.page)
@@ -195,7 +200,7 @@ struct LibraryBrowserView: View {
                 LazyVGrid(
                     columns: gridColumns(for: proxy.size.width),
                     alignment: gridAlignment,
-                    spacing: NotateDesign.Spacing.page
+                    spacing: NotateDesign.Library.Shelf.rowSpacing
                 ) {
                     if session.visibleItems.isEmpty == false {
                         Section {
@@ -285,7 +290,7 @@ struct LibraryBrowserView: View {
                 LazyVGrid(
                     columns: gridColumns(for: proxy.size.width),
                     alignment: gridAlignment,
-                    spacing: NotateDesign.Spacing.page
+                    spacing: NotateDesign.Library.Shelf.rowSpacing
                 ) {
                     ForEach(session.visibleItems) { item in
                         LibraryGridCard(
@@ -331,7 +336,7 @@ struct LibraryBrowserView: View {
     private func gridColumns(for totalWidth: CGFloat) -> [GridItem] {
         let cappedWidth = min(totalWidth, NotateLibraryDesign.contentMaximumWidth)
         let contentWidth = max(0, cappedWidth - (gridHorizontalPadding * 2))
-        let twoColumnMinimum = (gridCardMinimumWidth * 2) + 22
+        let twoColumnMinimum = (gridCardMinimumWidth * 2) + NotateDesign.Library.Shelf.columnSpacing
 
         // Regular-width split-view columns can still be narrower than two
         // comfortable cards. Accessibility sizes also benefit from a single
@@ -351,7 +356,7 @@ struct LibraryBrowserView: View {
             ]
         }
 
-        let columnSpacing: CGFloat = 22
+        let columnSpacing = NotateDesign.Library.Shelf.columnSpacing
         let fittingColumnCount = max(
             1,
             Int((contentWidth + columnSpacing) / (gridCardMinimumWidth + columnSpacing))
@@ -488,13 +493,6 @@ struct LibraryBrowserView: View {
         if session.repository.items.contains(where: isPreviouslyCreatedItem) {
             hasCreatedFirstLibraryItem = true
         }
-    }
-
-    private var successfullyCreatedItemIDs: [UUID] {
-        session.repository.items
-            .filter { $0.payloadState == .ready }
-            .map(\.id)
-            .sorted { $0.uuidString < $1.uuidString }
     }
 
     private func isPreviouslyCreatedItem(_ item: LibraryItemRecord) -> Bool {
@@ -736,8 +734,9 @@ private struct LibraryDeletedPageCard: View {
             .contentShape(.rect)
         }
         .buttonStyle(.plain)
+        .disabled(session.canMutate == false)
         .contextMenu {
-            if session.isSelectionMode == false {
+            if session.isSelectionMode == false && session.canMutate {
                 actions
             }
         }
@@ -824,6 +823,7 @@ private struct LibraryDeletedPageRow: View {
                 .labelStyle(.iconOnly)
                 .buttonStyle(.borderless)
                 .notateMinimumHitTarget()
+                .disabled(session.canMutate == false)
 
                 Button("Delete", systemImage: "trash", role: .destructive) {
                     confirmsPermanentDeletion = true
@@ -831,6 +831,7 @@ private struct LibraryDeletedPageRow: View {
                 .labelStyle(.iconOnly)
                 .buttonStyle(.borderless)
                 .notateMinimumHitTarget()
+                .disabled(session.canMutate == false)
             }
         }
         .confirmationDialog(

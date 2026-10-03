@@ -134,10 +134,14 @@ public final class LibraryRepository {
     @ObservationIgnored private let searchableTextSearchScanLimit: Int
     @ObservationIgnored private let duplicatedSearchableTextLimit: Int
     @ObservationIgnored private var assignments: [TagAssignment] = []
+    @ObservationIgnored private var hasLoadedAssignments = false
+    @ObservationIgnored private var hasLoadedDeletedPages = false
+    @ObservationIgnored private var hasLoadedAllItems = false
 
     public private(set) var items: [LibraryItemRecord] = []
     public private(set) var tags: [TagRecord] = []
     public private(set) var deletedPages: [DeletedPageRecord] = []
+    private(set) var readyItemCount = 0
     /// A save has already succeeded when this is populated. Mutations do not
     /// throw for a post-commit cache refresh failure because retrying them
     /// could duplicate durable work; callers can explicitly call `refresh()`.
@@ -150,7 +154,11 @@ public final class LibraryRepository {
         duplicatedSearchableTextLimit = Self.maximumDuplicatedSearchableTextUTF8ByteCount
         modelContext = modelContainer.mainContext
         modelContext.autosaveEnabled = false
-        try refresh()
+        try refresh(
+            includeAssignments: false,
+            includeDeletedPages: false,
+            loadAllItems: false
+        )
         try installPresetTags()
     }
 
@@ -161,7 +169,11 @@ public final class LibraryRepository {
         duplicatedSearchableTextLimit = Self.maximumDuplicatedSearchableTextUTF8ByteCount
         self.modelContext = modelContext
         modelContext.autosaveEnabled = false
-        try refresh()
+        try refresh(
+            includeAssignments: false,
+            includeDeletedPages: false,
+            loadAllItems: false
+        )
         try installPresetTags()
     }
 
@@ -177,7 +189,11 @@ public final class LibraryRepository {
         duplicatedSearchableTextLimit = Self.maximumDuplicatedSearchableTextUTF8ByteCount
         modelContext = modelContainer.mainContext
         modelContext.autosaveEnabled = false
-        try refresh()
+        try refresh(
+            includeAssignments: false,
+            includeDeletedPages: false,
+            loadAllItems: false
+        )
         try installPresetTags()
     }
 
@@ -201,28 +217,89 @@ public final class LibraryRepository {
         )
         modelContext = modelContainer.mainContext
         modelContext.autosaveEnabled = false
-        try refresh()
+        try refresh(
+            includeAssignments: false,
+            includeDeletedPages: false,
+            loadAllItems: false
+        )
         try installPresetTags()
     }
 
     // MARK: - Queries
 
     public func refresh() throws {
+        try refresh(includeAssignments: true, includeDeletedPages: true)
+    }
+
+    /// Startup needs the item and tag catalog immediately, while assignments
+    /// and page tombstones are only needed for tagged searches and recovery.
+    /// Fetch those two collections after the first library frame is available.
+    func loadDeferredCatalogMetadata() throws {
+        do {
+            try loadAssignmentsIfNeeded()
+            if hasLoadedDeletedPages == false {
+                deletedPages = try modelContext.fetch(FetchDescriptor<DeletedPageRecord>())
+                    .sorted { $0.deletedAt > $1.deletedAt }
+                hasLoadedDeletedPages = true
+            }
+            cacheRefreshFailureDescription = nil
+        } catch {
+            cacheRefreshFailureDescription = String(describing: error)
+            throw map(error)
+        }
+    }
+
+    /// The home screen only needs top-level items. Recovery and full-library
+    /// operations call this after the first frame, so large nested libraries
+    /// do not have to materialize every model before the library can appear.
+    func loadCompleteItemCatalog() throws {
+        guard hasLoadedAllItems == false else { return }
         do {
             items = try modelContext.fetch(FetchDescriptor<LibraryItemRecord>())
+            readyItemCount = items.lazy.filter { $0.payloadState == .ready }.count
+            hasLoadedAllItems = true
+        } catch {
+            cacheRefreshFailureDescription = String(describing: error)
+            throw map(error)
+        }
+    }
+
+    private func refresh(
+        includeAssignments: Bool,
+        includeDeletedPages: Bool,
+        loadAllItems: Bool = true
+    ) throws {
+        do {
+            if loadAllItems {
+                items = try modelContext.fetch(FetchDescriptor<LibraryItemRecord>())
+                hasLoadedAllItems = true
+            } else {
+                var rootDescriptor = FetchDescriptor<LibraryItemRecord>(
+                    predicate: #Predicate { $0.parentID == nil }
+                )
+                items = try modelContext.fetch(rootDescriptor)
+                hasLoadedAllItems = false
+            }
+            readyItemCount = items.lazy.filter { $0.payloadState == .ready }.count
             tags = try modelContext.fetch(FetchDescriptor<TagRecord>())
                 .sorted { $0.normalizedName < $1.normalizedName }
-            var assignmentDescriptor = FetchDescriptor<TagAssignment>()
-            assignmentDescriptor.fetchLimit = tagAssignmentLimit + 1
-            let fetchedAssignments = try modelContext.fetch(assignmentDescriptor)
-            guard fetchedAssignments.count <= tagAssignmentLimit else {
-                throw LibraryRepositoryError.maximumTagAssignmentCountExceeded(
-                    maximum: tagAssignmentLimit
-                )
+            if includeAssignments {
+                var assignmentDescriptor = FetchDescriptor<TagAssignment>()
+                assignmentDescriptor.fetchLimit = tagAssignmentLimit + 1
+                let fetchedAssignments = try modelContext.fetch(assignmentDescriptor)
+                guard fetchedAssignments.count <= tagAssignmentLimit else {
+                    throw LibraryRepositoryError.maximumTagAssignmentCountExceeded(
+                        maximum: tagAssignmentLimit
+                    )
+                }
+                assignments = fetchedAssignments
+                hasLoadedAssignments = true
             }
-            assignments = fetchedAssignments
-            deletedPages = try modelContext.fetch(FetchDescriptor<DeletedPageRecord>())
-                .sorted { $0.deletedAt > $1.deletedAt }
+            if includeDeletedPages {
+                deletedPages = try modelContext.fetch(FetchDescriptor<DeletedPageRecord>())
+                    .sorted { $0.deletedAt > $1.deletedAt }
+                hasLoadedDeletedPages = true
+            }
             cacheRefreshFailureDescription = nil
         } catch {
             cacheRefreshFailureDescription = String(describing: error)
@@ -231,7 +308,21 @@ public final class LibraryRepository {
     }
 
     public func item(id: UUID) -> LibraryItemRecord? {
-        items.first { $0.id == id }
+        if let record = items.first(where: { $0.id == id }) { return record }
+        guard hasLoadedAllItems == false else { return nil }
+        do {
+            let requestedID = id
+            let descriptor = FetchDescriptor<LibraryItemRecord>(
+                predicate: #Predicate { $0.id == requestedID }
+            )
+            guard let record = try modelContext.fetch(descriptor).first else { return nil }
+            items.append(record)
+            if record.payloadState == .ready { readyItemCount += 1 }
+            return record
+        } catch {
+            cacheRefreshFailureDescription = String(describing: error)
+            return nil
+        }
     }
 
     public func tag(id: UUID) -> TagRecord? {
@@ -239,14 +330,31 @@ public final class LibraryRepository {
     }
 
     public func rootItems(sort: LibrarySort = .activity) -> [LibraryItemRecord] {
-        sorted(activeItems.filter { $0.parentID == nil }, by: sort)
+        sorted(items.filter {
+            !$0.isTrashed && $0.kind.isLegacyLibraryItem == false && $0.parentID == nil
+        }, by: sort)
     }
 
     public func children(
         of parentID: UUID,
         sort: LibrarySort = .activity
     ) -> [LibraryItemRecord] {
-        sorted(activeItems.filter { $0.parentID == parentID }, by: sort)
+        if hasLoadedAllItems == false {
+            do {
+                let requestedParentID = parentID
+                let descriptor = FetchDescriptor<LibraryItemRecord>(
+                    predicate: #Predicate { $0.parentID == requestedParentID }
+                )
+                appendItemsIfMissing(try modelContext.fetch(descriptor))
+            } catch {
+                cacheRefreshFailureDescription = String(describing: error)
+            }
+        }
+        return sorted(items.filter {
+            !$0.isTrashed
+                && $0.kind.isLegacyLibraryItem == false
+                && $0.parentID == parentID
+        }, by: sort)
     }
 
     public func subtree(
@@ -254,12 +362,14 @@ public final class LibraryRepository {
         includingRoot: Bool = true,
         includeTrashed: Bool = false
     ) -> [LibraryItemRecord] {
+        ensureCompleteItemCatalogLoaded()
         let candidates = includeTrashed ? items : activeItems
         let ordered = subtreeRecords(rootID: itemID, candidates: candidates)
         return includingRoot ? ordered : Array(ordered.dropFirst())
     }
 
     public func favorites(sort: LibrarySort = .activity) -> [LibraryItemRecord] {
+        ensureCompleteItemCatalogLoaded()
         sorted(activeItems.filter(\.isFavorite), by: sort)
     }
 
@@ -267,6 +377,7 @@ public final class LibraryRepository {
         activeSince cutoff: Date,
         sort: LibrarySort = .activity
     ) -> [LibraryItemRecord] {
+        ensureCompleteItemCatalogLoaded()
         sorted(
             activeItems.filter { item in
                 item.kind != .folder && item.activityDate >= cutoff
@@ -279,11 +390,14 @@ public final class LibraryRepository {
         taggedWith tagID: UUID,
         sort: LibrarySort = .activity
     ) -> [LibraryItemRecord] {
+        ensureCompleteItemCatalogLoaded()
+        ensureAssignmentsLoaded()
         let itemIDs = Set(assignments.lazy.filter { $0.tagID == tagID }.map(\.itemID))
         return sorted(activeItems.filter { itemIDs.contains($0.id) }, by: sort)
     }
 
     public func tags(for itemID: UUID) -> [TagRecord] {
+        ensureAssignmentsLoaded()
         let tagIDs = Set(assignments.lazy.filter { $0.itemID == itemID }.map(\.tagID))
         return tags.filter { tagIDs.contains($0.id) }
             .sorted { $0.normalizedName < $1.normalizedName }
@@ -295,6 +409,7 @@ public final class LibraryRepository {
         includeDescendants: Bool = false,
         sort: LibrarySort = .activity
     ) -> [LibraryItemRecord] {
+        ensureCompleteItemCatalogLoaded()
         let trashed = items.filter { item in
             guard item.kind.isLegacyLibraryItem == false else { return false }
             guard let metadata = item.trashMetadata else { return false }
@@ -304,6 +419,7 @@ public final class LibraryRepository {
     }
 
     public func deletedPages(ownerItemID: UUID? = nil) -> [DeletedPageRecord] {
+        ensureDeletedPagesLoaded()
         deletedPages.filter { ownerItemID == nil || $0.ownerItemID == ownerItemID }
             .sorted { lhs, rhs in
                 if lhs.deletedAt != rhs.deletedAt { return lhs.deletedAt > rhs.deletedAt }
@@ -312,6 +428,7 @@ public final class LibraryRepository {
     }
 
     public func deletedPageAsset(id: UUID) throws -> LibraryDeletedPageAsset {
+        try loadDeletedPagesIfNeeded()
         guard let record = deletedPages.first(where: { $0.id == id }) else {
             throw LibraryRepositoryError.deletedPageNotFound(id)
         }
@@ -365,6 +482,7 @@ public final class LibraryRepository {
         let orderedScope = sorted(scope, by: sort)
         guard !normalizedQuery.isEmpty else { return orderedScope }
 
+        ensureAssignmentsLoaded()
         let matchingTagIDs = Set(tags.lazy
             .filter { $0.normalizedName.localizedStandardContains(normalizedQuery) }
             .map(\.id))
@@ -437,6 +555,7 @@ public final class LibraryRepository {
         pageCount: Int = 0,
         now: Date = .now
     ) throws -> LibraryItemRecord {
+        try loadCompleteItemCatalog()
         let resolvedName = try validatedName(name)
         try validateCover(coverChoice)
         if let folderSettings {
@@ -1013,7 +1132,10 @@ public final class LibraryRepository {
         }
         guard missing.isEmpty == false else { return }
 
-        try mutate {
+        try mutate(
+            loadDeferredMetadata: false,
+            loadCompleteItemCatalog: false
+        ) {
             for preset in missing {
                 modelContext.insert(
                     TagRecord(
@@ -1071,6 +1193,7 @@ public final class LibraryRepository {
 
     public func deleteTag(id: UUID) throws {
         guard let record = tag(id: id) else { throw LibraryRepositoryError.tagNotFound(id) }
+        try loadAssignmentsIfNeeded()
         try mutate {
             for assignment in assignments where assignment.tagID == id {
                 modelContext.delete(assignment)
@@ -1087,6 +1210,7 @@ public final class LibraryRepository {
     ) throws {
         _ = try requireActiveItem(itemID)
         guard tag(id: tagID) != nil else { throw LibraryRepositoryError.tagNotFound(tagID) }
+        try loadAssignmentsIfNeeded()
         guard !assignments.contains(where: {
             $0.itemID == itemID && $0.tagID == tagID
         }) else { return }
@@ -1100,6 +1224,7 @@ public final class LibraryRepository {
     public func removeTag(tagID: UUID, from itemID: UUID) throws {
         guard tag(id: tagID) != nil else { throw LibraryRepositoryError.tagNotFound(tagID) }
         _ = try requireItem(itemID)
+        try loadAssignmentsIfNeeded()
         guard let assignment = assignments.first(where: {
             $0.itemID == itemID && $0.tagID == tagID
         }) else { return }
@@ -1164,6 +1289,7 @@ public final class LibraryRepository {
     /// removed.
     public func makeIncompletePayloadReconciliationPlan()
         -> LibraryIncompletePayloadReconciliationPlan {
+        ensureCompleteItemCatalogLoaded()
         let anchors = Set(activeItems.lazy.filter {
             $0.pendingDuplicationID != nil
                 || $0.payloadState == .creating
@@ -1320,6 +1446,8 @@ public final class LibraryRepository {
     /// those assets to recoverable storage, then acknowledge with
     /// `commitPurge(_)`.
     public func makePurgePlan(now: Date = .now) -> LibraryPurgePlan {
+        ensureCompleteItemCatalogLoaded()
+        ensureDeletedPagesLoaded()
         let expiredGroups = Set(items.compactMap { record -> UUID? in
             guard let metadata = record.trashMetadata,
                 metadata.purgeAfter <= now else { return nil }
@@ -1344,6 +1472,8 @@ public final class LibraryRepository {
     /// Captures obsolete freeform Canvas records without mutating the catalog.
     /// Callers stage complete item directories in recovery storage first.
     public func makeLegacyCanvasRemovalPlan() -> LibraryPurgePlan {
+        ensureCompleteItemCatalogLoaded()
+        ensureDeletedPagesLoaded()
         let doomedItems = items.filter { $0.kind == .canvas }
         let doomedIDs = Set(doomedItems.map(\.id))
         let linkedPages = deletedPages.filter { doomedIDs.contains($0.ownerItemID) }
@@ -1470,6 +1600,7 @@ public final class LibraryRepository {
     public func deletedPageRestoration(
         id: UUID
     ) throws -> LibraryDeletedPageRestoration {
+        try loadDeletedPagesIfNeeded()
         guard let record = deletedPages.first(where: { $0.id == id }) else {
             throw LibraryRepositoryError.deletedPageNotFound(id)
         }
@@ -1492,6 +1623,7 @@ public final class LibraryRepository {
         id: UUID,
         now: Date = .now
     ) throws {
+        try loadDeletedPagesIfNeeded()
         guard let record = deletedPages.first(where: { $0.id == id }) else {
             throw LibraryRepositoryError.deletedPageNotFound(id)
         }
@@ -1514,6 +1646,7 @@ public final class LibraryRepository {
         id: UUID,
         now: Date = .now
     ) throws -> LibraryDeletedPageAsset {
+        try loadDeletedPagesIfNeeded()
         guard let record = deletedPages.first(where: { $0.id == id }) else {
             throw LibraryRepositoryError.deletedPageNotFound(id)
         }
@@ -1536,6 +1669,7 @@ public final class LibraryRepository {
     public func permanentlyDeletePage(
         id: UUID
     ) throws -> LibraryDeletedPageAsset {
+        try loadDeletedPagesIfNeeded()
         guard let record = deletedPages.first(where: { $0.id == id }) else {
             throw LibraryRepositoryError.deletedPageNotFound(id)
         }
@@ -1549,15 +1683,38 @@ public final class LibraryRepository {
     // MARK: - Validation and mechanics
 
     private var activeItems: [LibraryItemRecord] {
+        ensureCompleteItemCatalogLoaded()
         items.filter { !$0.isTrashed && $0.kind.isLegacyLibraryItem == false }
     }
 
+    private func ensureCompleteItemCatalogLoaded() {
+        do {
+            try loadCompleteItemCatalog()
+        } catch {
+            cacheRefreshFailureDescription = String(describing: error)
+        }
+    }
+
+    private func appendItemsIfMissing(_ fetchedItems: [LibraryItemRecord]) {
+        let knownIDs = Set(items.map(\.id))
+        let missing = fetchedItems.filter { !knownIDs.contains($0.id) }
+        readyItemCount += missing.lazy.filter { $0.payloadState == .ready }.count
+        items.append(contentsOf: missing)
+    }
+
     private var itemIndex: [UUID: LibraryItemRecord] {
+        ensureCompleteItemCatalogLoaded()
         Dictionary(
             items.map { ($0.id, $0) },
             uniquingKeysWith: { current, _ in current }
         )
     }
+
+    var hasLoadedDeferredCatalogMetadataForTesting: Bool {
+        hasLoadedAssignments && hasLoadedDeletedPages
+    }
+
+    var hasLoadedAllItemsForTesting: Bool { hasLoadedAllItems }
 
     private static func pageCountAfterRemovingPage(_ pageCount: Int) -> Int {
         guard pageCount > 0 else { return 0 }
@@ -1571,6 +1728,7 @@ public final class LibraryRepository {
     }
 
     private func validateTagAssignmentCapacity(adding additionalCount: Int) throws {
+        try loadAssignmentsIfNeeded()
         guard additionalCount >= 0,
             assignments.count <= tagAssignmentLimit,
             additionalCount <= tagAssignmentLimit - assignments.count else {
@@ -1594,6 +1752,7 @@ public final class LibraryRepository {
     }
 
     private func requireItem(_ id: UUID) throws -> LibraryItemRecord {
+        try loadCompleteItemCatalog()
         guard let record = item(id: id) else {
             throw LibraryRepositoryError.itemNotFound(id)
         }
@@ -2004,7 +2163,20 @@ public final class LibraryRepository {
     }
 
     @discardableResult
-    private func mutate<Result>(_ work: () throws -> Result) throws -> Result {
+    private func mutate<Result>(
+        loadDeferredMetadata: Bool = true,
+        loadCompleteItemCatalog: Bool = true,
+        _ work: () throws -> Result
+    ) throws -> Result {
+        // Mutations validate hierarchy and relationship invariants against the
+        // complete catalog. The first write after startup hydrates deferred
+        // metadata before entering the transaction.
+        if loadCompleteItemCatalog {
+            try self.loadCompleteItemCatalog()
+        }
+        if loadDeferredMetadata {
+            try loadDeferredCatalogMetadata()
+        }
         let result: Result
         do {
             // One explicit SwiftData save is the transaction boundary. All
@@ -2015,15 +2187,66 @@ public final class LibraryRepository {
             try modelContext.save()
         } catch {
             modelContext.rollback()
-            try? refresh()
+            try? refresh(
+                includeAssignments: hasLoadedAssignments,
+                includeDeletedPages: hasLoadedDeletedPages,
+                loadAllItems: hasLoadedAllItems
+            )
             throw map(error)
         }
 
         // The save above is already durable. A fetch failure must not make the
         // mutation look unsuccessful, because retrying could duplicate work.
         // `refresh()` records the diagnostic for the host to surface/retry.
-        try? refresh()
+        try? refresh(
+            includeAssignments: hasLoadedAssignments,
+            includeDeletedPages: hasLoadedDeletedPages,
+            loadAllItems: hasLoadedAllItems
+        )
         return result
+    }
+
+    private func ensureAssignmentsLoaded() {
+        do {
+            try loadAssignmentsIfNeeded()
+        } catch {
+            cacheRefreshFailureDescription = String(describing: error)
+        }
+    }
+
+    private func loadAssignmentsIfNeeded() throws {
+        guard hasLoadedAssignments else {
+            var descriptor = FetchDescriptor<TagAssignment>()
+            descriptor.fetchLimit = tagAssignmentLimit + 1
+            let fetched = try modelContext.fetch(descriptor)
+            guard fetched.count <= tagAssignmentLimit else {
+                throw LibraryRepositoryError.maximumTagAssignmentCountExceeded(
+                    maximum: tagAssignmentLimit
+                )
+            }
+            assignments = fetched
+            hasLoadedAssignments = true
+        }
+    }
+
+    private func ensureDeletedPagesLoaded() {
+        do {
+            try loadDeletedPagesIfNeeded()
+        } catch {
+            cacheRefreshFailureDescription = String(describing: error)
+        }
+    }
+
+    private func loadDeletedPagesIfNeeded() throws {
+        guard hasLoadedDeletedPages == false else { return }
+        do {
+            deletedPages = try modelContext.fetch(FetchDescriptor<DeletedPageRecord>())
+                .sorted { $0.deletedAt > $1.deletedAt }
+            hasLoadedDeletedPages = true
+        } catch {
+            cacheRefreshFailureDescription = String(describing: error)
+            throw map(error)
+        }
     }
 
     private func map(_ error: Error) -> LibraryRepositoryError {

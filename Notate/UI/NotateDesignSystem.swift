@@ -134,6 +134,24 @@ enum NotateDesign {
             static let contentMaximumWidth: CGFloat = 1_520
         }
 
+        /// A shared shelf lane, independent of the physical format inside it.
+        /// New sheet formats supply their own ratio and fit into this envelope.
+        enum Shelf {
+            static let artworkAspectRatio: CGFloat = 1
+            static let notebookAspectRatio: CGFloat = 3 / 4
+            static let aSeriesAspectRatio: CGFloat = 1 / CGFloat(2).squareRoot()
+            static let folderAspectRatio: CGFloat = 1.28
+            static let artworkInset: CGFloat = 6
+            static let labelSpacing: CGFloat = 12
+            static let metadataSpacing: CGFloat = 4
+            static let titleHeight: CGFloat = 40
+            static let columnSpacing: CGFloat = 28
+            static let rowSpacing: CGFloat = 40
+            static let folderWidthFraction: CGFloat = 0.94
+            static let folderFrontTop: CGFloat = 0.16
+            static let folderCornerFraction: CGFloat = 0.065
+        }
+
         static let minimumHitTarget = NotateDesign.Control.minimumHitTarget
         static let floatingActionSize = NotateDesign.Control.floatingAction
         static let sidebarWidth = Layout.sidebarWidth
