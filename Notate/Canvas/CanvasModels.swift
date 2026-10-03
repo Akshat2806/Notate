@@ -2078,18 +2078,12 @@ public enum CanvasConstants {
     public static let boundaryPullMaximumReleaseVelocityPointsPerSecond: CGFloat = 450
     public static let boundaryPullVerticalDominance: CGFloat = 1.25
     /// The neutral editing workspace behind authored notebook pages. This is
-    /// deliberately close to paper in Light Mode; page elevation and the
-    /// hairline carry the hierarchy without turning most of the editor into a
-    /// dark beige mat. It is UI chrome, not a paper tone, and must never leak
-    /// into page persistence or export rendering.
+    /// deliberately close to paper in Light Mode and follows the system black
+    /// surface in Dark Mode, matching the Library. It is UI chrome, not a paper
+    /// tone, and must never leak into page persistence or export rendering.
     public static let pagedWorkspaceBackground = UIColor { traits in
         if traits.userInterfaceStyle == .dark {
-            return UIColor(
-                red: 36 / 255,
-                green: 35 / 255,
-                blue: 33 / 255,
-                alpha: 1
-            )
+            return .systemBackground
         }
         return UIColor(
             red: 247 / 255,
@@ -2106,18 +2100,11 @@ public enum CanvasConstants {
         alpha: 1
     )
 
-    /// Infinite boards should feel like a single uninterrupted surface in
-    /// Light Mode, matching the white-board convention used by Freeform and
-    /// Goodnotes. Dark Mode keeps the existing neutral surround because the
-    /// authored paper itself remains a light drawing surface.
+    /// Infinite boards use the same Light and Dark workspace surfaces as paged
+    /// documents; the authored paper itself remains independent of this chrome.
     public static let freeformWorkspaceBackground = UIColor { traits in
         if traits.userInterfaceStyle == .dark {
-            return UIColor(
-                red: 36 / 255,
-                green: 35 / 255,
-                blue: 33 / 255,
-                alpha: 1
-            )
+            return .systemBackground
         }
         return paperBackground
     }

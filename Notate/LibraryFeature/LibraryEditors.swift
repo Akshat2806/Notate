@@ -30,21 +30,29 @@ struct LibraryTagEditor: View {
         NavigationStack {
             Form {
                 Section("Color") {
-                    ScrollView(.horizontal) {
-                        HStack(spacing: NotateDesign.Spacing.control) {
-                            ForEach(LibraryColorDraft.palette, id: \.self) { color in
-                                colorButton(color)
-                            }
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 46))], spacing: 8) {
+                        ForEach(LibraryColorDraft.palette, id: \.self) { color in
+                            colorButton(color)
                         }
-                        ColorPicker("Custom Color", selection: $customColor, supportsOpacity: false)
+                        ColorPicker(selection: $customColor, supportsOpacity: false) {
+                            EmptyView()
+                        }
                             .labelsHidden()
-                            .notateMinimumHitTarget()
+                            .frame(width: 38, height: 38)
+                            .frame(minWidth: 46, minHeight: 46)
+                            .background(customColor.opacity(0.2), in: Circle())
+                            .overlay {
+                                if LibraryColorDraft.palette.contains(selectedColor) == false {
+                                    Image(systemName: "checkmark")
+                                        .font(.caption.bold())
+                                        .foregroundStyle(Color.primary)
+                                }
+                            }
                             .accessibilityLabel("Custom tag color")
                             .onChange(of: customColor) { _, value in
                                 selectedColor = LibraryColorDraft(value)
                             }
                     }
-                    .scrollIndicators(.hidden)
                 }
                 Section("Name") {
                     TextField("Tag name", text: $name)
@@ -93,8 +101,8 @@ struct LibraryTagEditor: View {
             }
             .frame(width: 30, height: 30)
             .frame(
-                minWidth: NotateDesign.Control.minimumHitTarget,
-                minHeight: NotateDesign.Control.minimumHitTarget
+                minWidth: 46,
+                minHeight: 46
             )
             .contentShape(Circle())
         }
@@ -138,6 +146,9 @@ struct LibraryFolderEditor: View {
 
     let title: String
     let onCommit: (LibraryFolderDraft) -> Void
+    private let initialItemCount: Int
+    private let initialPreviewItems: [LibraryFolderPreviewItem]
+    private let thumbnailStore: LibraryAutomaticThumbnailStore
 
     @State private var name: String
     @State private var selectedColor: LibraryColorDraft
@@ -163,10 +174,16 @@ struct LibraryFolderEditor: View {
         initialName: String = "",
         initialColor: LibraryColorDraft = .folderDefault,
         initialSymbolName: String = "folder",
+        initialItemCount: Int = 0,
+        initialPreviewItems: [LibraryFolderPreviewItem] = [],
+        thumbnailStore: LibraryAutomaticThumbnailStore = .shared,
         onCommit: @escaping (LibraryFolderDraft) -> Void
     ) {
         self.title = title
         self.onCommit = onCommit
+        self.initialItemCount = initialItemCount
+        self.initialPreviewItems = initialPreviewItems
+        self.thumbnailStore = thumbnailStore
         _name = State(initialValue: initialName)
         _selectedColor = State(initialValue: initialColor)
         _customColor = State(initialValue: initialColor.color)
@@ -178,7 +195,14 @@ struct LibraryFolderEditor: View {
             ZStack(alignment: .top) {
                 ScrollView {
                     VStack(spacing: 18) {
-                        LibraryFolderEditorPreview(color: selectedColor.color, symbolName: symbolName)
+                        LibraryFolderEditorPreview(
+                            title: trimmedName.isEmpty ? "New Folder" : trimmedName,
+                            itemCount: initialItemCount,
+                            color: selectedColor.color,
+                            symbolName: symbolName,
+                            previewItems: initialPreviewItems,
+                            thumbnailStore: thumbnailStore
+                        )
                             .accessibilityHidden(true)
 
                         TextField("Folder name", text: $name)
@@ -304,12 +328,6 @@ struct LibraryFolderEditor: View {
                                     .foregroundStyle(color.contrastingForeground)
                             }
                         }
-                        .overlay {
-                            if selectedColor == color {
-                                Circle()
-                                    .strokeBorder(color.color.opacity(0.72), lineWidth: 2)
-                            }
-                        }
                         .frame(width: 38, height: 38)
                         .frame(
                             minWidth: NotateDesign.Control.minimumHitTarget,
@@ -321,15 +339,26 @@ struct LibraryFolderEditor: View {
                 .accessibilityValue(selectedColor == color ? "Selected" : "")
                 .accessibilityAddTraits(selectedColor == color ? .isSelected : [])
             }
-        }
-        ColorPicker("Custom Color", selection: $customColor, supportsOpacity: false)
+
+            ColorPicker(selection: $customColor, supportsOpacity: false) {
+                EmptyView()
+            }
             .labelsHidden()
-            .notateMinimumHitTarget()
+            .frame(width: 38, height: 38)
+            .frame(minWidth: 50, minHeight: 50)
+            .background(customColor.opacity(0.2), in: Circle())
+            .overlay {
+                if LibraryColorDraft.folderPalette.contains(selectedColor) == false {
+                    Image(systemName: "checkmark")
+                        .font(.caption.bold())
+                        .foregroundStyle(Color.primary)
+                }
+            }
             .accessibilityLabel("Custom folder color")
             .onChange(of: customColor) { _, value in
                 selectedColor = LibraryColorDraft(value)
             }
-            .padding(.vertical, 6)
+        }
     }
 
     private var folderIconGrid: some View {
@@ -338,12 +367,11 @@ struct LibraryFolderEditor: View {
                 Button {
                     symbolName = symbol.name
                 } label: {
-                    NotateFolderGlyph(
-                        symbolName: symbol.name,
-                        tint: selectedColor.color,
-                        isSelected: symbolName == symbol.name,
-                        size: 24
-                    )
+                    Image(systemName: symbol.name)
+                        .symbolRenderingMode(.hierarchical)
+                        .font(.system(size: 22, weight: .medium))
+                        .foregroundStyle(selectedColor.color)
+                        .frame(width: 34, height: 34)
                 }
                 .frame(width: 50, height: 50)
                 .background(
@@ -387,16 +415,38 @@ struct LibraryFolderEditor: View {
 }
 
 private struct LibraryFolderEditorPreview: View {
+    let title: String
+    let itemCount: Int
     let color: Color
     let symbolName: String
+    let previewItems: [LibraryFolderPreviewItem]
+    let thumbnailStore: LibraryAutomaticThumbnailStore
 
     var body: some View {
-        LibraryFolderArtwork(
-            symbolName: symbolName,
-            color: color,
-            showsBackdrop: false
-        )
-        .aspectRatio(300 / 230, contentMode: .fit)
+        VStack(spacing: 7) {
+            LibraryFolderArtwork(
+                symbolName: symbolName,
+                color: color,
+                showsBackdrop: false,
+                placesGlyphOnFront: true,
+                previewItems: previewItems,
+                thumbnailStore: thumbnailStore
+            )
+            .aspectRatio(4.0 / 3.0, contentMode: .fit)
+            .scaleEffect(0.62)
+
+            Text(title)
+                .font(.system(.subheadline, weight: .semibold))
+                .foregroundStyle(Color(uiColor: .label))
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .center)
+
+            Text("\(itemCount) \(itemCount == 1 ? "item" : "items")")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .center)
+        }
         .frame(maxWidth: 300)
         .padding(.vertical, NotateDesign.Spacing.tight)
     }
@@ -435,105 +485,107 @@ struct LibraryNotebookEditor: View {
     var body: some View {
         let customPreview = customCover?.data
         let customSelected = isCustomCoverSelected
-        let customTileWidth: CGFloat = dynamicTypeSize.isAccessibilitySize ? 164 : 116
+        let coverTileWidth: CGFloat = dynamicTypeSize.isAccessibilitySize ? 164 : 132
 
         NavigationStack {
             ScrollView {
-                VStack(spacing: NotateDesign.Spacing.page) {
+                VStack(alignment: .leading, spacing: NotateDesign.Spacing.page) {
                     LibraryCoverArtwork(
                         choice: coverChoice,
                         title: trimmedName.isEmpty ? nil : trimmedName,
                         customImageData: customCover?.data
                     )
                     .aspectRatio(3 / 4, contentMode: .fit)
-                    .frame(width: 168)
-                    .shadow(color: .black.opacity(0.14), radius: 12, y: 7)
+                    .frame(width: 142)
+                    .shadow(color: .black.opacity(0.16), radius: 16, y: 9)
+                    .frame(maxWidth: .infinity)
                     .padding(.top, NotateDesign.Spacing.compact)
                     .accessibilityHidden(true)
 
                     VStack(alignment: .leading, spacing: NotateDesign.Spacing.compact) {
-                        Text("Name")
+                        Text("Notebook name")
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(.secondary)
 
-                        TextField("Notebook title", text: $name)
+                        TextField("Give this notebook a name", text: $name)
                             .focused($isNameFocused)
                             .accessibilityIdentifier("library.notebook.title")
                             .submitLabel(.done)
                             .onSubmit(commit)
                             .font(.body.weight(.medium))
-                            .padding(.horizontal, 14)
-                            .frame(minHeight: 48)
+                            .padding(.horizontal, 16)
+                            .frame(minHeight: 52)
                             .notateLibraryCardSurface()
                     }
+
                     VStack(alignment: .leading, spacing: NotateDesign.Spacing.control) {
                         ViewThatFits(in: .horizontal) {
                             HStack(alignment: .firstTextBaseline) {
                                 coverSectionTitle
-                                Spacer()
+                                Spacer(minLength: 8)
+                                coverSectionHint
+                            }
+                            VStack(alignment: .leading, spacing: 3) {
+                                coverSectionTitle
                                 coverSectionHint
                             }
                         }
-                        VStack(alignment: .leading, spacing: 3) {
-                            coverSectionTitle
-                            coverSectionHint
-                        }
-                    }
-                }
-                ScrollView(.horizontal) {
-                    LazyHStack(alignment: .top, spacing: 14) {
-                        ForEach(LibraryCoverOption.all) { option in
-                            LibraryCoverSelectionTile(
-                                option: option,
-                                selectedChoice: coverChoice,
-                                previewTitle: trimmedName.isEmpty ? nil : trimmedName
-                            ) {
-                                withAnimation(
-                                    reduceMotion ? nil : NotateDesign.Motion.selection
-                                ) {
-                                    coverChoice = option.choice
+
+                        ScrollView(.horizontal) {
+                            LazyHStack(alignment: .top, spacing: 14) {
+                                ForEach(LibraryCoverOption.all) { option in
+                                    LibraryCoverSelectionTile(
+                                        option: option,
+                                        selectedChoice: coverChoice,
+                                        previewTitle: trimmedName.isEmpty ? nil : trimmedName
+                                    ) {
+                                        withAnimation(
+                                            reduceMotion ? nil : NotateDesign.Motion.selection
+                                        ) {
+                                            coverChoice = option.choice
+                                        }
+                                    }
+                                    .frame(width: coverTileWidth)
                                 }
+                                PhotosPicker(
+                                    selection: $selectedCoverPhoto,
+                                    matching: .images,
+                                    preferredItemEncoding: .current
+                                ) {
+                                    LibraryCustomCoverSelectionTile(
+                                        imageData: customPreview,
+                                        isSelected: customSelected
+                                    )
+                                    .frame(width: coverTileWidth)
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityIdentifier("library.cover.custom")
                             }
-                            .frame(width: dynamicTypeSize.isAccessibilitySize ? 164 : 116)
+                            .padding(.vertical, 4)
+                            .padding(.horizontal, 2)
                         }
+                        .scrollIndicators(.hidden)
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                PhotosPicker(
-                    selection: $selectedCoverPhoto,
-                    matching: .images,
-                    preferredItemEncoding: .current
-                ) {
-                    LibraryCustomCoverSelectionTile(
-                        imageData: customPreview,
-                        isSelected: customSelected
-                    )
-                    .frame(width: customTileWidth)
+                .frame(maxWidth: 620)
+                .padding(.horizontal, dynamicTypeSize.isAccessibilitySize ? 24 : 22)
+                .padding(.bottom, 28)
+                .frame(maxWidth: .infinity)
+            }
+            .scrollIndicators(.hidden)
+            .background(NotateLibraryDesign.warmBackground)
+            .navigationTitle(title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel", role: .cancel) { dismiss() }
                 }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("library.cover.custom")
-                .padding(.vertical, 3)
-                .padding(.horizontal, 2)
-                .scrollIndicators(.hidden)
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Create & Open", action: commit)
+                        .disabled(trimmedName.isEmpty)
+                }
             }
-        .frame(maxWidth: 620)
-        .padding(
-            .horizontal,
-            dynamicTypeSize.isAccessibilitySize ? NotateDesign.Spacing.content : 22
-        )
-        .padding(.bottom, 28)
-        .frame(maxWidth: .infinity)
-        .background(NotateLibraryDesign.warmBackground)
-        .navigationTitle(title)
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .cancellationAction) {
-                Button("Cancel", role: .cancel) { dismiss() }
-            }
-            ToolbarItem(placement: .confirmationAction) {
-                Button("Create & Open", action: commit)
-                    .disabled(trimmedName.isEmpty)
-            }
-        }
         }
         .task {
             try? await Task.sleep(for: .milliseconds(120))
@@ -829,23 +881,8 @@ private struct LibraryCoverSelectionTile: View {
             onSelect()
         } label: {
             VStack(alignment: .leading, spacing: NotateDesign.Spacing.compact) {
-                ZStack(alignment: .topTrailing) {
-                    LibraryCoverArtwork(choice: option.choice, title: previewTitle)
-                        .shadow(color: .black.opacity(0.12), radius: 7, y: 4)
-
-                    if isSelected {
-                        NotateAppGlyph(
-                            kind: .confirm,
-                            tint: NotateLibraryDesign.accent,
-                            isSelected: true,
-                            size: 18
-                        )
-                        .frame(width: 27, height: 27)
-                        .notateBadgeSurface(in: Circle())
-                        .padding(7)
-                        .transition(.scale.combined(with: .opacity))
-                    }
-                }
+                LibraryCoverArtwork(choice: option.choice, title: previewTitle)
+                    .shadow(color: .black.opacity(0.12), radius: 7, y: 4)
                 .aspectRatio(3 / 4, contentMode: .fit)
                 .frame(maxWidth: .infinity)
                 .overlay {
@@ -892,8 +929,7 @@ private struct LibraryCustomCoverSelectionTile: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: NotateDesign.Spacing.compact) {
-            ZStack(alignment: .topTrailing) {
-                Group {
+            Group {
                     if let previewImage {
                         Image(uiImage: previewImage)
                             .resizable()
@@ -915,28 +951,15 @@ private struct LibraryCustomCoverSelectionTile: View {
                             )
                         }
                     }
-                }
-                .aspectRatio(3 / 4, contentMode: .fit)
-                .frame(maxWidth: .infinity)
-                .clipShape(
-                    RoundedRectangle(
-                        cornerRadius: NotateDesign.Radius.option,
-                        style: .continuous
-                    )
-                )
-                if isSelected {
-                    NotateAppGlyph(
-                        kind: .confirm,
-                        tint: NotateLibraryDesign.accent,
-                        isSelected: true,
-                        size: 18
-                    )
-                    .frame(width: 27, height: 27)
-                    .notateBadgeSurface(in: Circle())
-                    .padding(7)
-                }
             }
             .aspectRatio(3 / 4, contentMode: .fit)
+            .frame(maxWidth: .infinity)
+            .clipShape(
+                RoundedRectangle(
+                    cornerRadius: NotateDesign.Radius.option,
+                    style: .continuous
+                )
+            )
             .overlay {
                 RoundedRectangle(
                     cornerRadius: NotateDesign.Radius.option,
@@ -947,18 +970,15 @@ private struct LibraryCustomCoverSelectionTile: View {
                     lineWidth: isSelected ? 2.5 : 0.8
                 )
             }
-            // Keep the intentionally icon-only action on the same grid track
-            // as cover cards, whose two metadata lines determine row height.
-            // Hidden labels reserve that adaptive Dynamic Type footprint
-            // without reintroducing visual copy beneath the plus glyph.
+            // Match the title and supporting line used by the other covers.
             Text("Add cover")
                 .font(.subheadline.weight(.semibold))
                 .lineLimit(1)
-                .hidden()
+                .foregroundStyle(.primary)
             Text("Choose photo")
                 .font(.caption2)
                 .lineLimit(1)
-                .hidden()
+                .foregroundStyle(.secondary)
         }
         .contentShape(Rectangle())
         .accessibilityElement(children: .ignore)
@@ -1174,7 +1194,7 @@ struct LibraryMoveSheet: View {
                             HStack(spacing: NotateDesign.Spacing.control) {
                                 NotateFolderGlyph(
                                     symbolName: folder.folderSettings?.symbolName ?? "folder",
-                                    tint: (folder.folderSettings?.color ?? .folderBlue).swiftUIColor,
+                                    tint: (folder.folderSettings?.color ?? .folderOrange).swiftUIColor,
                                     size: 22
                                 )
                                 VStack(alignment: .leading, spacing: 2) {
@@ -1354,7 +1374,6 @@ struct LibrarySettingsView: View {
             .frame(minHeight: 46)
             Text("Settings")
                 .font(.largeTitle.weight(.bold))
-                .fontDesign(.serif)
                 .lineLimit(dynamicTypeSize.isAccessibilitySize ? 2 : 1)
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityAddTraits(.isHeader)
@@ -1768,8 +1787,8 @@ extension LibraryColorDraft {
         if self == .rose { return "Rose" }
 
         let folderNames = [
-            "Sky", "Peach", "Butter", "Mint",
-            "Lavender", "Rose", "Aqua", "Periwinkle",
+            "Red", "Blue", "Amber", "Green",
+            "Teal", "Violet", "Rose",
         ]
         if let index = Self.folderPalette.firstIndex(of: self) {
             return folderNames[index]

@@ -1,0 +1,22 @@
+{
+  "images": [
+    {
+      "filename": "NotateEmptyFavorites.png",
+      "idiom": "universal"
+    },
+    {
+      "appearances": [
+        {
+          "appearance": "luminosity",
+          "value": "dark"
+        }
+      ],
+      "filename": "NotateEmptyFavorites-dark.png",
+      "idiom": "universal"
+    }
+  ],
+  "info": {
+    "author": "xcode",
+    "version": 1
+  }
+}

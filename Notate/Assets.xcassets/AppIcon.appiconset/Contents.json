@@ -1,6 +1,7 @@
 {
   "images" : [
     {
+      "filename" : "NotateIcon-Light.png",
       "idiom" : "universal",
       "platform" : "ios",
       "size" : "1024x1024"
@@ -12,17 +13,7 @@
           "value" : "dark"
         }
       ],
-      "idiom" : "universal",
-      "platform" : "ios",
-      "size" : "1024x1024"
-    },
-    {
-      "appearances" : [
-        {
-          "appearance" : "luminosity",
-          "value" : "tinted"
-        }
-      ],
+      "filename" : "NotateIcon-Dark.png",
       "idiom" : "universal",
       "platform" : "ios",
       "size" : "1024x1024"

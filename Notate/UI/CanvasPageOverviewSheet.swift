@@ -59,7 +59,7 @@ struct CanvasPageOverviewButton: View {
                     return model.preparePageOverviewSnapshot()
                 },
                 onDelete: { pageID in
-                    try await model.movePageToTrashFromOverview(id: pageID)
+                    try await model.deletePagePermanentlyFromOverview(id: pageID)
                 }
             )
             .presentationSizing(.page)
@@ -237,12 +237,12 @@ struct CanvasPageOverviewSheet: View {
                 titleVisibility: .visible,
                 presenting: pendingDeletion
             ) { request in
-                Button("Delete Page \(request.number)", role: .destructive) {
+                Button("Delete Permanently", role: .destructive) {
                     deletePage(request)
                 }
                 Button("Cancel", role: .cancel) {}
             } message: { request in
-                Text("Page \(request.number) and everything on it will move to Trash and can be restored later.")
+                Text("Page \(request.number) and everything on it will be deleted permanently. This can't be undone.")
             }
             .alert(
                 "Page Action Unavailable",
@@ -363,7 +363,7 @@ struct CanvasPageOverviewSheet: View {
                             number: number
                         )
                     } label: {
-                        Label("Move to Trash", systemImage: "trash")
+                        Label("Delete Permanently", systemImage: "trash")
                     }
                     .disabled(document.pages.count == 1)
                 } label: {
@@ -551,7 +551,7 @@ struct CanvasPageOverviewSheet: View {
                 }
                 moveAccessibilityFocus(
                     to: focusPageID,
-                    announcement: "Page \(request.number) moved to Trash."
+                    announcement: "Page \(request.number) deleted permanently."
                 )
             } catch {
                 actionError = error.localizedDescription

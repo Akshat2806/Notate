@@ -4,12 +4,9 @@ import SwiftUI
 struct LibraryShellView: View {
     @State private var session: LibraryAppSession
     private let itemTransitionNamespace: Namespace.ID?
-    @State private var splitVisibility: NavigationSplitViewVisibility = .automatic
     @State private var prefersCollapsedSidebar = false
-    /// Which column a collapsed (compact-width) split view shows. Without
-    /// binding this, choosing a scope in the sidebar never revealed it, and
-    /// the sidebar was only reachable by an invisible edge swipe.
-    @State private var compactColumn: NavigationSplitViewColumn = .detail
+    @State private var compactPrimaryScope: LibraryScope = .home
+    @State private var isCompactMorePresented = false
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -44,24 +41,15 @@ struct LibraryShellView: View {
             value: showsCollapsedRail
         )
         .onAppear {
-            // `.automatic` may choose detail-only when an iPad first launches
-            // in portrait, which leaves neither the expanded sidebar nor our
-            // explicit rail visible. Resolve the initial regular-width state
-            // immediately; subsequent changes still follow the user's toggle.
-            splitVisibility = horizontalSizeClass == .compact
-                ? .automatic
-                : (prefersCollapsedSidebar ? .detailOnly : .all)
+            updateCompactPrimaryScope(for: session.scope)
         }
         .onChange(of: horizontalSizeClass) { _, newValue in
-            splitVisibility = newValue == .compact
-                ? .automatic
-                : (prefersCollapsedSidebar ? .detailOnly : .all)
-            if newValue == .compact { compactColumn = .detail }
+            if newValue == .compact {
+                updateCompactPrimaryScope(for: session.scope)
+            }
         }
-        .onChange(of: session.scope) { _, _ in
-            // Picking Home, Favorites, Trash, Settings, a tag or a folder
-            // should show it, not leave the person on the scope list.
-            compactColumn = .detail
+        .onChange(of: session.scope) { _, newScope in
+            updateCompactPrimaryScope(for: newScope)
         }
         .tint(NotateLibraryDesign.accent)
         .sheet(item: $session.sheet) { destination in
@@ -140,21 +128,21 @@ struct LibraryShellView: View {
     @ViewBuilder
     private var shellContent: some View {
         if horizontalSizeClass == .compact {
-            NavigationSplitView(
-                columnVisibility: $splitVisibility,
-                preferredCompactColumn: $compactColumn
-            ) {
-                LibrarySidebar(
-                    session: session,
-                    presentation: .expanded,
-                    allowsPresentationToggle: false,
-                    onTogglePresentation: {}
-                )
-            } detail: {
+            VStack(spacing: 0) {
                 detailContent
-                    .environment(\.libraryRevealSidebar, { compactColumn = .sidebar })
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                LibraryCompactTabBar(
+                    session: session,
+                    selectedTab: compactSelectedTab,
+                    onSelect: selectCompactTab,
+                    isMorePresented: $isCompactMorePresented
+                ) { scope in
+                    withAnimation(reduceMotion ? nil : NotateDesign.Motion.navigation) {
+                        session.selectScope(scope)
+                    }
+                }
             }
-            .navigationSplitViewStyle(.balanced)
         } else {
             HStack(spacing: 0) {
                 LibrarySidebar(
@@ -177,6 +165,46 @@ struct LibraryShellView: View {
                 detailContent
             }
         }
+    }
+
+    private var compactSelectedTab: LibraryCompactTab {
+        switch session.scope {
+        case .home: .home
+        case .favorites: .favorites
+        case .recent: .recent
+        case .folder(_): compactPrimaryScope == .favorites ? .favorites : (compactPrimaryScope == .recent ? .recent : .home)
+        case .tag, .trash, .settings: .more
+        }
+    }
+
+    private func updateCompactPrimaryScope(for scope: LibraryScope) {
+        switch scope {
+        case .home, .favorites, .recent:
+            compactPrimaryScope = scope
+        default:
+            break
+        }
+    }
+
+    private func selectCompactTab(_ tab: LibraryCompactTab) {
+        switch tab {
+        case .home: selectPrimaryScope(.home)
+        case .favorites: selectPrimaryScope(.favorites)
+        case .recent: selectPrimaryScope(.recent)
+        case .more: isCompactMorePresented = true
+        }
+    }
+
+    private func selectPrimaryScope(_ scope: LibraryScope) {
+        compactPrimaryScope = scope
+        guard session.scope == scope else {
+            withAnimation(reduceMotion ? nil : NotateDesign.Motion.navigation) {
+                session.selectScope(scope)
+            }
+            return
+        }
+        // Tapping the active tab returns to the beginning of that scope.
+        session.scrollPositionID = nil
     }
 
     private var detailContent: some View {
@@ -249,7 +277,13 @@ struct LibraryShellView: View {
                     title: "Folder Appearance",
                     initialName: item.name,
                     initialColor: LibraryColorDraft(item.folderSettings?.color ?? .folderBlue),
-                    initialSymbolName: item.folderSettings?.symbolName ?? "folder"
+                    initialSymbolName: item.folderSettings?.symbolName ?? "folder",
+                    initialItemCount: session.folderItemCount(for: item),
+                    initialPreviewItems: LibraryFolderPreviewPolicy.previewItems(
+                        for: item.id,
+                        candidates: session.repository.items
+                    ),
+                    thumbnailStore: session.thumbnailStore
                 ) { draft in
                     session.actions.updateFolder(itemID, draft)
                 }
@@ -302,6 +336,197 @@ struct LibraryShellView: View {
     }
 }
 
+private enum LibraryCompactTab: Hashable {
+    case home
+    case favorites
+    case recent
+    case more
+
+    var title: String {
+        switch self {
+        case .home: "Home"
+        case .favorites: "Favorites"
+        case .recent: "Recent"
+        case .more: "More"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .home: "house"
+        case .favorites: "star"
+        case .recent: "clock"
+        case .more: "ellipsis"
+        }
+    }
+}
+
+private struct LibraryCompactTabBar: View {
+    let session: LibraryAppSession
+    let selectedTab: LibraryCompactTab
+    let onSelect: (LibraryCompactTab) -> Void
+    @Binding var isMorePresented: Bool
+    let onSelectMoreScope: (LibraryScope) -> Void
+
+    init(
+        session: LibraryAppSession,
+        selectedTab: LibraryCompactTab,
+        onSelect: @escaping (LibraryCompactTab) -> Void,
+        isMorePresented: Binding<Bool>,
+        onSelectMoreScope: @escaping (LibraryScope) -> Void
+    ) {
+        self.session = session
+        self.selectedTab = selectedTab
+        self.onSelect = onSelect
+        _isMorePresented = isMorePresented
+        self.onSelectMoreScope = onSelectMoreScope
+    }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach([LibraryCompactTab.home, .favorites, .recent, .more], id: \.self) { tab in
+                Button {
+                    onSelect(tab)
+                } label: {
+                    VStack(spacing: 4) {
+                        Image(systemName: tab.systemImage)
+                            .font(.system(size: 18, weight: selectedTab == tab ? .semibold : .regular))
+                            .frame(height: 22)
+                        Text(tab.title)
+                            .font(.caption2.weight(selectedTab == tab ? .semibold : .regular))
+                            .lineLimit(1)
+                    }
+                    .foregroundStyle(selectedTab == tab ? NotateLibraryDesign.accent : Color.secondary)
+                    .frame(maxWidth: .infinity, minHeight: 50)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(tab.title)
+                .accessibilityAddTraits(selectedTab == tab ? .isSelected : [])
+                .accessibilityIdentifier("library.tab.\(tab.title.lowercased())")
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.top, 5)
+        .background {
+            Rectangle()
+                .fill(.bar)
+                .overlay(alignment: .top) {
+                    Rectangle()
+                        .fill(Color.primary.opacity(0.08))
+                        .frame(height: 0.5)
+                }
+                .ignoresSafeArea(edges: .bottom)
+        }
+        .sheet(isPresented: $isMorePresented) {
+            LibraryCompactMoreSheet(session: session, onSelect: onSelectMoreScope)
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+        }
+    }
+}
+
+private struct LibraryCompactMoreSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let session: LibraryAppSession
+    let onSelect: (LibraryScope) -> Void
+    @State private var isCreatingTag = false
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    if session.repository.tags.isEmpty {
+                        Text("Tags you create will appear here.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(sortedTags) { tag in
+                            Button {
+                                onSelect(.tag(tag.id))
+                                dismiss()
+                            } label: {
+                                Label {
+                                    Text(tag.name)
+                                        .foregroundStyle(.primary)
+                                } icon: {
+                                    NotateSelectableAppGlyph(
+                                        kind: .tag,
+                                        selectedTint: tag.color.swiftUIColor,
+                                        keepsTintWhenUnselected: true,
+                                        isSelected: false,
+                                        size: 18
+                                    )
+                                }
+                            }
+                            .accessibilityIdentifier("library.more.tag.\(tag.id.uuidString)")
+                        }
+                    }
+
+                    Button {
+                        isCreatingTag = true
+                    } label: {
+                        Label("New Tag", systemImage: "plus")
+                    }
+                    .accessibilityIdentifier("library.more.new-tag")
+                } header: {
+                    Text("Tags")
+                }
+
+                Section("Library") {
+                    moreDestination(.trash, title: "Trash", systemImage: "trash")
+                }
+
+                Section("App") {
+                    moreDestination(.settings, title: "Settings", systemImage: "gearshape")
+                }
+            }
+            .listStyle(.insetGrouped)
+            .scrollContentBackground(.hidden)
+            .background(NotateLibraryDesign.warmBackground)
+            .navigationTitle("More")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        .sheet(isPresented: $isCreatingTag) {
+            LibraryTagEditor(title: "New Tag") { draft in
+                session.actions.createTag(draft)
+            }
+            .presentationSizing(.form)
+        }
+    }
+
+    private var sortedTags: [TagRecord] {
+        let presetTags = LibraryPresetTag.allCases.compactMap { preset in
+            session.repository.tags.first { tag in
+                tag.id == preset.id
+                    || tag.normalizedName == LibraryItemRecord.normalize(preset.title)
+            }
+        }
+        let presetIDs = Set(presetTags.map(\.id))
+        return presetTags + session.repository.tags
+            .filter { presetIDs.contains($0.id) == false }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+
+    private func moreDestination(
+        _ scope: LibraryScope,
+        title: String,
+        systemImage: String
+    ) -> some View {
+        Button {
+            onSelect(scope)
+            dismiss()
+        } label: {
+            Label(title, systemImage: systemImage)
+                .foregroundStyle(scope == .trash ? Color.red : Color.primary)
+        }
+    }
+}
+
 private enum LibrarySidebarPresentation {
     case expanded
     case rail
@@ -328,6 +553,16 @@ private struct LibrarySidebar: View {
 
                 ScrollView {
                     VStack(spacing: isRail ? 5 : 6) {
+                        if isRail == false {
+                            Text("Library")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                                .textCase(.uppercase)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 13)
+                                .padding(.top, NotateDesign.Spacing.compact)
+                                .accessibilityAddTraits(.isHeader)
+                        }
                         sidebarRow(.home, title: "Home", glyph: .home)
                         sidebarRow(.favorites, title: "Favorites", glyph: .favorite)
                         sidebarRow(.recent, title: "Recent", glyph: .recent)
@@ -436,10 +671,6 @@ private struct LibrarySidebar: View {
             Divider()
                 .padding(.vertical, NotateDesign.Spacing.compact)
 
-            ForEach(sidebarTags) { tag in
-                tagRow(tag)
-            }
-
             Button {
                 session.sheet = .newTag
             } label: {
@@ -449,6 +680,10 @@ private struct LibrarySidebar: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("New Tag")
+
+            ForEach(sidebarTags) { tag in
+                tagRow(tag)
+            }
 
             Divider()
                 .padding(.vertical, NotateDesign.Spacing.compact)

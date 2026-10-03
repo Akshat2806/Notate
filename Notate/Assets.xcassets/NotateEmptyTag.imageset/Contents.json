@@ -1,0 +1,22 @@
+{
+  "images": [
+    {
+      "filename": "NotateEmptyTag.png",
+      "idiom": "universal"
+    },
+    {
+      "appearances": [
+        {
+          "appearance": "luminosity",
+          "value": "dark"
+        }
+      ],
+      "filename": "NotateEmptyTag-dark.png",
+      "idiom": "universal"
+    }
+  ],
+  "info": {
+    "author": "xcode",
+    "version": 1
+  }
+}
