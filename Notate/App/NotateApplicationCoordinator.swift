@@ -186,8 +186,8 @@ final class NotateApplicationCoordinator {
     /// skipped, and the entire library action surface is inert.
     private(set) var catalogFailureDescription: String?
     /// Authored files may be temporarily parked in AssetTrash while a crash
-    /// journal is reconciled. Keep every library action fail-closed until those
-    /// files and interrupted catalog payloads are back in a coherent state.
+    /// journal is reconciled. The library is browse-only until those files and
+    /// interrupted catalog payloads are back in a coherent state.
     private(set) var isLibraryRecoveryComplete = false
     /// XCUITest launches against an isolated, in-memory catalog. This flag is
     /// intentionally scoped to launch configuration so production behavior
@@ -201,7 +201,8 @@ final class NotateApplicationCoordinator {
         // a production Application Support path inside the card view.
         thumbnailStore: LibraryAutomaticThumbnailStore(
             libraryRoot: assetStore.libraryRoot
-        )
+        ),
+        mutationAllowed: { [weak self] in self?.isCatalogWritable ?? false }
     )
 
     var route: NotateAppRoute = .home
@@ -329,7 +330,11 @@ final class NotateApplicationCoordinator {
         #if DEBUG
         if NotateUITestLaunchConfiguration.isEnabled {
             do {
-                return .ready(try makeUITestCoordinator())
+                return .ready(
+                    try NotateLaunchInstrumentation.measure("Catalog Bootstrap") {
+                        try makeUITestCoordinator()
+                    }
+                )
             } catch {
                 return .unavailable
             }
@@ -338,11 +343,20 @@ final class NotateApplicationCoordinator {
 
         return bootstrap(
             liveFactory: {
-                let container = try LibraryModelContainerFactory.makeLive()
+                let container = try NotateLaunchInstrumentation.measure(
+                    "Catalog Container Creation"
+                ) {
+                    try LibraryModelContainerFactory.makeLive()
+                }
                 let assetStore = try LibraryAssetStore.live()
+                let repository = try NotateLaunchInstrumentation.measure(
+                    "Catalog Repository Loading"
+                ) {
+                    try LibraryRepository(modelContainer: container)
+                }
                 return try NotateApplicationCoordinator(
                     modelContainer: container,
-                    repository: LibraryRepository(modelContainer: container),
+                    repository: repository,
                     assetStore: assetStore,
                     migrationCoordinator: try? LegacyCanvasMigrationCoordinator.live()
                 )
@@ -654,7 +668,17 @@ final class NotateApplicationCoordinator {
     func start() async {
         guard didStart == false else { return }
         didStart = true
+        let editReadinessInterval = NotateLaunchInstrumentation.begin(
+            "Launch To Edit Ready"
+        )
+        var didRecordEditReadiness = false
         defer {
+            if didRecordEditReadiness == false {
+                NotateLaunchInstrumentation.end(
+                    "Launch To Edit Ready",
+                    editReadinessInterval
+                )
+            }
             // A view-scoped startup task can be cancelled during a future
             // cancellation-aware recovery operation. Allow the next `.task`
             // invocation to retry unless startup reached either its coherent
@@ -665,14 +689,58 @@ final class NotateApplicationCoordinator {
             }
         }
         guard catalogFailureDescription == nil else { return }
-        guard await reconcileAssetTrashTransactions() else { return }
-        await reconcileIncompletePayloads()
-        guard catalogFailureDescription == nil else { return }
+        await Task.yield()
+
+        do {
+            try NotateLaunchInstrumentation.measure(
+                "Complete Catalog For Recovery"
+            ) {
+                try repository.loadCompleteItemCatalog()
+            }
+        } catch {
+            enterCatalogFailure(
+                "Notate couldn't load every library record safely for recovery. "
+                    + "The catalog was preserved. Details: \(error.localizedDescription)"
+            )
+            return
+        }
+
+        do {
+            try NotateLaunchInstrumentation.measure(
+                "Deferred Catalog Metadata"
+            ) {
+                try repository.loadDeferredCatalogMetadata()
+            }
+        } catch {
+            enterCatalogFailure(
+                "Notate couldn't finish loading the library metadata safely. "
+                    + "The catalog was preserved. Details: \(error.localizedDescription)"
+            )
+            return
+        }
+
+        let recoveryCompleted = await NotateLaunchInstrumentation.measureAsync(
+            "Required Library Recovery"
+        ) {
+            guard await reconcileAssetTrashTransactions() else { return false }
+            await reconcileIncompletePayloads()
+            return catalogFailureDescription == nil
+        }
+        guard recoveryCompleted else { return }
         isLibraryRecoveryComplete = true
-        await purgeExpiredTrash()
+        NotateLaunchInstrumentation.end(
+            "Launch To Edit Ready",
+            editReadinessInterval
+        )
+        didRecordEditReadiness = true
+        await NotateLaunchInstrumentation.measureAsync("Deferred Library Cleanup") {
+            await purgeExpiredTrash()
+        }
         guard isCatalogWritable else { return }
-        await migrateLegacyCanvasIfNeeded()
-        await removeLegacyCanvasItems()
+        await NotateLaunchInstrumentation.measureAsync("Legacy Canvas Maintenance") {
+            await migrateLegacyCanvasIfNeeded()
+            await removeLegacyCanvasItems()
+        }
     }
 
     func closeActiveItem(
@@ -3317,16 +3385,19 @@ struct NotateRootView: View {
         Group {
             if let catalogFailureDescription = application.catalogFailureDescription {
                 NotateCatalogUnavailableView(message: catalogFailureDescription)
-            } else if application.isLibraryRecoveryComplete == false {
-                NotateLibraryRecoveryView()
             } else {
-                NavigationStack(path: $editorNavigationPath) {
-                    LibraryShellView(
-                        session: application.librarySession,
-                        itemTransitionNamespace: editorTransitionNamespace
-                    )
-                    .navigationDestination(for: NotateAppRoute.self) { route in
-                        editorDestination(for: route)
+                VStack(spacing: 0) {
+                    if application.isLibraryRecoveryComplete == false {
+                        NotateRecoveryStatusBanner()
+                    }
+                    NavigationStack(path: $editorNavigationPath) {
+                        LibraryShellView(
+                            session: application.librarySession,
+                            itemTransitionNamespace: editorTransitionNamespace
+                        )
+                        .navigationDestination(for: NotateAppRoute.self) { route in
+                            editorDestination(for: route)
+                        }
                     }
                 }
             }
@@ -3492,15 +3563,21 @@ struct NotateRootView: View {
     }
 }
 
-private struct NotateLibraryRecoveryView: View {
+private struct NotateRecoveryStatusBanner: View {
     var body: some View {
-        ContentUnavailableView {
-            ProgressView("Recovering Your Library")
-        } description: {
-            Text("Notate is safely finishing interrupted file changes before editing is enabled.")
+        HStack(spacing: 10) {
+            ProgressView()
+                .controlSize(.small)
+            Text("Recovering your library. Browsing is available; edits are paused.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 0)
         }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 9)
+        .background(.thinMaterial)
+        .accessibilityElement(children: .combine)
         .accessibilityIdentifier("library-recovery-in-progress")
-        .padding(32)
     }
 }
 

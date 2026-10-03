@@ -277,7 +277,7 @@ struct LibraryShellView: View {
                     title: "Folder Appearance",
                     initialName: item.name,
                     initialColor: LibraryColorDraft(item.folderSettings?.color ?? .folderBlue),
-                    initialSymbolName: item.folderSettings?.symbolName ?? "folder",
+                    initialSymbolName: item.folderSettings?.symbolName ?? "basketball",
                     initialItemCount: session.folderItemCount(for: item),
                     initialPreviewItems: LibraryFolderPreviewPolicy.previewItems(
                         for: item.id,

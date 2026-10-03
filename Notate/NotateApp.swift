@@ -93,6 +93,7 @@ private struct NotateAppRoot: View {
             )
             .task { @MainActor in
                 guard bootstrapState == nil else { return }
+                NotateLaunchInstrumentation.beginLaunchToLibraryVisibility()
                 bootstrapState = NotateApplicationCoordinator.bootstrap()
             }
     }

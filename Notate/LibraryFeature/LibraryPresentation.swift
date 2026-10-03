@@ -113,11 +113,7 @@ struct LibraryColorDraft: Hashable, Sendable {
         Color(red: red, green: green, blue: blue, opacity: alpha)
     }
 
-    static let folderDefault = LibraryColorDraft(
-        red: 0.12,
-        green: 0.46,
-        blue: 0.96
-    )
+    // Shared tag and settings colors remain independent from the brighter folder swatches.
     static let blue = LibraryColorDraft(red: 0.55, green: 0.78, blue: 1.00)
     static let coral = LibraryColorDraft(red: 0.96, green: 0.48, blue: 0.43)
     static let amber = LibraryColorDraft(red: 0.94, green: 0.67, blue: 0.24)
@@ -125,27 +121,31 @@ struct LibraryColorDraft: Hashable, Sendable {
     static let violet = LibraryColorDraft(red: 0.58, green: 0.46, blue: 0.88)
     static let rose = LibraryColorDraft(red: 0.89, green: 0.43, blue: 0.67)
 
-    // Folder swatches are intentionally a little quieter than the cover art.
-    // They remain recognizable on the large folder cards without competing
-    // with colorful notebook covers or the library's semantic navigation tints.
-    static let folderRed = LibraryColorDraft(red: 0.81, green: 0.35, blue: 0.37)
-    static let folderAmber = LibraryColorDraft(red: 0.78, green: 0.58, blue: 0.27)
-    static let folderGreen = LibraryColorDraft(red: 0.29, green: 0.50, blue: 0.42)
-    static let folderTeal = LibraryColorDraft(red: 0.31, green: 0.52, blue: 0.54)
+    static let folderDefault = folderBlue
     static let folderBlue = LibraryColorDraft(red: 0.12, green: 0.46, blue: 0.96)
-    static let folderViolet = LibraryColorDraft(red: 0.47, green: 0.42, blue: 0.61)
-    static let folderRose = LibraryColorDraft(red: 0.72, green: 0.40, blue: 0.50)
-
-    static let palette: [LibraryColorDraft] = [.blue, .coral, .amber, .mint, .violet, .rose]
+    static let folderYellow = LibraryColorDraft(red: 1.00, green: 0.84, blue: 0.27)
+    static let folderOrange = LibraryColorDraft(red: 0.99, green: 0.48, blue: 0.20)
+    static let folderRed = LibraryColorDraft(red: 0.94, green: 0.25, blue: 0.29)
+    static let folderGreen = LibraryColorDraft(red: 0.52, green: 0.78, blue: 0.27)
+    static let folderTeal = LibraryColorDraft(red: 0.08, green: 0.73, blue: 0.70)
+    static let folderViolet = LibraryColorDraft(red: 0.56, green: 0.38, blue: 0.93)
+    static let folderPink = LibraryColorDraft(red: 0.93, green: 0.36, blue: 0.68)
+    static let folderRose = LibraryColorDraft(red: 0.92, green: 0.32, blue: 0.48)
+    // Retain the earlier name for toolbar creation shortcuts.
+    static let folderAmber = folderOrange
     static let folderPalette: [LibraryColorDraft] = [
+        .folderBlue,
+        .folderYellow,
+        .folderOrange,
         .folderRed,
-        .folderDefault,
-        .folderAmber,
         .folderGreen,
         .folderTeal,
         .folderViolet,
+        .folderPink,
         .folderRose,
     ]
+
+    static let palette: [LibraryColorDraft] = [.blue, .coral, .amber, .mint, .violet, .rose]
 }
 
 struct LibraryNamePrompt: Identifiable, Sendable {
@@ -407,6 +407,7 @@ final class LibraryAppSession {
     let actions: LibraryUIActions
     @ObservationIgnored let thumbnailStore: LibraryAutomaticThumbnailStore
     @ObservationIgnored private let currentDate: () -> Date
+    @ObservationIgnored private let mutationAllowed: () -> Bool
 
     var scope: LibraryScope = .home
     private var scopeBrowsingStates: [LibraryScope: LibraryScopeBrowsingState] = [:]
@@ -444,13 +445,17 @@ final class LibraryAppSession {
         repository: LibraryRepository,
         actions: LibraryUIActions? = nil,
         thumbnailStore: LibraryAutomaticThumbnailStore? = nil,
+        mutationAllowed: @escaping () -> Bool = { true },
         currentDate: @escaping () -> Date = { .now }
     ) {
         self.repository = repository
         self.actions = actions ?? LibraryUIActions()
         self.thumbnailStore = thumbnailStore ?? .shared
+        self.mutationAllowed = mutationAllowed
         self.currentDate = currentDate
     }
+
+    var canMutate: Bool { mutationAllowed() }
 
     var parentID: UUID? {
         if case let .folder(id) = scope { id } else { nil }
@@ -546,6 +551,7 @@ final class LibraryAppSession {
     }
 
     var canCreateContent: Bool {
+        guard canMutate else { return false }
         switch scope {
         case .home, .folder:
             true
@@ -637,6 +643,15 @@ final class LibraryAppSession {
         }
         guard item.payloadState == .ready else {
             alertMessage = payloadUnavailableMessage(for: item.payloadState)
+            return
+        }
+        guard canMutate else {
+            // Folder browsing is read-only and safe during recovery. Opening a
+            // document or touching its activity metadata must wait until the
+            // catalog and its assets are coherent.
+            if item.kind == .folder {
+                selectScope(.folder(item.id))
+            }
             return
         }
         if item.kind == .folder {

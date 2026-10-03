@@ -2077,21 +2077,10 @@ public enum CanvasConstants {
     public static let boundaryPullDisarmDistance: CGFloat = 46
     public static let boundaryPullMaximumReleaseVelocityPointsPerSecond: CGFloat = 450
     public static let boundaryPullVerticalDominance: CGFloat = 1.25
-    /// The neutral editing workspace behind authored notebook pages. This is
-    /// deliberately close to paper in Light Mode and follows the system black
-    /// surface in Dark Mode, matching the Library. It is UI chrome, not a paper
-    /// tone, and must never leak into page persistence or export rendering.
-    public static let pagedWorkspaceBackground = UIColor { traits in
-        if traits.userInterfaceStyle == .dark {
-            return .systemBackground
-        }
-        return UIColor(
-            red: 247 / 255,
-            green: 246 / 255,
-            blue: 243 / 255,
-            alpha: 1
-        )
-    }
+    /// The semantic secondary surface behind canvas pages and boards. This is
+    /// UI chrome, not a paper tone, and must never leak into page persistence
+    /// or export rendering.
+    public static let pagedWorkspaceBackground = UIColor.secondarySystemBackground
     /// The default authored paper color remains separate from the workspace.
     public static let paperBackground = UIColor(
         red: 1,
@@ -2100,14 +2089,9 @@ public enum CanvasConstants {
         alpha: 1
     )
 
-    /// Infinite boards use the same Light and Dark workspace surfaces as paged
+    /// Infinite boards use the same secondary workspace surface as paged
     /// documents; the authored paper itself remains independent of this chrome.
-    public static let freeformWorkspaceBackground = UIColor { traits in
-        if traits.userInterfaceStyle == .dark {
-            return .systemBackground
-        }
-        return paperBackground
-    }
+    public static let freeformWorkspaceBackground = UIColor.secondarySystemBackground
 
     public static func workspaceBackground(
         for documentMode: CanvasDocumentMode
