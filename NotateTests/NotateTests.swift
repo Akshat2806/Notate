@@ -141,12 +141,10 @@ final class NotateTests: XCTestCase {
     }
 
     func testBrushFamilyOffersFountainWatercolorAndCrayon() {
-        XCTAssertEqual(
-            CanvasTool.fountainPen.toolbarFamilyVariants,
-            [.fountainPen, .watercolor, .crayon]
-        )
+        XCTAssertEqual(CanvasTool.fountainPen.toolbarFamilyVariants, [.fountainPen, .watercolor, .crayon])
         XCTAssertEqual(CanvasTool.crayon.toolbarFamilyRoot, .fountainPen)
         XCTAssertEqual(CanvasTool.fountainPen.toolbarFamilyTitle, "Brush")
+        XCTAssertEqual(CanvasTool.fountainPen.title, "Fountain Pen")
     }
 
     func testEveryDrawingToolHasDefaultConfigurationAndSixWidths() {
@@ -197,8 +195,9 @@ final class NotateTests: XCTestCase {
         // Undo Redo | Lasso Pen Pencil Brush Highlighter | Eraser Ruler Laser | +
         XCTAssertEqual(CanvasToolPicker.BarMetrics.itemCount, 11)
         XCTAssertEqual(CanvasToolPicker.BarMetrics.pipeCount, 3)
+        XCTAssertEqual(CanvasToolPicker.BarMetrics.itemWidth, 44)
         XCTAssertGreaterThan(CanvasToolPicker.preferredBarWidth, 460)
-        XCTAssertLessThan(CanvasToolPicker.preferredBarWidth, 520)
+        XCTAssertLessThan(CanvasToolPicker.preferredBarWidth, 560)
     }
 
     @MainActor

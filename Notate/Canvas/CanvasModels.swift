@@ -50,8 +50,7 @@ public enum CanvasTool: String, CaseIterable, Codable, Sendable {
         self != .lasso
     }
 
-    /// Extra inks share an existing toolbar slot so the primary picker keeps
-    /// its current width, spacing, and five-writing-tool rhythm.
+    /// Specialty ink styles stay grouped under their matching toolbar tool.
     public var toolbarFamilyRoot: CanvasTool {
         switch self {
         case .ballpoint, .calligraphy:
