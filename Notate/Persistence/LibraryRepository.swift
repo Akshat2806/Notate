@@ -376,6 +376,20 @@ public final class LibraryRepository {
         }.count
     }
 
+    /// Returns direct children only when their catalog is already cached.
+    /// Folder artwork uses this path so a lazy grid never starts a fetch for
+    /// every folder it happens to render.
+    func cachedChildren(of parentID: UUID) -> [LibraryItemRecord]? {
+        guard hasLoadedAllItems || loadedChildCatalogs.contains(parentID) else {
+            return nil
+        }
+        return sorted(items.filter {
+            !$0.isTrashed
+                && $0.kind.isLegacyLibraryItem == false
+                && $0.parentID == parentID
+        }, by: .activity)
+    }
+
     /// Trash folder counts include every descendant in the same trash group.
     /// They are available only after the complete catalog has been loaded.
     func cachedTrashSubtreeCount(of itemID: UUID, trashGroupID: UUID) -> Int? {

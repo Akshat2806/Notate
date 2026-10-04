@@ -2,17 +2,8 @@
   "images": [
     {
       "filename": "NotateEmptyFavorites.png",
-      "idiom": "universal"
-    },
-    {
-      "appearances": [
-        {
-          "appearance": "luminosity",
-          "value": "dark"
-        }
-      ],
-      "filename": "NotateEmptyFavorites-dark.png",
-      "idiom": "universal"
+      "idiom": "universal",
+      "scale": "3x"
     }
   ],
   "info": {
