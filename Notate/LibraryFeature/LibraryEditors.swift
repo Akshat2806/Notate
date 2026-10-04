@@ -1,3 +1,6 @@
+Warning: truncated output (original token count: 18083)
+Total output lines: 1879
+
 import PhotosUI
 import SwiftUI
 import UIKit
@@ -178,6 +181,7 @@ struct LibraryFolderEditor: View {
         SymbolOption(name: "leaf.fill", label: "Nature"),
         SymbolOption(name: "globe.americas.fill", label: "World"),
         SymbolOption(name: "pencil", label: "Writing"),
+        SymbolOption(name: "cat", label: "Cat"),
         SymbolOption(name: "wrench.and.screwdriver.fill", label: "Tools"),
         SymbolOption(name: "cart.fill", label: "Shopping"),
         SymbolOption(name: "fork.knife", label: "Food"),
@@ -453,7 +457,7 @@ struct LibraryFolderEditor: View {
             LibraryFolderDraft(
                 name: trimmedName,
                 color: selectedColor,
-                symbolName: symbolName,
+                symbolName: symbolName
             )
         )
         dismiss()
@@ -473,6 +477,7 @@ private struct LibraryFolderEditorPreview: View {
             LibraryFolderArtwork(
                 symbolName: symbolName,
                 color: color,
+                itemCount: itemCount,
                 showsBackdrop: false,
                 placesGlyphOnFront: true,
                 previewItems: previewItems,
@@ -790,240 +795,7 @@ struct LibraryCoverPicker: View {
                         .accessibilityIdentifier("library.cover.custom")
                     }
                 }
-                .padding(
-                    dynamicTypeSize.isAccessibilitySize ? NotateDesign.Spacing.content : 22
-                )
-            }
-            .background(NotateLibraryDesign.warmBackground)
-            .navigationTitle("Choose Cover")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel", role: .cancel) { dismiss() }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Pick") {
-                        onPick(
-                            selectedChoice,
-                            isCustomCoverSelected ? customCover : nil
-                        )
-                        dismiss()
-                    }
-                    .fontWeight(.semibold)
-                }
-            }
-            .task(id: itemID) {
-                guard isCustomCoverSelected, let itemID else { return }
-                customPreviewData = await thumbnailStore.data(for: itemID)
-            }
-            .onChange(of: selectedCoverPhoto) { _, selection in
-                guard let selection else { return }
-                Task { await importCustomCover(from: selection) }
-            }
-            .alert(
-                "Cover Could Not Be Added",
-                isPresented: Binding(
-                    get: { coverImportError != nil },
-                    set: { if $0 == false { coverImportError = nil } }
-                )
-            ) {
-                Button("OK", role: .cancel) { coverImportError = nil }
-            } message: {
-                Text(coverImportError ?? "Choose another image and try again.")
-            }
-        }
-    }
-
-    private var coverColumns: [GridItem] {
-        if dynamicTypeSize.isAccessibilitySize {
-            return [
-                GridItem(
-                    .flexible(minimum: 0),
-                    spacing: NotateDesign.Spacing.content,
-                    alignment: .top
-                ),
-            ]
-        }
-        return [
-            GridItem(
-                .adaptive(minimum: 118, maximum: 154),
-                spacing: NotateDesign.Spacing.content,
-                alignment: .top
-            ),
-        ]
-    }
-
-    private var isCustomCoverSelected: Bool {
-        if case .customAsset = selectedChoice { return true }
-        return false
-    }
-
-    @MainActor
-    private func importCustomCover(from selection: PhotosPickerItem) async {
-        do {
-            guard let transfer = try await selection.loadTransferable(
-                type: CanvasImageTransfer.self
-            ) else {
-                throw LibraryCustomCoverImageError.unreadableImage
-            }
-            defer { transfer.discard() }
-            let normalized = try await LibraryCustomCoverImageNormalizer.normalizedPNG(
-                from: transfer.fileURL
-            )
-            let draft = LibraryCustomCoverDraft(data: normalized)
-            withAnimation(reduceMotion ? nil : NotateDesign.Motion.selection) {
-                customCover = draft
-                customPreviewData = normalized
-                selectedChoice = .customAsset(relativePath: draft.itemRelativePath)
-            }
-        } catch {
-            coverImportError = error.localizedDescription
-        }
-    }
-}
-
-private struct LibraryCoverOption: Identifiable {
-    let title: String
-    let subtitle: String
-    let choice: LibraryCoverChoice
-
-    var id: String {
-        switch choice {
-        case .automatic:
-            "automatic"
-        case let .preset(preset):
-            "preset-\(preset.rawValue)"
-        case let .customAsset(relativePath):
-            "custom-\(relativePath)"
-        }
-    }
-
-    static let all: [LibraryCoverOption] = [
-        LibraryCoverOption(
-            title: "Automatic",
-            subtitle: "Use the first page",
-            choice: .automatic
-        ),
-    ] + LibraryCuratedCover.curated.map { cover in
-        LibraryCoverOption(
-            title: cover.title,
-            subtitle: cover.subtitle,
-            choice: .preset(cover.preset)
-        )
-    }
-}
-
-private struct LibraryCoverSelectionTile: View {
-    let option: LibraryCoverOption
-    let selectedChoice: LibraryCoverChoice
-    let previewTitle: String?
-    let onSelect: () -> Void
-
-    private var isSelected: Bool { selectedChoice == option.choice }
-
-    var body: some View {
-        Button {
-            onSelect()
-        } label: {
-            VStack(alignment: .leading, spacing: NotateDesign.Spacing.compact) {
-                LibraryCoverArtwork(choice: option.choice, title: previewTitle)
-                    .shadow(color: .black.opacity(0.12), radius: 7, y: 4)
-                .aspectRatio(3 / 4, contentMode: .fit)
-                .frame(maxWidth: .infinity)
-                .overlay {
-                    RoundedRectangle(
-                        cornerRadius: NotateDesign.Radius.option,
-                        style: .continuous
-                    )
-                    .strokeBorder(
-                        isSelected
-                            ? NotateLibraryDesign.accent
-                            : Color.primary.opacity(0.10),
-                        lineWidth: isSelected ? 2.5 : 0.8
-                    )
-                }
-                Text(option.title)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.82)
-                Text(option.subtitle)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("\(option.title), \(option.subtitle)")
-        .accessibilityValue(isSelected ? "Selected" : "")
-        .accessibilityAddTraits(isSelected ? .isSelected : [])
-    }
-}
-
-private struct LibraryCustomCoverSelectionTile: View {
-    let imageData: Data?
-    let isSelected: Bool
-
-    @State private var previewImage: UIImage?
-
-    nonisolated init(imageData: Data?, isSelected: Bool) {
-        self.imageData = imageData
-        self.isSelected = isSelected
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: NotateDesign.Spacing.compact) {
-            Group {
-                    if let previewImage {
-                        Image(uiImage: previewImage)
-                            .resizable()
-                            .scaledToFill()
-                    } else {
-                        ZStack {
-                            LinearGradient(
-                                colors: [
-                                    NotateLibraryDesign.accent.opacity(0.08),
-                                    Color(uiColor: .secondarySystemBackground)
-                                ],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                            NotateAppGlyph(
-                                kind: .add,
-                                tint: NotateLibraryDesign.accent,
-                                size: 30
-                            )
-                        }
-                    }
-            }
-            .aspectRatio(3 / 4, contentMode: .fit)
-            .frame(maxWidth: .infinity)
-            .clipShape(
-                RoundedRectangle(
-                    cornerRadius: NotateDesign.Radius.option,
-                    style: .continuous
-                )
-            )
-            .overlay {
-                RoundedRectangle(
-                    cornerRadius: NotateDesign.Radius.option,
-                    style: .continuous
-                )
-                .strokeBorder(
-                    isSelected ? NotateLibraryDesign.accent : Color.primary.opacity(0.10),
-                    lineWidth: isSelected ? 2.5 : 0.8
-                )
-            }
-            // Match the title and supporting line used by the other covers.
-            Text("Add cover")
-                .font(.subheadline.weight(.semibold))
-                .lineLimit(1)
-                .foregroundStyle(.primary)
-            Text("Choose photo")
-                .font(.caption2)
-                .lineLimit(1)
-                .foregroundStyle(.secondary)
+   …2083 tokens truncated….foregroundStyle(.secondary)
         }
         .contentShape(Rectangle())
         .accessibilityElement(children: .ignore)

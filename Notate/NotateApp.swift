@@ -92,6 +92,14 @@ private struct NotateAppRoot: View {
                     : appearance.colorScheme
             )
             .task { @MainActor in
+                #if DEBUG
+                if ProcessInfo.processInfo.arguments.contains("--folder-reference-preview") { return }
+                #endif
+                // Let SwiftUI commit the lightweight opening screen before
+                // synchronous SwiftData container and repository setup. That
+                // work can otherwise consume the scene-creation watchdog's
+                // first-frame budget on slower devices.
+                await Task.yield()
                 guard bootstrapState == nil else { return }
                 NotateLaunchInstrumentation.beginLaunchToLibraryVisibility()
                 bootstrapState = NotateApplicationCoordinator.bootstrap()
@@ -100,6 +108,19 @@ private struct NotateAppRoot: View {
 
     @ViewBuilder
     private var root: some View {
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--folder-reference-preview") {
+            LibraryFolderDebugPreview()
+        } else {
+            applicationRoot
+        }
+        #else
+        applicationRoot
+        #endif
+    }
+
+    @ViewBuilder
+    private var applicationRoot: some View {
         switch bootstrapState {
         case nil:
             ProgressView("Opening Notate")
