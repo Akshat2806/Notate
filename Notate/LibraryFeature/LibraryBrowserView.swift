@@ -892,8 +892,17 @@ private struct LibraryBrowserHeader: View {
                 compactBar
             } else {
                 VStack(alignment: .leading, spacing: 8) {
-                    if session.breadcrumbItems.isEmpty == false { breadcrumbs }
-                    title
+                    if isFolderScope {
+                        if session.breadcrumbItems.isEmpty == false { breadcrumbs }
+                        if let subtitle {
+                            Text(subtitle)
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                    } else {
+                        title
+                    }
                     HStack {
                         Spacer(minLength: 0)
                         libraryTools
@@ -930,8 +939,8 @@ private struct LibraryBrowserHeader: View {
                 Text(session.scopeTitle)
                     .font(.headline)
                     .lineLimit(dynamicTypeSize.isAccessibilitySize ? 2 : 1)
-                    .opacity(showsCompactTitle ? 1 : 0)
-                    .accessibilityHidden(!showsCompactTitle)
+                    .opacity(isFolderScope || showsCompactTitle ? 1 : 0)
+                    .accessibilityHidden(isFolderScope == false && showsCompactTitle == false)
                     .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: showsCompactTitle)
                     .accessibilityIdentifier("library.compact.title")
                 Spacer(minLength: 0)
@@ -1277,6 +1286,11 @@ private struct LibraryBrowserHeader: View {
         withAnimation(reduceMotion ? nil : NotateDesign.Motion.navigation) {
             session.selectScope(scope)
         }
+    }
+
+    private var isFolderScope: Bool {
+        if case .folder = session.scope { return true }
+        return false
     }
 
     private var subtitle: String? {
