@@ -698,7 +698,7 @@ private struct LibrarySidebar: View {
             if isRail {
                 NotateSelectableAppGlyph(
                     kind: .tag,
-                    selectedTint: session.scope == scope ? .primary : tag.color.swiftUIColor,
+                    selectedTint: tag.color.swiftUIColor,
                     keepsTintWhenUnselected: true,
                     isSelected: session.scope == scope,
                     size: 22
@@ -723,7 +723,7 @@ private struct LibrarySidebar: View {
                 ) {
                     NotateSelectableAppGlyph(
                         kind: .tag,
-                        selectedTint: session.scope == scope ? .primary : tag.color.swiftUIColor,
+                        selectedTint: tag.color.swiftUIColor,
                         keepsTintWhenUnselected: true,
                         isSelected: session.scope == scope,
                         size: 18
@@ -822,7 +822,7 @@ private struct LibrarySidebar: View {
         if isRail {
             NotateSelectableAppGlyph(
                 kind: glyph,
-                selectedTint: isSelected ? .primary : selectedTint(for: scope),
+                selectedTint: selectedTint(for: scope),
                 keepsTintWhenUnselected: keepsTintWhenUnselected(for: scope),
                 isSelected: isSelected,
                 size: 22
@@ -844,7 +844,7 @@ private struct LibrarySidebar: View {
             HStack(spacing: 13) {
                 NotateSelectableAppGlyph(
                     kind: glyph,
-                    selectedTint: isSelected ? .primary : selectedTint(for: scope),
+                    selectedTint: selectedTint(for: scope),
                     keepsTintWhenUnselected: keepsTintWhenUnselected(for: scope),
                     isSelected: isSelected,
                     size: 22
