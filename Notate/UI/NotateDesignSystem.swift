@@ -377,13 +377,24 @@ private struct NotateGlassSurfaceModifier<S: Shape>: ViewModifier {
                     radius: elevation.token.radius,
                     y: elevation.token.y
                 )
-        } else if let tint {
-            content
-                .glassEffect(.regular.tint(tint).interactive(isInteractive), in: shape)
-                .overlay(accessibleOutline)
+        } else if #available(iOS 26.0, *) {
+            if let tint {
+                content
+                    .glassEffect(.regular.tint(tint).interactive(isInteractive), in: shape)
+                    .overlay(accessibleOutline)
+            } else {
+                content
+                    .glassEffect(.regular.interactive(isInteractive), in: shape)
+                    .overlay(accessibleOutline)
+            }
         } else {
             content
-                .glassEffect(.regular.interactive(isInteractive), in: shape)
+                .background {
+                    shape.fill(.regularMaterial)
+                    if let tint {
+                        shape.fill(tint.opacity(reducedTransparencyTintOpacity))
+                    }
+                }
                 .overlay(accessibleOutline)
         }
     }

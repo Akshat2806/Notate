@@ -137,6 +137,7 @@ public final class LibraryRepository {
     @ObservationIgnored private var hasLoadedAssignments = false
     @ObservationIgnored private var hasLoadedDeletedPages = false
     @ObservationIgnored private var hasLoadedAllItems = false
+    @ObservationIgnored private var loadedChildCatalogs: Set<UUID> = []
 
     public private(set) var items: [LibraryItemRecord] = []
     public private(set) var tags: [TagRecord] = []
@@ -280,6 +281,7 @@ public final class LibraryRepository {
                 items = try modelContext.fetch(rootDescriptor)
                 hasLoadedAllItems = false
             }
+            loadedChildCatalogs.removeAll(keepingCapacity: false)
             readyItemCount = items.lazy.filter { $0.payloadState == .ready }.count
             tags = try modelContext.fetch(FetchDescriptor<TagRecord>())
                 .sorted { $0.normalizedName < $1.normalizedName }
@@ -345,7 +347,9 @@ public final class LibraryRepository {
                 let descriptor = FetchDescriptor<LibraryItemRecord>(
                     predicate: #Predicate { $0.parentID == requestedParentID }
                 )
-                appendItemsIfMissing(try modelContext.fetch(descriptor))
+                let fetchedChildren = try modelContext.fetch(descriptor)
+                loadedChildCatalogs.insert(parentID)
+                appendItemsIfMissing(fetchedChildren)
             } catch {
                 cacheRefreshFailureDescription = String(describing: error)
             }
@@ -355,6 +359,30 @@ public final class LibraryRepository {
                 && $0.kind.isLegacyLibraryItem == false
                 && $0.parentID == parentID
         }, by: sort)
+    }
+
+    /// Returns a folder's child count only when its child catalog is already
+    /// in memory. SwiftUI card bodies and accessibility getters use this
+    /// non-fetching path so view construction never issues one SwiftData query
+    /// per folder.
+    func cachedChildCount(of parentID: UUID) -> Int? {
+        guard hasLoadedAllItems || loadedChildCatalogs.contains(parentID) else {
+            return nil
+        }
+        return items.lazy.filter {
+            !$0.isTrashed
+                && $0.kind.isLegacyLibraryItem == false
+                && $0.parentID == parentID
+        }.count
+    }
+
+    /// Trash folder counts include every descendant in the same trash group.
+    /// They are available only after the complete catalog has been loaded.
+    func cachedTrashSubtreeCount(of itemID: UUID, trashGroupID: UUID) -> Int? {
+        guard hasLoadedAllItems else { return nil }
+        return subtree(of: itemID, includingRoot: false, includeTrashed: true)
+            .filter { $0.trashMetadata?.trashGroupID == trashGroupID }
+            .count
     }
 
     public func subtree(
@@ -370,7 +398,7 @@ public final class LibraryRepository {
 
     public func favorites(sort: LibrarySort = .activity) -> [LibraryItemRecord] {
         ensureCompleteItemCatalogLoaded()
-        sorted(activeItems.filter(\.isFavorite), by: sort)
+        return sorted(activeItems.filter(\.isFavorite), by: sort)
     }
 
     public func recentItems(
@@ -378,7 +406,7 @@ public final class LibraryRepository {
         sort: LibrarySort = .activity
     ) -> [LibraryItemRecord] {
         ensureCompleteItemCatalogLoaded()
-        sorted(
+        return sorted(
             activeItems.filter { item in
                 item.kind != .folder && item.activityDate >= cutoff
             },
@@ -420,7 +448,7 @@ public final class LibraryRepository {
 
     public func deletedPages(ownerItemID: UUID? = nil) -> [DeletedPageRecord] {
         ensureDeletedPagesLoaded()
-        deletedPages.filter { ownerItemID == nil || $0.ownerItemID == ownerItemID }
+        return deletedPages.filter { ownerItemID == nil || $0.ownerItemID == ownerItemID }
             .sorted { lhs, rhs in
                 if lhs.deletedAt != rhs.deletedAt { return lhs.deletedAt > rhs.deletedAt }
                 return lhs.originalIndex < rhs.originalIndex
@@ -428,11 +456,23 @@ public final class LibraryRepository {
     }
 
     public func deletedPageAsset(id: UUID) throws -> LibraryDeletedPageAsset {
-        try loadDeletedPagesIfNeeded()
-        guard let record = deletedPages.first(where: { $0.id == id }) else {
-            throw LibraryRepositoryError.deletedPageNotFound(id)
-        }
+        let record = try deletedPageRecord(id: id)
         return record.assetDescriptor
+    }
+
+    /// Recovery journals contain exact tombstone IDs. Resolve only the
+    /// referenced row instead of hydrating every deleted-page record during
+    /// launch recovery.
+    func containsDeletedPage(id: UUID) throws -> Bool {
+        if deletedPages.contains(where: { $0.id == id }) { return true }
+        guard hasLoadedDeletedPages == false else { return false }
+        let requestedID = id
+        let descriptor = FetchDescriptor<DeletedPageRecord>(
+            predicate: #Predicate<DeletedPageRecord> { page in
+                page.id == requestedID
+            }
+        )
+        return try modelContext.fetch(descriptor).isEmpty == false
     }
 
     /// A nil scope performs a global search. A folder scope searches its direct
@@ -1287,32 +1327,66 @@ public final class LibraryRepository {
     /// the catalog. A folder anchor includes its complete subtree to prevent
     /// ready descendants from becoming orphans when an unpublished parent is
     /// removed.
-    public func makeIncompletePayloadReconciliationPlan()
+    public func makeIncompletePayloadReconciliationPlan() throws
         -> LibraryIncompletePayloadReconciliationPlan {
-        ensureCompleteItemCatalogLoaded()
-        let anchors = Set(activeItems.lazy.filter {
-            $0.pendingDuplicationID != nil
-                || $0.payloadState == .creating
-                || $0.payloadState == .importing
-        }.map(\.id))
-        guard anchors.isEmpty == false else {
+        let creatingState = LibraryPayloadState.creating
+        let importingState = LibraryPayloadState.importing
+        let descriptor = FetchDescriptor<LibraryItemRecord>(
+            predicate: #Predicate<LibraryItemRecord> { record in
+                record.pendingDuplicationID != nil
+                    || record.payloadState == creatingState
+                    || record.payloadState == importingState
+            }
+        )
+        let candidates = try modelContext.fetch(descriptor).filter {
+            !$0.isTrashed && $0.kind.isLegacyLibraryItem == false
+        }
+        appendItemsIfMissing(candidates)
+        guard candidates.isEmpty == false else {
             return LibraryIncompletePayloadReconciliationPlan()
         }
 
-        let roots = topmostSelectedItems(anchors)
-        let itemIDs = Set(roots.flatMap { root in
-            subtreeRecords(rootID: root.id, candidates: activeItems).map(\.id)
-        })
-        let entries = activeItems
-            .filter { itemIDs.contains($0.id) }
-            .map {
-                LibraryIncompletePayloadEntry(
-                    itemID: $0.id,
-                    payloadState: $0.payloadState,
-                    pendingDuplicationID: $0.pendingDuplicationID
-                )
+        let candidateIDs = Set(candidates.map(\.id))
+        var roots: [LibraryItemRecord] = []
+        for candidate in candidates {
+            var ancestorID = candidate.parentID
+            var visited: Set<UUID> = [candidate.id]
+            var hasIncompleteAncestor = false
+
+            while let currentID = ancestorID,
+                visited.insert(currentID).inserted {
+                if candidateIDs.contains(currentID) {
+                    hasIncompleteAncestor = true
+                    break
+                }
+                guard let parent = item(id: currentID), parent.isTrashed == false else {
+                    break
+                }
+                ancestorID = parent.parentID
             }
-            .sorted { $0.itemID.uuidString < $1.itemID.uuidString }
+            if hasIncompleteAncestor == false { roots.append(candidate) }
+        }
+        roots.sort(by: stableOrder)
+
+        var subtreeByID: [UUID: LibraryItemRecord] = [:]
+        for root in roots {
+            var pending = [root]
+            while let record = pending.popLast() {
+                guard subtreeByID[record.id] == nil else { continue }
+                subtreeByID[record.id] = record
+                guard record.kind == .folder else { continue }
+                pending.append(contentsOf: try recoveryChildren(of: record.id).reversed())
+            }
+        }
+
+        let entries = subtreeByID.values.map {
+            LibraryIncompletePayloadEntry(
+                itemID: $0.id,
+                payloadState: $0.payloadState,
+                pendingDuplicationID: $0.pendingDuplicationID
+            )
+        }
+        .sorted { $0.itemID.uuidString < $1.itemID.uuidString }
 
         return LibraryIncompletePayloadReconciliationPlan(
             rootItemIDs: roots.map(\.id).sorted { $0.uuidString < $1.uuidString },
@@ -1328,20 +1402,41 @@ public final class LibraryRepository {
         _ plan: LibraryIncompletePayloadReconciliationPlan
     ) throws -> [UUID] {
         guard plan.isEmpty == false else { return [] }
-        guard makeIncompletePayloadReconciliationPlan() == plan else {
+        guard try makeIncompletePayloadReconciliationPlan() == plan else {
             throw LibraryRepositoryError.invalidIncompletePayloadPlan
         }
 
         let itemIDs = Set(plan.itemIDs)
         let records = items.filter { itemIDs.contains($0.id) }
-        let linkedPages = deletedPages.filter { itemIDs.contains($0.ownerItemID) }
         guard records.count == itemIDs.count else {
             throw LibraryRepositoryError.invalidIncompletePayloadPlan
         }
-        try mutate {
-            for assignment in assignments where itemIDs.contains(assignment.itemID) {
-                modelContext.delete(assignment)
-            }
+        let requestedItemIDs = Array(itemIDs)
+        let linkedAssignments: [TagAssignment]
+        if hasLoadedAssignments {
+            linkedAssignments = assignments.filter { itemIDs.contains($0.itemID) }
+        } else {
+            let descriptor = FetchDescriptor<TagAssignment>(
+                predicate: #Predicate<TagAssignment> { assignment in
+                    requestedItemIDs.contains(assignment.itemID)
+                }
+            )
+            linkedAssignments = try modelContext.fetch(descriptor)
+        }
+        let linkedPages: [DeletedPageRecord]
+        if hasLoadedDeletedPages {
+            linkedPages = deletedPages.filter { itemIDs.contains($0.ownerItemID) }
+        } else {
+            let descriptor = FetchDescriptor<DeletedPageRecord>(
+                predicate: #Predicate<DeletedPageRecord> { page in
+                    requestedItemIDs.contains(page.ownerItemID)
+                }
+            )
+            linkedPages = try modelContext.fetch(descriptor)
+        }
+
+        try mutate(loadDeferredMetadata: false, loadCompleteItemCatalog: false) {
+            linkedAssignments.forEach(modelContext.delete)
             linkedPages.forEach(modelContext.delete)
             records.forEach(modelContext.delete)
         }
@@ -1471,12 +1566,30 @@ public final class LibraryRepository {
 
     /// Captures obsolete freeform Canvas records without mutating the catalog.
     /// Callers stage complete item directories in recovery storage first.
-    public func makeLegacyCanvasRemovalPlan() -> LibraryPurgePlan {
-        ensureCompleteItemCatalogLoaded()
-        ensureDeletedPagesLoaded()
-        let doomedItems = items.filter { $0.kind == .canvas }
+    public func makeLegacyCanvasRemovalPlan() throws -> LibraryPurgePlan {
+        let legacyCanvasKind = LibraryItemKind.canvas
+        let descriptor = FetchDescriptor<LibraryItemRecord>(
+            predicate: #Predicate<LibraryItemRecord> { record in
+                record.kind == legacyCanvasKind
+            }
+        )
+        let doomedItems = try modelContext.fetch(descriptor)
+        appendItemsIfMissing(doomedItems)
         let doomedIDs = Set(doomedItems.map(\.id))
-        let linkedPages = deletedPages.filter { doomedIDs.contains($0.ownerItemID) }
+        let linkedPages: [DeletedPageRecord]
+        if hasLoadedDeletedPages {
+            linkedPages = deletedPages.filter { doomedIDs.contains($0.ownerItemID) }
+        } else if doomedIDs.isEmpty {
+            linkedPages = []
+        } else {
+            let requestedItemIDs = Array(doomedIDs)
+            let pageDescriptor = FetchDescriptor<DeletedPageRecord>(
+                predicate: #Predicate<DeletedPageRecord> { page in
+                    requestedItemIDs.contains(page.ownerItemID)
+                }
+            )
+            linkedPages = try modelContext.fetch(pageDescriptor)
+        }
         return LibraryPurgePlan(
             itemIDs: doomedIDs.sorted { $0.uuidString < $1.uuidString },
             deletedPageAssets: linkedPages.map(\.assetDescriptor)
@@ -1491,22 +1604,48 @@ public final class LibraryRepository {
         _ plan: LibraryPurgePlan
     ) throws -> LibraryPurgeResult {
         guard !plan.isEmpty else { return LibraryPurgeResult() }
-        guard makeLegacyCanvasRemovalPlan() == plan else {
+        guard try makeLegacyCanvasRemovalPlan() == plan else {
             throw LibraryRepositoryError.invalidLegacyCanvasRemovalPlan
         }
         let doomedIDs = Set(plan.itemIDs)
         let pageIDs = Set(plan.deletedPageAssets.map(\.recordID))
         let doomedItems = items.filter { doomedIDs.contains($0.id) && $0.kind == .canvas }
-        let doomedPages = deletedPages.filter { pageIDs.contains($0.id) }
+        let doomedPages: [DeletedPageRecord]
+        if hasLoadedDeletedPages {
+            doomedPages = deletedPages.filter { pageIDs.contains($0.id) }
+        } else if pageIDs.isEmpty {
+            doomedPages = []
+        } else {
+            let requestedPageIDs = Array(pageIDs)
+            let pageDescriptor = FetchDescriptor<DeletedPageRecord>(
+                predicate: #Predicate<DeletedPageRecord> { page in
+                    requestedPageIDs.contains(page.id)
+                }
+            )
+            doomedPages = try modelContext.fetch(pageDescriptor)
+        }
         guard doomedItems.count == doomedIDs.count,
             doomedPages.count == pageIDs.count else {
             throw LibraryRepositoryError.invalidLegacyCanvasRemovalPlan
         }
 
-        try mutate {
-            for assignment in assignments where doomedIDs.contains(assignment.itemID) {
-                modelContext.delete(assignment)
-            }
+        let linkedAssignments: [TagAssignment]
+        if hasLoadedAssignments {
+            linkedAssignments = assignments.filter { doomedIDs.contains($0.itemID) }
+        } else if doomedIDs.isEmpty {
+            linkedAssignments = []
+        } else {
+            let requestedItemIDs = Array(doomedIDs)
+            let assignmentDescriptor = FetchDescriptor<TagAssignment>(
+                predicate: #Predicate<TagAssignment> { assignment in
+                    requestedItemIDs.contains(assignment.itemID)
+                }
+            )
+            linkedAssignments = try modelContext.fetch(assignmentDescriptor)
+        }
+
+        try mutate(loadDeferredMetadata: false, loadCompleteItemCatalog: false) {
+            linkedAssignments.forEach(modelContext.delete)
             doomedPages.forEach(modelContext.delete)
             doomedItems.forEach(modelContext.delete)
         }
@@ -1684,7 +1823,7 @@ public final class LibraryRepository {
 
     private var activeItems: [LibraryItemRecord] {
         ensureCompleteItemCatalogLoaded()
-        items.filter { !$0.isTrashed && $0.kind.isLegacyLibraryItem == false }
+        return items.filter { !$0.isTrashed && $0.kind.isLegacyLibraryItem == false }
     }
 
     private func ensureCompleteItemCatalogLoaded() {
@@ -1702,9 +1841,38 @@ public final class LibraryRepository {
         items.append(contentsOf: missing)
     }
 
+    private func recoveryChildren(of parentID: UUID) throws -> [LibraryItemRecord] {
+        let requestedParentID = parentID
+        let descriptor = FetchDescriptor<LibraryItemRecord>(
+            predicate: #Predicate<LibraryItemRecord> { record in
+                record.parentID == requestedParentID
+            }
+        )
+        let fetched = try modelContext.fetch(descriptor)
+        appendItemsIfMissing(fetched)
+        return fetched.filter {
+            !$0.isTrashed && $0.kind.isLegacyLibraryItem == false
+        }.sorted(by: stableOrder)
+    }
+
+    private func deletedPageRecord(id: UUID) throws -> DeletedPageRecord {
+        if let record = deletedPages.first(where: { $0.id == id }) { return record }
+        let requestedID = id
+        let descriptor = FetchDescriptor<DeletedPageRecord>(
+            predicate: #Predicate<DeletedPageRecord> { page in
+                page.id == requestedID
+            }
+        )
+        guard let record = try modelContext.fetch(descriptor).first else {
+            throw LibraryRepositoryError.deletedPageNotFound(id)
+        }
+        deletedPages.append(record)
+        return record
+    }
+
     private var itemIndex: [UUID: LibraryItemRecord] {
         ensureCompleteItemCatalogLoaded()
-        Dictionary(
+        return Dictionary(
             items.map { ($0.id, $0) },
             uniquingKeysWith: { current, _ in current }
         )
@@ -2215,18 +2383,17 @@ public final class LibraryRepository {
     }
 
     private func loadAssignmentsIfNeeded() throws {
-        guard hasLoadedAssignments else {
-            var descriptor = FetchDescriptor<TagAssignment>()
-            descriptor.fetchLimit = tagAssignmentLimit + 1
-            let fetched = try modelContext.fetch(descriptor)
-            guard fetched.count <= tagAssignmentLimit else {
-                throw LibraryRepositoryError.maximumTagAssignmentCountExceeded(
-                    maximum: tagAssignmentLimit
-                )
-            }
-            assignments = fetched
-            hasLoadedAssignments = true
+        guard hasLoadedAssignments == false else { return }
+        var descriptor = FetchDescriptor<TagAssignment>()
+        descriptor.fetchLimit = tagAssignmentLimit + 1
+        let fetched = try modelContext.fetch(descriptor)
+        guard fetched.count <= tagAssignmentLimit else {
+            throw LibraryRepositoryError.maximumTagAssignmentCountExceeded(
+                maximum: tagAssignmentLimit
+            )
         }
+        assignments = fetched
+        hasLoadedAssignments = true
     }
 
     private func ensureDeletedPagesLoaded() {

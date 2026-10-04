@@ -325,12 +325,13 @@ struct LibraryGridCard: View {
                     .padding(.horizontal, 2)
 
                     if item.kind == .folder {
-                        let itemCount = session.folderItemCount(for: item)
-                        Text("\(itemCount) \(itemCount == 1 ? "item" : "items")")
-                            .font(.caption)
-                            .foregroundStyle(Color(uiColor: .secondaryLabel))
-                            .lineLimit(1)
-                            .frame(maxWidth: .infinity, alignment: .center)
+                        if let itemCount = session.cachedFolderItemCount(for: item) {
+                            Text("\(itemCount) \(itemCount == 1 ? "item" : "items")")
+                                .font(.caption)
+                                .foregroundStyle(Color(uiColor: .secondaryLabel))
+                                .lineLimit(1)
+                                .frame(maxWidth: .infinity, alignment: .center)
+                        }
                     } else {
                         Text(item.modifiedAt.formatted(date: .abbreviated, time: .shortened))
                             .font(.caption)
@@ -434,8 +435,9 @@ struct LibraryGridCard: View {
             values.append("Content missing")
         }
         if item.kind == .folder {
-            let itemCount = session.folderItemCount(for: item)
-            values.append("\(itemCount) \(itemCount == 1 ? "item" : "items")")
+            if let itemCount = session.cachedFolderItemCount(for: item) {
+                values.append("\(itemCount) \(itemCount == 1 ? "item" : "items")")
+            }
         }
         return values.joined(separator: ", ")
     }
@@ -553,11 +555,12 @@ struct LibraryListRow: View {
                             }
                         }
                         if item.kind == .folder {
-                            let itemCount = session.folderItemCount(for: item)
-                            Text("\(itemCount) \(itemCount == 1 ? "item" : "items")")
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(dynamicTypeSize.isAccessibilitySize ? 2 : 1)
+                            if let itemCount = session.cachedFolderItemCount(for: item) {
+                                Text("\(itemCount) \(itemCount == 1 ? "item" : "items")")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(dynamicTypeSize.isAccessibilitySize ? 2 : 1)
+                            }
                         }
                     }
                     .layoutPriority(1)
@@ -617,8 +620,9 @@ struct LibraryListRow: View {
         }
         parts.append(item.kind.libraryTitle)
         if item.kind == .folder {
-            let itemCount = session.folderItemCount(for: item)
-            parts.append("\(itemCount) item\(itemCount == 1 ? "" : "s")")
+            if let itemCount = session.cachedFolderItemCount(for: item) {
+                parts.append("\(itemCount) item\(itemCount == 1 ? "" : "s")")
+            }
         } else if item.pageCount > 0 {
             parts.append("\(item.pageCount) page\(item.pageCount == 1 ? "" : "s")")
         }
@@ -1127,7 +1131,7 @@ private struct LibraryNonFolderArtwork: View {
         case .folder:
             LibraryFolderArtwork(
                 symbolName: item.folderSettings?.symbolName ?? "basketball",
-                color: (item.folderSettings?.color ?? .folderBlue).swiftUIColor,
+                color: (item.folderSettings?.color ?? .folderBlue).swiftUIColor
             )
         case .notebook:
             LibraryAutomaticNotebookArtwork()

@@ -92,6 +92,11 @@ private struct NotateAppRoot: View {
                     : appearance.colorScheme
             )
             .task { @MainActor in
+                // Let SwiftUI commit the lightweight opening screen before
+                // synchronous SwiftData container and repository setup. That
+                // work can otherwise consume the scene-creation watchdog's
+                // first-frame budget on slower devices.
+                await Task.yield()
                 guard bootstrapState == nil else { return }
                 NotateLaunchInstrumentation.beginLaunchToLibraryVisibility()
                 bootstrapState = NotateApplicationCoordinator.bootstrap()

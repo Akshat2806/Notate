@@ -453,7 +453,7 @@ struct LibraryFolderEditor: View {
             LibraryFolderDraft(
                 name: trimmedName,
                 color: selectedColor,
-                symbolName: symbolName,
+                symbolName: symbolName
             )
         )
         dismiss()
