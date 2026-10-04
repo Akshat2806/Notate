@@ -554,9 +554,9 @@ final class LibraryAppSession {
         guard canMutate else { return false }
         switch scope {
         case .home, .folder:
-            true
+            return true
         case .favorites, .recent, .tag, .trash, .settings:
-            false
+            return false
         }
     }
 
@@ -624,6 +624,26 @@ final class LibraryAppSession {
             .count
         }
         return repository.children(of: item.id).count
+    }
+
+    /// Folder card rendering must never fetch from SwiftData. Counts appear
+    /// only after the corresponding child catalog is already cached; the full
+    /// count API remains available for explicit folder editing actions.
+    func cachedFolderItemCount(for item: LibraryItemRecord) -> Int? {
+        guard item.kind == .folder else { return nil }
+        if let trashGroupID = item.trashMetadata?.trashGroupID {
+            return repository.cachedTrashSubtreeCount(
+                of: item.id,
+                trashGroupID: trashGroupID
+            )
+        }
+        return repository.cachedChildCount(of: item.id)
+    }
+
+    func folderArtworkPreviewItems(for item: LibraryItemRecord) -> [LibraryFolderPreviewItem] {
+        guard item.kind == .folder,
+            let children = repository.cachedChildren(of: item.id) else { return [] }
+        return LibraryFolderPreviewPolicy.previewItems(for: item.id, candidates: children)
     }
 
     func selectScope(_ newScope: LibraryScope) {
