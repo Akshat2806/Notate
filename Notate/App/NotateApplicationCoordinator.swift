@@ -189,6 +189,7 @@ final class NotateApplicationCoordinator {
     /// journal is reconciled. The library is browse-only until those files and
     /// interrupted catalog payloads are back in a coherent state.
     private(set) var isLibraryRecoveryComplete = false
+    @ObservationIgnored private var didScheduleTrashRetentionCleanup = false
     /// XCUITest launches against an isolated, in-memory catalog. This flag is
     /// intentionally scoped to launch configuration so production behavior
     /// cannot depend on a UI-test-only code path.
@@ -419,6 +420,15 @@ final class NotateApplicationCoordinator {
         )
         if NotateUITestLaunchConfiguration.seedFixture {
             try coordinator.installUITestFixture()
+            if ProcessInfo.processInfo.environment["NOTATE_UI_TEST_LAYOUT_FIXTURE"] == "1" {
+                // These ready, metadata-only samples have no authored payload
+                // transactions to recover. Keep visual layout checks separate
+                // from startup/recovery tests, which use the ordinary fixture.
+                UserDefaults.standard.set(NotateDesign.Library.Shelf.comfortableZoom,
+                                          forKey: "notate.library.gridZoom")
+                coordinator.isLibraryRecoveryComplete = true
+                coordinator.didStart = true
+            }
         }
         return coordinator
     }
@@ -471,6 +481,23 @@ final class NotateApplicationCoordinator {
             pageCount: 1
         )
 
+        if ProcessInfo.processInfo.environment["NOTATE_UI_TEST_LAYOUT_FIXTURE"] == "1" {
+            let landscape = try repository.createItem(
+                kind: .importedDocument, name: "Landscape quick note", payloadState: .ready,
+                sourceFilename: "landscape.pdf"
+            )
+            try installUITestDocumentThumbnail(for: landscape.id, size: CGSize(width: 792, height: 612))
+            _ = try repository.createItem(
+                kind: .notebook, name: "A notebook with a title that wraps onto two lines",
+                coverChoice: .preset(.softLinen), payloadState: .ready
+            )
+            _ = try repository.createItem(
+                kind: .notebook,
+                name: "An exceptionally long notebook title to verify truncation without increasing the artwork size or separating the subtitle",
+                coverChoice: .preset(.softLinen), payloadState: .ready
+            )
+        }
+
         var parentID = courses.id
         // Courses is already level one. Four descendants bring the final
         // folder to the supported maximum of five, which lets UI tests prove
@@ -483,6 +510,16 @@ final class NotateApplicationCoordinator {
                 payloadState: .ready
             )
             parentID = folder.id
+        }
+
+        if ProcessInfo.processInfo.environment["NOTATE_UI_TEST_LAYOUT_FIXTURE"] == "1" {
+            for index in 1...12 {
+                _ = try repository.createItem(
+                    kind: .notebook, name: "Archive notebook \(index)",
+                    coverChoice: .preset(.softLinen), payloadState: .ready,
+                    now: Date(timeIntervalSince1970: Double(index))
+                )
+            }
         }
 
         let tag = try repository.createTag(name: "Studio", color: .init(
@@ -506,8 +543,9 @@ final class NotateApplicationCoordinator {
     /// as a completed import without coupling library tests to PDF rendering.
     /// The deterministic item-scoped path is visible to the thumbnail loader
     /// only while the opt-in UI-test launch contract is active.
-    private func installUITestDocumentThumbnail(for itemID: UUID) throws {
-        let size = CGSize(width: 612, height: 792)
+    private func installUITestDocumentThumbnail(
+        for itemID: UUID, size: CGSize = CGSize(width: 612, height: 792)
+    ) throws {
         let format = UIGraphicsImageRendererFormat()
         format.scale = 1
         let renderer = UIGraphicsImageRenderer(size: size, format: format)
@@ -691,34 +729,6 @@ final class NotateApplicationCoordinator {
         guard catalogFailureDescription == nil else { return }
         await Task.yield()
 
-        do {
-            try NotateLaunchInstrumentation.measure(
-                "Complete Catalog For Recovery"
-            ) {
-                try repository.loadCompleteItemCatalog()
-            }
-        } catch {
-            enterCatalogFailure(
-                "Notate couldn't load every library record safely for recovery. "
-                    + "The catalog was preserved. Details: \(error.localizedDescription)"
-            )
-            return
-        }
-
-        do {
-            try NotateLaunchInstrumentation.measure(
-                "Deferred Catalog Metadata"
-            ) {
-                try repository.loadDeferredCatalogMetadata()
-            }
-        } catch {
-            enterCatalogFailure(
-                "Notate couldn't finish loading the library metadata safely. "
-                    + "The catalog was preserved. Details: \(error.localizedDescription)"
-            )
-            return
-        }
-
         let recoveryCompleted = await NotateLaunchInstrumentation.measureAsync(
             "Required Library Recovery"
         ) {
@@ -733,13 +743,13 @@ final class NotateApplicationCoordinator {
             editReadinessInterval
         )
         didRecordEditReadiness = true
-        await NotateLaunchInstrumentation.measureAsync("Deferred Library Cleanup") {
-            await purgeExpiredTrash()
-        }
         guard isCatalogWritable else { return }
         await NotateLaunchInstrumentation.measureAsync("Legacy Canvas Maintenance") {
             await migrateLegacyCanvasIfNeeded()
             await removeLegacyCanvasItems()
+        }
+        if librarySession.scope == .trash {
+            scheduleExpiredTrashCleanup()
         }
     }
 
@@ -898,6 +908,7 @@ final class NotateApplicationCoordinator {
             route = .tag(id)
         case .trash:
             route = .trash
+            scheduleExpiredTrashCleanup()
         case .settings:
             route = .settings
         case let .folder(id):
@@ -1388,6 +1399,8 @@ final class NotateApplicationCoordinator {
     ) async throws -> PreparedNotebookCover? {
         switch choice {
         case .automatic:
+            return nil
+        case .noCover:
             return nil
 
         case .preset:
@@ -2724,13 +2737,15 @@ final class NotateApplicationCoordinator {
                     continue
                 }
 
-                let recordPresence = transaction.manifest.catalogAnchors.map {
-                    anchor -> Bool in
+                var recordPresence: [Bool] = []
+                for anchor in transaction.manifest.catalogAnchors {
                     switch anchor.kind {
                     case .item:
-                        repository.item(id: anchor.id) != nil
+                        recordPresence.append(repository.item(id: anchor.id) != nil)
                     case .deletedPage:
-                        repository.deletedPages().contains { $0.id == anchor.id }
+                        recordPresence.append(
+                            try repository.containsDeletedPage(id: anchor.id)
+                        )
                     }
                 }
                 if recordPresence.allSatisfy({ $0 }) {
@@ -2771,7 +2786,7 @@ final class NotateApplicationCoordinator {
             )
         }
         let recordID = anchors[0].id
-        guard repository.deletedPages().contains(where: { $0.id == recordID }) else {
+        guard try repository.containsDeletedPage(id: recordID) else {
             try await assetStore.discardRecoveryTransaction(
                 transaction,
                 authority: .catalogRecordsAbsent
@@ -2843,7 +2858,17 @@ final class NotateApplicationCoordinator {
     /// storage before the single SwiftData commit and are restored if that
     /// commit rejects the captured plan.
     private func reconcileIncompletePayloads() async {
-        let plan = repository.makeIncompletePayloadReconciliationPlan()
+        let plan: LibraryIncompletePayloadReconciliationPlan
+        do {
+            plan = try NotateLaunchInstrumentation.measure(
+                "Incomplete Payload Recovery Scan"
+            ) {
+                try repository.makeIncompletePayloadReconciliationPlan()
+            }
+        } catch {
+            blockLibraryForRecoveryFailure(error)
+            return
+        }
         guard plan.isEmpty == false else { return }
 
         let transaction: LibraryAssetTrashTransaction
@@ -2884,6 +2909,20 @@ final class NotateApplicationCoordinator {
             try await commitDeletionPlan(plan)
         } catch {
             startupNotice = error.localizedDescription
+        }
+    }
+
+    /// Retention cleanup needs a complete Trash view. Run it only after the
+    /// user enters Trash, where its catalog data is already needed, instead of
+    /// making every launch synchronously hydrate the entire library.
+    private func scheduleExpiredTrashCleanup() {
+        guard isCatalogWritable, didScheduleTrashRetentionCleanup == false else { return }
+        didScheduleTrashRetentionCleanup = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await NotateLaunchInstrumentation.measureAsync("Trash Retention Cleanup") {
+                await self.purgeExpiredTrash()
+            }
         }
     }
 
@@ -3104,10 +3143,10 @@ final class NotateApplicationCoordinator {
     }
 
     private func removeLegacyCanvasItems() async {
-        let plan = repository.makeLegacyCanvasRemovalPlan()
-        guard plan.isEmpty == false else { return }
         var recoveryTransaction: LibraryAssetTrashTransaction?
         do {
+            let plan = try repository.makeLegacyCanvasRemovalPlan()
+            guard plan.isEmpty == false else { return }
             let staged = try await assetStore.stageRecoveryTransaction(
                 purpose: .legacyCanvasRemoval,
                 catalogAnchors: plan.itemIDs.map {

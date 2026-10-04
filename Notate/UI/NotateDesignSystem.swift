@@ -138,16 +138,47 @@ enum NotateDesign {
         /// New sheet formats supply their own ratio and fit into this envelope.
         enum Shelf {
             static let artworkAspectRatio: CGFloat = 1
-            static let notebookAspectRatio: CGFloat = 3 / 4
+            static let notebookAspectRatio: CGFloat = 2 / 3
             static let aSeriesAspectRatio: CGFloat = 1 / CGFloat(2).squareRoot()
             static let folderAspectRatio: CGFloat = 584 / 436
             static let artworkInset: CGFloat = 6
-            static let labelSpacing: CGFloat = 12
+            static let artworkToTitleSpacing: CGFloat = 12
+            static let labelSpacing: CGFloat = artworkToTitleSpacing - artworkInset
             static let metadataSpacing: CGFloat = 4
-            static let titleHeight: CGFloat = 40
             static let columnSpacing: CGFloat = 28
-            static let rowSpacing: CGFloat = 40
-            static let folderWidthFraction: CGFloat = 0.94
+            static let rowSpacing: CGFloat = 32
+            static let folderWidthFraction: CGFloat = 160 / 184
+            static let smallEnvelope: CGFloat = 144
+            static let comfortableEnvelope: CGFloat = 168
+            static let largeEnvelope: CGFloat = 200
+            static let smallZoom: Double = 0.72
+            static let comfortableZoom: Double = 0.84
+            static let largeZoom: Double = 1.48
+
+            static func envelopeWidth(for zoom: Double) -> CGFloat {
+                let boundedZoom = zoom.isFinite
+                    ? min(max(zoom, smallZoom), largeZoom) : comfortableZoom
+                if boundedZoom <= comfortableZoom {
+                    return smallEnvelope + (comfortableEnvelope - smallEnvelope)
+                        * CGFloat((boundedZoom - smallZoom) / (comfortableZoom - smallZoom))
+                }
+                return comfortableEnvelope + (largeEnvelope - comfortableEnvelope)
+                    * CGFloat((boundedZoom - comfortableZoom) / (largeZoom - comfortableZoom))
+            }
+
+            static func tileSizeSelection(for zoom: Double) -> Int {
+                if zoom < (smallZoom + comfortableZoom) / 2 { return 0 }
+                if zoom > (comfortableZoom + largeZoom) / 2 { return 2 }
+                return 1
+            }
+
+            static func zoom(for selection: Int) -> Double {
+                switch selection {
+                case 0: smallZoom
+                case 2: largeZoom
+                default: comfortableZoom
+                }
+            }
             static let folderFrontTop: CGFloat = 0.16
             static let folderCornerFraction: CGFloat = 0.065
         }

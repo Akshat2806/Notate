@@ -219,18 +219,30 @@ public struct CanvasToolPicker: View {
         }
         .frame(maxWidth: Self.preferredBarWidth)
         .frame(height: BarMetrics.itemHeight + 2 * BarMetrics.verticalPadding)
-        .glassEffect(
-            .regular.interactive(),
-            in: RoundedRectangle(
-                cornerRadius: NotateDesign.Radius.chrome,
-                style: .continuous
-            )
-        )
+        .modifier(CanvasToolBarSurfaceModifier())
         .reportsToolFrame("bar")
         .accessibilityIdentifier("canvas.tool.strip")
+}
+
+private struct CanvasToolBarSurfaceModifier: ViewModifier {
+    private var shape: RoundedRectangle {
+        RoundedRectangle(
+            cornerRadius: NotateDesign.Radius.chrome,
+            style: .continuous
+        )
     }
 
-    private var barRow: some View {
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            content.glassEffect(.regular.interactive(), in: shape)
+        } else {
+            content.background(.regularMaterial, in: shape)
+        }
+    }
+}
+
+private var barRow: some View {
         HStack(spacing: BarMetrics.itemSpacing) {
             barItems
         }

@@ -2,17 +2,8 @@
   "images": [
     {
       "filename": "NotateEmptyHome.png",
-      "idiom": "universal"
-    },
-    {
-      "appearances": [
-        {
-          "appearance": "luminosity",
-          "value": "dark"
-        }
-      ],
-      "filename": "NotateEmptyHome-dark.png",
-      "idiom": "universal"
+      "idiom": "universal",
+      "scale": "3x"
     }
   ],
   "info": {

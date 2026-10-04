@@ -1,4 +1,5 @@
 import XCTest
+import SwiftData
 @testable import Notate
 
 final class LibraryLaunchPerformanceTests: XCTestCase {
@@ -60,6 +61,62 @@ final class LibraryLaunchPerformanceTests: XCTestCase {
         try repository.loadCompleteItemCatalog()
         XCTAssertTrue(repository.hasLoadedAllItemsForTesting)
         XCTAssertEqual(repository.items.count, 2)
+    }
+
+    @MainActor
+    func testIncompleteRecoveryUsesTargetedReadsAndKeepsTheCatalogLazy() throws {
+        let container = try LibraryModelContainerFactory.makeInMemory()
+        let rootID = UUID()
+        let interruptedID = UUID()
+        let context = container.mainContext
+        context.autosaveEnabled = false
+        context.insert(LibraryItemRecord(
+            id: rootID,
+            name: "Library Folder",
+            kind: .folder,
+            payloadState: .ready
+        ))
+        for index in 0..<1_000 {
+            context.insert(LibraryItemRecord(
+                parentID: rootID,
+                name: "Ready Notebook \(index)",
+                kind: .notebook,
+                payloadState: .ready
+            ))
+        }
+        context.insert(LibraryItemRecord(
+            id: interruptedID,
+            parentID: rootID,
+            name: "Interrupted Notebook",
+            kind: .notebook,
+            payloadState: .creating
+        ))
+        let tagID = UUID()
+        context.insert(TagAssignment(itemID: interruptedID, tagID: tagID))
+        let deletedPageID = UUID()
+        context.insert(DeletedPageRecord(
+            id: deletedPageID,
+            pageID: UUID(),
+            ownerItemID: interruptedID,
+            purgeAfter: .distantFuture,
+            originalIndex: 0,
+            payloadRelativePath: "deleted/page.data"
+        ))
+        try context.save()
+
+        let repository = try LibraryRepository(modelContainer: container)
+        let plan = try repository.makeIncompletePayloadReconciliationPlan()
+
+        XCTAssertEqual(plan.itemIDs, [interruptedID])
+        XCTAssertFalse(repository.hasLoadedAllItemsForTesting)
+        XCTAssertFalse(repository.hasLoadedDeferredCatalogMetadataForTesting)
+
+        try repository.commitIncompletePayloadReconciliation(plan)
+
+        XCTAssertFalse(repository.hasLoadedAllItemsForTesting)
+        XCTAssertFalse(repository.hasLoadedDeferredCatalogMetadataForTesting)
+        XCTAssertNil(repository.item(id: interruptedID))
+        XCTAssertThrowsError(try repository.deletedPageAsset(id: deletedPageID))
     }
 
     @MainActor

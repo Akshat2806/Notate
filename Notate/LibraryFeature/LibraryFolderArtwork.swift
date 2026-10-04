@@ -15,10 +15,9 @@ struct LibraryFolderArtwork: View {
 
     var body: some View {
         GeometryReader { geometry in
-            let aspect = NotateDesign.Library.Shelf.folderAspectRatio
-            let width = min(geometry.size.width * NotateDesign.Library.Shelf.folderWidthFraction,
-                            max(0, geometry.size.height - 2) * aspect)
-            let height = width / aspect
+            let size = LibraryArtworkGeometry.folderSize(inside: geometry.size)
+            let width = size.width
+            let height = size.height
             ZStack {
                 if showsBackdrop {
                     Color(uiColor: .secondarySystemGroupedBackground)
@@ -29,8 +28,9 @@ struct LibraryFolderArtwork: View {
                     hasContents: (itemCount ?? 0) > 0 || !previewItems.isEmpty
                 )
                 .frame(width: width, height: height)
+                .libraryArtworkBounds()
                 .position(x: geometry.size.width / 2,
-                          y: geometry.size.height - 2 - height / 2)
+                          y: geometry.size.height - NotateDesign.Library.Shelf.artworkInset - height / 2)
             }
         }
         .accessibilityHidden(true)
@@ -153,11 +153,6 @@ private struct LibraryFolderShell: View {
                         .init(color: .white.opacity(0.08), location: 1),
                     ]), startPoint: .zero, endPoint: CGPoint(x: 584, y: 0)
                 ))
-                if hasContents {
-                    sheen.addFilter(.blur(radius: 16 * scale))
-                    sheen.fill(Path(CGRect(x: 55, y: 315, width: 475, height: 95)),
-                               with: .color(palette.paper.opacity(0.28)))
-                }
             }
             context.stroke(back, with: .color(.white.opacity(0.40)), lineWidth: 1)
             context.stroke(front, with: .color(.white.opacity(0.25)), lineWidth: 1)
@@ -180,14 +175,17 @@ private struct LibraryFolderShell: View {
 
     private func paperPath(_ rect: CGRect, radius: CGFloat) -> Path {
         var path = Path()
-        path.move(to: CGPoint(x: rect.minX, y: 436))
+        // Keep the sheets inside the pocket so their light does not create
+        // a translucent rim along the folder's bottom edge.
+        let bottom = rect.maxY - 18
+        path.move(to: CGPoint(x: rect.minX, y: bottom))
         path.addLine(to: CGPoint(x: rect.minX, y: rect.minY + radius))
         path.addQuadCurve(to: CGPoint(x: rect.minX + radius, y: rect.minY),
                           control: CGPoint(x: rect.minX, y: rect.minY))
         path.addLine(to: CGPoint(x: rect.maxX - radius, y: rect.minY))
         path.addQuadCurve(to: CGPoint(x: rect.maxX, y: rect.minY + radius),
                           control: CGPoint(x: rect.maxX, y: rect.minY))
-        path.addLine(to: CGPoint(x: rect.maxX, y: 436))
+        path.addLine(to: CGPoint(x: rect.maxX, y: bottom))
         path.closeSubpath()
         return path
     }
@@ -272,47 +270,32 @@ private struct LibraryFolderArtworkPalette {
         var brightness: CGFloat = 0
         input.getHue(&hue, saturation: &saturation, brightness: &brightness, alpha: nil)
         isBlue = saturation > 0.15 && (0.48...0.67).contains(hue)
+        // Match the cyan and lavender folder bodies in the color reference.
+        // The pocket supplies the color; the paper layers supply depth.
         if isBlue {
-            base = UIColor(hue: 0.568 + (hue - 0.60) * 0.25,
-                           saturation: 0.46, brightness: 0.906, alpha: 1)
+            base = UIColor(hue: 0.537 + (hue - 0.60) * 0.25,
+                           saturation: 0.502, brightness: 0.945, alpha: 1)
         } else if saturation > 0.15 && (0.67...0.82).contains(hue) {
-            base = UIColor(hue: 0.720 + (hue - 0.73) * 0.30,
-                           saturation: 0.41, brightness: 0.65, alpha: 1)
+            base = UIColor(hue: 0.714 + (hue - 0.721) * 0.30,
+                           saturation: 0.236, brightness: 0.863, alpha: 1)
         } else {
             base = UIColor(hue: hue, saturation: saturation * 0.65,
                            brightness: 0.78 + brightness * 0.12, alpha: 1)
         }
     }
 
-    var backTop: Color { Color(uiColor: base) }
-    var backBottom: Color { mixed(with: .black, fraction: 0.04) }
+    var backTop: Color { mixed(with: .black, fraction: 0.15) }
+    var backBottom: Color { mixed(with: .black, fraction: 0.18) }
     var paper: Color {
         isBlue ? Color(red: 0.94, green: 0.99, blue: 1)
             : Color(red: 1, green: 0.94, blue: 0.98)
     }
-    var frontTop: Color { mixed(with: .white, fraction: 0.40).opacity(0.52) }
-    var frontMiddle: Color {
-        mixed(with: .white, fraction: isBlue ? 0.25 : 0.40).opacity(isBlue ? 0.72 : 0.60)
-    }
-    var frontBottom: Color {
-        if !isBlue {
-            var hue: CGFloat = 0
-            var saturation: CGFloat = 0
-            var brightness: CGFloat = 0
-            base.getHue(&hue, saturation: &saturation, brightness: &brightness, alpha: nil)
-            return Color(uiColor: UIColor(hue: hue + 0.03, saturation: saturation * 0.92,
-                                           brightness: min(1, brightness + 0.13), alpha: 0.94))
-        }
-        return mixed(with: .white, fraction: 0.20).opacity(0.94)
-    }
+    var frontTop: Color { mixed(with: .white, fraction: 0.12).opacity(0.65) }
+    var frontMiddle: Color { Color(uiColor: base).opacity(0.90) }
+    var frontBottom: Color { mixed(with: .black, fraction: 0.02).opacity(0.97) }
     var glyph: Color {
         if isBlue { return .white.opacity(0.75) }
-        var hue: CGFloat = 0
-        var saturation: CGFloat = 0
-        var brightness: CGFloat = 0
-        base.getHue(&hue, saturation: &saturation, brightness: &brightness, alpha: nil)
-        return Color(uiColor: UIColor(hue: hue + 0.04, saturation: saturation * 0.70,
-                                      brightness: brightness + 0.09, alpha: 0.94))
+        return mixed(with: .black, fraction: 0.22).opacity(0.94)
     }
 
     var emptyGlyph: Color {
