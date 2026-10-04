@@ -265,8 +265,8 @@ public actor CanvasDocumentExporter {
             page,
             in: context,
             maximumImagePixelDimension: max(
-                pageBounds.width * scaleX,
-                pageBounds.height * scaleY
+                cropRect.width * scaleX,
+                cropRect.height * scaleY
             ),
             mode: mode
         )
