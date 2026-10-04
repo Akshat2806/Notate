@@ -909,7 +909,9 @@ private struct LibraryBrowserHeader: View {
                     breadcrumbs
                 }
                 Spacer(minLength: NotateDesign.Spacing.control)
-                searchControl
+                if session.isSearchExpanded {
+                    searchControl
+                }
             }
             .frame(minHeight: 46)
 
@@ -918,8 +920,7 @@ private struct LibraryBrowserHeader: View {
                 if session.breadcrumbItems.isEmpty == false {
                     breadcrumbs
                 }
-                HStack {
-                    Spacer(minLength: 0)
+                if session.isSearchExpanded {
                     searchControl
                 }
             }
@@ -932,6 +933,10 @@ private struct LibraryBrowserHeader: View {
                 folderHeaderIcon
                 titleText
                     .layoutPriority(1)
+                Spacer(minLength: 0)
+                if session.isSearchExpanded == false {
+                    searchControl
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
