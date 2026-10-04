@@ -178,6 +178,7 @@ struct LibraryFolderEditor: View {
         SymbolOption(name: "leaf.fill", label: "Nature"),
         SymbolOption(name: "globe.americas.fill", label: "World"),
         SymbolOption(name: "pencil", label: "Writing"),
+        SymbolOption(name: "cat", label: "Cat"),
         SymbolOption(name: "wrench.and.screwdriver.fill", label: "Tools"),
         SymbolOption(name: "cart.fill", label: "Shopping"),
         SymbolOption(name: "fork.knife", label: "Food"),
@@ -473,6 +474,7 @@ private struct LibraryFolderEditorPreview: View {
             LibraryFolderArtwork(
                 symbolName: symbolName,
                 color: color,
+                itemCount: itemCount,
                 showsBackdrop: false,
                 placesGlyphOnFront: true,
                 previewItems: previewItems,
@@ -517,7 +519,7 @@ struct LibraryNotebookEditor: View {
     init(
         title: String,
         initialName: String = "",
-        initialCoverChoice: LibraryCoverChoice = .automatic,
+        initialCoverChoice: LibraryCoverChoice = .noCover,
         onCommit: @escaping (LibraryNotebookDraft) -> Void
     ) {
         self.title = title
@@ -540,7 +542,7 @@ struct LibraryNotebookEditor: View {
                         title: trimmedName.isEmpty ? nil : trimmedName,
                         customImageData: customCover?.data
                     )
-                    .aspectRatio(3 / 4, contentMode: .fit)
+                    .aspectRatio(2 / 3, contentMode: .fit)
                     .frame(width: 142)
                     .shadow(color: .black.opacity(0.16), radius: 16, y: 9)
                     .frame(maxWidth: .infinity)
@@ -730,7 +732,7 @@ struct LibraryCoverPicker: View {
     @State private var coverImportError: String?
 
     init(
-        initialChoice: LibraryCoverChoice = .automatic,
+        initialChoice: LibraryCoverChoice = .noCover,
         itemID: UUID? = nil,
         thumbnailStore: LibraryAutomaticThumbnailStore = .shared,
         onPick: @escaping (LibraryCoverChoice, LibraryCustomCoverDraft?) -> Void
@@ -738,7 +740,9 @@ struct LibraryCoverPicker: View {
         self.itemID = itemID
         self.thumbnailStore = thumbnailStore
         self.onPick = onPick
-        _selectedChoice = State(initialValue: initialChoice)
+        _selectedChoice = State(
+            initialValue: initialChoice == .automatic ? .noCover : initialChoice
+        )
         _customCover = State(initialValue: nil)
         _customPreviewData = State(initialValue: nil)
     }
@@ -753,7 +757,7 @@ struct LibraryCoverPicker: View {
                     VStack(alignment: .leading, spacing: NotateDesign.Spacing.tight) {
                         Text("Cover templates")
                             .font(.title3.weight(.semibold))
-                        Text("Choose a tactile cover, or let the first page become the cover.")
+                        Text("Choose a designed cover, add a photo, or start with no cover.")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
@@ -884,13 +888,14 @@ struct LibraryCoverPicker: View {
 
 private struct LibraryCoverOption: Identifiable {
     let title: String
-    let subtitle: String
     let choice: LibraryCoverChoice
 
     var id: String {
         switch choice {
         case .automatic:
             "automatic"
+        case .noCover:
+            "no-cover"
         case let .preset(preset):
             "preset-\(preset.rawValue)"
         case let .customAsset(relativePath):
@@ -900,14 +905,12 @@ private struct LibraryCoverOption: Identifiable {
 
     static let all: [LibraryCoverOption] = [
         LibraryCoverOption(
-            title: "Automatic",
-            subtitle: "Use the first page",
-            choice: .automatic
+            title: "No cover",
+            choice: .noCover
         ),
     ] + LibraryCuratedCover.curated.map { cover in
         LibraryCoverOption(
             title: cover.title,
-            subtitle: cover.subtitle,
             choice: .preset(cover.preset)
         )
     }
@@ -928,7 +931,7 @@ private struct LibraryCoverSelectionTile: View {
             VStack(alignment: .leading, spacing: NotateDesign.Spacing.compact) {
                 LibraryCoverArtwork(choice: option.choice, title: previewTitle)
                     .shadow(color: .black.opacity(0.12), radius: 7, y: 4)
-                .aspectRatio(3 / 4, contentMode: .fit)
+                .aspectRatio(2 / 3, contentMode: .fit)
                 .frame(maxWidth: .infinity)
                 .overlay {
                     RoundedRectangle(
@@ -947,15 +950,11 @@ private struct LibraryCoverSelectionTile: View {
                     .foregroundStyle(.primary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.82)
-                Text(option.subtitle)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
             }
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("\(option.title), \(option.subtitle)")
+        .accessibilityLabel(option.title)
         .accessibilityValue(isSelected ? "Selected" : "")
         .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
@@ -975,29 +974,22 @@ private struct LibraryCustomCoverSelectionTile: View {
     var body: some View {
         VStack(alignment: .leading, spacing: NotateDesign.Spacing.compact) {
             Group {
-                    if let previewImage {
-                        Image(uiImage: previewImage)
-                            .resizable()
-                            .scaledToFill()
-                    } else {
-                        ZStack {
-                            LinearGradient(
-                                colors: [
-                                    NotateLibraryDesign.accent.opacity(0.08),
-                                    Color(uiColor: .secondarySystemBackground)
-                                ],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                            NotateAppGlyph(
-                                kind: .add,
-                                tint: NotateLibraryDesign.accent,
-                                size: 30
-                            )
-                        }
+                if let previewImage {
+                    Image(uiImage: previewImage)
+                        .resizable()
+                        .scaledToFill()
+                } else {
+                    ZStack {
+                        NotateLibraryDesign.accent.opacity(0.12)
+                        NotateAppGlyph(
+                            kind: .add,
+                            tint: NotateLibraryDesign.accent,
+                            size: 30
+                        )
                     }
+                }
             }
-            .aspectRatio(3 / 4, contentMode: .fit)
+            .aspectRatio(2 / 3, contentMode: .fit)
             .frame(maxWidth: .infinity)
             .clipShape(
                 RoundedRectangle(
@@ -1006,14 +998,16 @@ private struct LibraryCustomCoverSelectionTile: View {
                 )
             )
             .overlay {
-                RoundedRectangle(
-                    cornerRadius: NotateDesign.Radius.option,
-                    style: .continuous
-                )
-                .strokeBorder(
-                    isSelected ? NotateLibraryDesign.accent : Color.primary.opacity(0.10),
-                    lineWidth: isSelected ? 2.5 : 0.8
-                )
+                if isSelected {
+                    RoundedRectangle(
+                        cornerRadius: NotateDesign.Radius.option,
+                        style: .continuous
+                    )
+                    .strokeBorder(
+                        NotateLibraryDesign.accent,
+                        lineWidth: 2.5
+                    )
+                }
             }
             // Match the title and supporting line used by the other covers.
             Text("Add cover")

@@ -2,17 +2,8 @@
   "images": [
     {
       "filename": "NotateEmptySearch.png",
-      "idiom": "universal"
-    },
-    {
-      "appearances": [
-        {
-          "appearance": "luminosity",
-          "value": "dark"
-        }
-      ],
-      "filename": "NotateEmptySearch-dark.png",
-      "idiom": "universal"
+      "idiom": "universal",
+      "scale": "3x"
     }
   ],
   "info": {

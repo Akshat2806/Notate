@@ -46,14 +46,14 @@ public enum LibraryCoverPreset: String, CaseIterable, Codable, Hashable, Identif
 
     public var title: String {
         switch self {
-        case .softLinen: "Rose Composition"
-        case .blueprint: "Mint Orchard"
-        case .warmPaper: "Lavender Stripe"
-        case .skyComposition: "Sky Composition"
-        case .peachOrchard: "Peach Orchard"
-        case .butterStripe: "Butter Stripe"
-        case .aquaComposition: "Aqua Composition"
-        case .periwinkleOrchard: "Periwinkle Orchard"
+        case .softLinen: "Golden Hearts"
+        case .blueprint: "Ivory Stripe"
+        case .warmPaper: "Blue Stripe"
+        case .skyComposition: "Bow & Bloom"
+        case .peachOrchard: "Blue Composition"
+        case .butterStripe: "Sage Grid"
+        case .aquaComposition: "Blush Grid"
+        case .periwinkleOrchard: "Sandstone Stripe"
         }
     }
 }
@@ -61,6 +61,8 @@ public enum LibraryCoverPreset: String, CaseIterable, Codable, Hashable, Identif
 public enum LibraryCoverChoice: Codable, Equatable, Hashable, Sendable {
     /// Render the first page when available, then fall back to generated artwork.
     case automatic
+    /// Keep the notebook's first page for notes and use a neutral shelf mark.
+    case noCover
     case preset(LibraryCoverPreset)
     /// A path relative to the item's asset directory. Absolute paths are never persisted.
     case customAsset(relativePath: String)

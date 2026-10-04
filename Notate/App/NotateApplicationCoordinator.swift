@@ -420,6 +420,15 @@ final class NotateApplicationCoordinator {
         )
         if NotateUITestLaunchConfiguration.seedFixture {
             try coordinator.installUITestFixture()
+            if ProcessInfo.processInfo.environment["NOTATE_UI_TEST_LAYOUT_FIXTURE"] == "1" {
+                // These ready, metadata-only samples have no authored payload
+                // transactions to recover. Keep visual layout checks separate
+                // from startup/recovery tests, which use the ordinary fixture.
+                UserDefaults.standard.set(NotateDesign.Library.Shelf.comfortableZoom,
+                                          forKey: "notate.library.gridZoom")
+                coordinator.isLibraryRecoveryComplete = true
+                coordinator.didStart = true
+            }
         }
         return coordinator
     }
@@ -472,6 +481,23 @@ final class NotateApplicationCoordinator {
             pageCount: 1
         )
 
+        if ProcessInfo.processInfo.environment["NOTATE_UI_TEST_LAYOUT_FIXTURE"] == "1" {
+            let landscape = try repository.createItem(
+                kind: .importedDocument, name: "Landscape quick note", payloadState: .ready,
+                sourceFilename: "landscape.pdf"
+            )
+            try installUITestDocumentThumbnail(for: landscape.id, size: CGSize(width: 792, height: 612))
+            _ = try repository.createItem(
+                kind: .notebook, name: "A notebook with a title that wraps onto two lines",
+                coverChoice: .preset(.softLinen), payloadState: .ready
+            )
+            _ = try repository.createItem(
+                kind: .notebook,
+                name: "An exceptionally long notebook title to verify truncation without increasing the artwork size or separating the subtitle",
+                coverChoice: .preset(.softLinen), payloadState: .ready
+            )
+        }
+
         var parentID = courses.id
         // Courses is already level one. Four descendants bring the final
         // folder to the supported maximum of five, which lets UI tests prove
@@ -484,6 +510,16 @@ final class NotateApplicationCoordinator {
                 payloadState: .ready
             )
             parentID = folder.id
+        }
+
+        if ProcessInfo.processInfo.environment["NOTATE_UI_TEST_LAYOUT_FIXTURE"] == "1" {
+            for index in 1...12 {
+                _ = try repository.createItem(
+                    kind: .notebook, name: "Archive notebook \(index)",
+                    coverChoice: .preset(.softLinen), payloadState: .ready,
+                    now: Date(timeIntervalSince1970: Double(index))
+                )
+            }
         }
 
         let tag = try repository.createTag(name: "Studio", color: .init(
@@ -507,8 +543,9 @@ final class NotateApplicationCoordinator {
     /// as a completed import without coupling library tests to PDF rendering.
     /// The deterministic item-scoped path is visible to the thumbnail loader
     /// only while the opt-in UI-test launch contract is active.
-    private func installUITestDocumentThumbnail(for itemID: UUID) throws {
-        let size = CGSize(width: 612, height: 792)
+    private func installUITestDocumentThumbnail(
+        for itemID: UUID, size: CGSize = CGSize(width: 612, height: 792)
+    ) throws {
         let format = UIGraphicsImageRendererFormat()
         format.scale = 1
         let renderer = UIGraphicsImageRenderer(size: size, format: format)
@@ -1362,6 +1399,8 @@ final class NotateApplicationCoordinator {
     ) async throws -> PreparedNotebookCover? {
         switch choice {
         case .automatic:
+            return nil
+        case .noCover:
             return nil
 
         case .preset:

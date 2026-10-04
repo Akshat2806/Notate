@@ -32,6 +32,20 @@ enum LibraryArtworkSilhouette: Equatable, Sendable {
 }
 
 enum LibraryArtworkGeometry {
+    static func artworkFitBounds(inside bounds: CGSize, inset: CGFloat = NotateDesign.Library.Shelf.artworkInset) -> CGSize {
+        let scaledInset = inset * min(bounds.width, bounds.height)
+            / 184
+        return CGSize(width: max(0, bounds.width - scaledInset * 2),
+                      height: max(0, bounds.height - scaledInset * 2))
+    }
+
+    static func folderSize(inside bounds: CGSize) -> CGSize {
+        let shelf = NotateDesign.Library.Shelf.self
+        let width = min(max(0, bounds.width) * shelf.folderWidthFraction,
+                        artworkFitBounds(inside: bounds).height * shelf.folderAspectRatio)
+        return CGSize(width: width, height: width / shelf.folderAspectRatio)
+    }
+
     static func aspectFitSize(source: CGSize, inside bounds: CGSize) -> CGSize {
         guard source.width.isFinite,
             source.height.isFinite,
@@ -200,7 +214,6 @@ enum LibraryFolderPreviewPolicy {
             .filter {
                 $0.parentID == folderID
                     && $0.isTrashed == false
-                    && $0.payloadState == .ready
                     && $0.kind.isLegacyLibraryItem == false
             }
             .sorted { lhs, rhs in
@@ -250,56 +263,47 @@ struct LibraryGridCard: View {
                     LibraryItemArtwork(
                         item: item,
                         folderTitle: nil,
-                        folderItemCount: nil,
+                        folderItemCount: session.cachedFolderItemCount(for: item),
                         placesFolderGlyphOnFront: item.kind == .folder,
+                        folderPreviewItems: session.folderArtworkPreviewItems(for: item),
                         thumbnailStore: session.thumbnailStore
                     )
                     .aspectRatio(NotateDesign.Library.Shelf.artworkAspectRatio, contentMode: .fit)
-                    .notateFolderGeometryTransition(
-                        itemID: folderTransitionItemID,
-                        in: folderNavigationNamespace,
-                        isSource: true
-                    )
+
                     .notateEditorGeometryTransition(
                         itemID: editorTransitionItemID,
                         in: itemTransitionNamespace,
                         isSource: true
                     )
                     .accessibilityHidden(true)
-                    .overlay(alignment: .topLeading) {
-                        if item.payloadState != .ready {
-                            payloadBadge
-                                .frame(width: 26, height: 26)
-                                .background(.regularMaterial, in: Circle())
-                                .padding(7)
-                        }
-                    }
-
-                    if isSelectionMode {
-                        NotateAppGlyph(
-                            kind: .select,
-                            tint: NotateLibraryDesign.accent,
-                            isSelected: isSelected,
-                            size: 24
-                        )
-                        .padding(4)
-                        .notateBadgeSurface(in: Circle())
-                        .padding(10)
-                        .accessibilityHidden(true)
-                    } else if item.isFavorite {
+                    .overlayPreferenceValue(LibraryArtworkBoundsKey.self) { anchors in
                         GeometryReader { proxy in
-                            NotateAppGlyph(
-                                kind: .favorite,
-                                tint: NotateDesign.Palette.favorite,
-                                isSelected: true,
-                                size: 13
-                            )
-                            .frame(width: 24, height: 24)
-                            .notateBadgeSurface(in: Circle())
-                            .position(
-                                x: proxy.size.width * favoriteBadgeXRatio,
-                                y: favoriteBadgeY(in: proxy.size)
-                            )
+                            // Nested thumbnail fitting can produce a smaller
+                            // surface than its outer physical-format frame.
+                            let bounds = anchors.map { proxy[$0] }
+                                .min { $0.width * $0.height < $1.width * $1.height }
+                                ?? CGRect(origin: .zero, size: proxy.size)
+                            if item.payloadState != .ready {
+                                payloadBadge
+                                    .frame(width: 26, height: 26)
+                                    .background(.regularMaterial, in: Circle())
+                                    .position(x: bounds.minX + 20, y: bounds.minY + 20)
+                            }
+                            if isSelectionMode {
+                                NotateAppGlyph(kind: .select,
+                                               tint: NotateLibraryDesign.accent,
+                                               isSelected: isSelected, size: 24)
+                                    .padding(4)
+                                    .notateBadgeSurface(in: Circle())
+                                    .position(x: bounds.maxX - 16, y: bounds.minY + 16)
+                            } else if item.isFavorite {
+                                NotateAppGlyph(kind: .favorite,
+                                               tint: NotateDesign.Palette.favorite,
+                                               isSelected: true, size: 13)
+                                    .frame(width: 24, height: 24)
+                                    .notateBadgeSurface(in: Circle())
+                                    .position(x: bounds.maxX - 12, y: bounds.minY + 12)
+                            }
                         }
                         .accessibilityHidden(true)
                     }
@@ -316,12 +320,7 @@ struct LibraryGridCard: View {
                             horizontal: false,
                             vertical: dynamicTypeSize.isAccessibilitySize
                         )
-                    .frame(
-                        maxWidth: .infinity,
-                        minHeight: dynamicTypeSize.isAccessibilitySize
-                            ? nil : NotateDesign.Library.Shelf.titleHeight,
-                        alignment: .top
-                    )
+                    .frame(maxWidth: .infinity, alignment: .top)
                     .padding(.horizontal, 2)
 
                     if item.kind == .folder {
@@ -341,7 +340,6 @@ struct LibraryGridCard: View {
                             .frame(maxWidth: .infinity, alignment: .center)
                     }
                 }
-                .padding(.vertical, 3)
             }
             .notateLibraryCardSurface(
                 isSelected: isSelected,
@@ -393,23 +391,6 @@ struct LibraryGridCard: View {
                 .accessibilityLabel("Content missing")
         case .ready:
             EmptyView()
-        }
-    }
-
-    private func favoriteBadgeY(in size: CGSize) -> CGFloat {
-        guard item.kind == .folder else { return 16 }
-        let shelf = NotateDesign.Library.Shelf.self
-        let folderWidth = min(size.width * shelf.folderWidthFraction,
-                              size.height * shelf.folderAspectRatio)
-        let folderHeight = folderWidth / shelf.folderAspectRatio
-        return size.height - folderHeight + folderHeight * 0.25
-    }
-
-    private var favoriteBadgeXRatio: CGFloat {
-        switch item.kind {
-        case .notebook, .importedDocument: 0.78
-        case .folder: 0.86
-        case .legacyTypedNote, .canvas, .attachment: 0.94
         }
     }
 
@@ -519,17 +500,15 @@ struct LibraryListRow: View {
 
                     LibraryItemArtwork(
                         item: item,
+                        folderItemCount: session.cachedFolderItemCount(for: item),
+                        folderPreviewItems: session.folderArtworkPreviewItems(for: item),
                         thumbnailStore: session.thumbnailStore
                     )
                     .frame(
                         width: dynamicTypeSize.isAccessibilitySize ? 60 : 74,
                         height: dynamicTypeSize.isAccessibilitySize ? 48 : 56
                     )
-                    .notateFolderGeometryTransition(
-                        itemID: folderTransitionItemID,
-                        in: folderNavigationNamespace,
-                        isSource: true
-                    )
+
                     .notateEditorGeometryTransition(
                         itemID: editorTransitionItemID,
                         in: itemTransitionNamespace,
@@ -1000,8 +979,6 @@ struct LibraryItemArtwork: View {
                 previewItems: folderPreviewItems,
                 thumbnailStore: thumbnailStore
             )
-            .padding(.horizontal, 3)
-            .padding(.vertical, 2)
             .accessibilityHidden(true)
         case .portraitPage:
             LibraryShelfArtwork(aspectRatio: NotateDesign.Library.Shelf.notebookAspectRatio) {
@@ -1043,11 +1020,11 @@ struct LibraryShelfArtwork<Content: View>: View {
             let inset = NotateDesign.Library.Shelf.artworkInset
             let size = LibraryArtworkGeometry.aspectFitSize(
                 source: CGSize(width: aspectRatio, height: 1),
-                inside: CGSize(width: max(0, proxy.size.width - inset * 2),
-                               height: max(0, proxy.size.height - inset * 2))
+                inside: LibraryArtworkGeometry.artworkFitBounds(inside: proxy.size)
             )
             content
                 .frame(width: size.width, height: size.height)
+                .libraryArtworkBounds()
                 .position(x: proxy.size.width / 2,
                           y: proxy.size.height - inset - size.height / 2)
         }
@@ -1090,7 +1067,7 @@ private struct LibraryNonFolderArtwork: View {
                         fallbackArtwork
                     }
                 } else {
-                    LibraryShelfArtwork(aspectRatio: NotateDesign.Library.Shelf.aSeriesAspectRatio) {
+                    LibraryShelfArtwork(aspectRatio: NotateDesign.Library.Shelf.notebookAspectRatio) {
                         LibraryGeneratedTitleArtwork(fallback: generatedFallback) {
                             fallbackArtwork
                         }
@@ -1107,7 +1084,13 @@ private struct LibraryNonFolderArtwork: View {
                 generatedFallback: generatedFallback,
                 thumbnailStore: thumbnailStore
             ) {
-                LibraryCustomCoverPlaceholder(title: item.name)
+                if LibraryArtworkSilhouette.resolve(for: item.kind) == .sourceDocument {
+                    LibraryShelfArtwork(aspectRatio: NotateDesign.Library.Shelf.notebookAspectRatio) {
+                        LibraryCustomCoverPlaceholder(title: item.name)
+                    }
+                } else {
+                    LibraryCustomCoverPlaceholder(title: item.name)
+                }
             }
         case let .explicitCover(choice):
             // A deliberate cover choice always wins over a generated page
@@ -1119,8 +1102,12 @@ private struct LibraryNonFolderArtwork: View {
                         contentMode: .fill
                     )
                     .clipped()
+            } else if LibraryArtworkSilhouette.resolve(for: item.kind) == .sourceDocument {
+                LibraryShelfArtwork(aspectRatio: NotateDesign.Library.Shelf.notebookAspectRatio) {
+                    LibraryNotebookArtwork(coverChoice: choice, title: item.name, verticalPadding: 0)
+                }
             } else {
-                LibraryNotebookArtwork(coverChoice: choice, title: item.name)
+                LibraryNotebookArtwork(coverChoice: choice, title: item.name, verticalPadding: 0)
             }
         }
     }
@@ -1210,12 +1197,10 @@ private struct LibraryAutomaticThumbnail<Placeholder: View>: View {
     private func loadedArtwork(_ image: UIImage) -> some View {
         switch LibraryArtworkSilhouette.resolve(for: generatedFallback.kind) {
         case .landscapeBoard:
-            Image(uiImage: image)
-                .resizable()
-                .scaledToFill()
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .clipped()
-        case .portraitPage, .sourceDocument:
+            LibraryFittedThumbnailArtwork(image: image, inset: 0)
+        case .portraitPage:
+            LibraryFittedThumbnailArtwork(image: image, inset: 0)
+        case .sourceDocument:
             LibraryFittedThumbnailArtwork(image: image)
         case .finderFolder:
             // Folder previews are generated by the live Finder-style artwork,
@@ -1229,13 +1214,11 @@ private struct LibraryAutomaticThumbnail<Placeholder: View>: View {
 
 private struct LibraryFittedThumbnailArtwork: View {
     let image: UIImage
+    var inset: CGFloat = NotateDesign.Library.Shelf.artworkInset
 
     var body: some View {
         GeometryReader { proxy in
-            let availableSize = CGSize(
-                width: max(0, proxy.size.width - NotateDesign.Library.Shelf.artworkInset * 2),
-                height: max(0, proxy.size.height - NotateDesign.Library.Shelf.artworkInset * 2)
-            )
+            let availableSize = LibraryArtworkGeometry.artworkFitBounds(inside: proxy.size, inset: inset)
             let fittedSize = LibraryArtworkGeometry.aspectFitSize(
                 source: image.size,
                 inside: availableSize
@@ -1243,15 +1226,16 @@ private struct LibraryFittedThumbnailArtwork: View {
 
             Image(uiImage: image)
                 .resizable()
-                .scaledToFill()
+                .scaledToFit()
                 .frame(width: fittedSize.width, height: fittedSize.height)
+                .libraryArtworkBounds()
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                 .overlay {
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
                         .strokeBorder(.primary.opacity(0.11), lineWidth: 0.8)
                 }
                 .shadow(color: .black.opacity(0.14), radius: 6, y: 4)
-                .position(x: proxy.size.width / 2, y: proxy.size.height - NotateDesign.Library.Shelf.artworkInset - fittedSize.height / 2)
+                .position(x: proxy.size.width / 2, y: proxy.size.height - inset - fittedSize.height / 2)
         }
     }
 }
@@ -1536,258 +1520,6 @@ actor LibraryAutomaticThumbnailStore {
     }
 }
 
-private struct LibraryFolderBackShape: Shape {
-    func path(in rect: CGRect) -> Path {
-        let w = rect.width
-        let h = rect.height
-        let radius = min(w, h) * 0.085
-        var path = Path()
-
-        // The raised tab is part of the silhouette, so it stays crisp at any
-        // tile size and does not depend on a raster folder asset.
-        path.move(to: CGPoint(x: rect.minX, y: rect.minY + h * 0.16))
-        path.addLine(to: CGPoint(x: rect.minX, y: rect.minY + radius))
-        path.addQuadCurve(
-            to: CGPoint(x: rect.minX + radius, y: rect.minY),
-            control: CGPoint(x: rect.minX, y: rect.minY)
-        )
-        path.addLine(to: CGPoint(x: rect.minX + w * 0.29, y: rect.minY))
-        path.addCurve(
-            to: CGPoint(x: rect.minX + w * 0.38, y: rect.minY + h * 0.105),
-            control1: CGPoint(x: rect.minX + w * 0.33, y: rect.minY),
-            control2: CGPoint(x: rect.minX + w * 0.34, y: rect.minY + h * 0.105)
-        )
-        path.addCurve(
-            to: CGPoint(x: rect.minX + w * 0.42, y: rect.minY + h * 0.13),
-            control1: CGPoint(x: rect.minX + w * 0.39, y: rect.minY + h * 0.105),
-            control2: CGPoint(x: rect.minX + w * 0.40, y: rect.minY + h * 0.13)
-        )
-        path.addLine(to: CGPoint(x: rect.maxX - radius, y: rect.minY + h * 0.13))
-        path.addQuadCurve(
-            to: CGPoint(x: rect.maxX, y: rect.minY + h * 0.13 + radius),
-            control: CGPoint(x: rect.maxX, y: rect.minY + h * 0.13)
-        )
-        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY - radius))
-        path.addQuadCurve(
-            to: CGPoint(x: rect.maxX - radius, y: rect.maxY),
-            control: CGPoint(x: rect.maxX, y: rect.maxY)
-        )
-        path.addLine(to: CGPoint(x: rect.minX + radius, y: rect.maxY))
-        path.addQuadCurve(
-            to: CGPoint(x: rect.minX, y: rect.maxY - radius),
-            control: CGPoint(x: rect.minX, y: rect.maxY)
-        )
-        path.closeSubpath()
-        return path
-    }
-}
-
-private struct LibraryFolderPocketShape: Shape {
-    func path(in rect: CGRect) -> Path {
-        let top = rect.height * NotateDesign.Library.Shelf.folderFrontTop
-        let front = CGRect(x: rect.minX, y: rect.minY + top,
-                           width: rect.width, height: rect.height - top)
-        return RoundedRectangle(
-            cornerRadius: rect.width * NotateDesign.Library.Shelf.folderCornerFraction,
-            style: .continuous
-        ).path(in: front)
-    }
-}
-
-struct LibraryFolderArtwork: View {
-    let symbolName: String
-    let color: Color
-    var title: String? = nil
-    var itemCount: Int? = nil
-    var showsBackdrop = true
-    var placesGlyphOnFront = false
-    var previewItems: [LibraryFolderPreviewItem] = []
-    var thumbnailStore: LibraryAutomaticThumbnailStore = .shared
-
-    @Environment(\.colorScheme) private var colorScheme
-
-    var body: some View {
-        GeometryReader { proxy in
-            let folderAspect = NotateDesign.Library.Shelf.folderAspectRatio
-            let folderWidth = min(proxy.size.width * NotateDesign.Library.Shelf.folderWidthFraction, proxy.size.height * folderAspect)
-            let folderHeight = folderWidth / folderAspect
-            let iconSize = min(folderWidth, folderHeight) * 0.085
-            let folderOrigin = CGPoint(
-                x: (proxy.size.width - folderWidth) / 2,
-                y: proxy.size.height - folderHeight - 2
-            )
-            let folderCenter = CGPoint(x: proxy.size.width / 2, y: folderOrigin.y + folderHeight / 2)
-            ZStack {
-                if showsBackdrop {
-                    Color(uiColor: .secondarySystemGroupedBackground)
-                }
-
-                folderBack
-                    .frame(width: folderWidth, height: folderHeight)
-                    .position(folderCenter)
-
-
-                folderFront
-                    .frame(width: folderWidth, height: folderHeight)
-                    .overlay(alignment: .bottomLeading) {
-                        if let title {
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text(title)
-                                    .font(
-                                        .system(
-                                            size: folderHeight * 0.096,
-                                            weight: .semibold
-                                        )
-                                    )
-                                    .lineLimit(1)
-                                    .minimumScaleFactor(0.68)
-                                if let itemCount {
-                                    Text("\(itemCount) \(itemCount == 1 ? "item" : "items")")
-                                        .font(
-                                            .system(
-                                                size: folderHeight * 0.041,
-                                                weight: .regular
-                                            )
-                                        )
-                                        .lineLimit(1)
-                                        .foregroundStyle(folderGlyphForeground.opacity(0.92))
-                                }
-                            }
-                            .foregroundStyle(folderGlyphForeground)
-                            .padding(.leading, folderWidth * 0.105)
-                            .padding(.bottom, folderHeight * 0.105)
-                        }
-                    }
-                    .overlay(alignment: .bottomTrailing) {
-                        if title != nil {
-                            Image(systemName: symbolName)
-                                .font(.system(size: iconSize, weight: .semibold))
-                                .foregroundStyle(folderGlyphForeground)
-                                .frame(width: iconSize * 1.5, height: iconSize * 1.5)
-                                .padding(.trailing, folderWidth * 0.105)
-                                .padding(.bottom, folderHeight * 0.115)
-                        }
-                    }
-                    .position(folderCenter)
-
-                folderGlyph(size: folderHeight * 0.56)
-                    .opacity(colorScheme == .dark ? 0.66 : 0.78)
-                    .position(
-                        x: folderCenter.x,
-                        y: folderOrigin.y + folderHeight * 0.56
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-        }
-    }
-
-    private var folderBack: some View {
-        let shape = LibraryFolderBackShape()
-        return shape
-            .fill(
-                LinearGradient(
-                    colors: [
-                        folderColor(mixedToward: .white, amount: 0.38),
-                        color,
-                        color.opacity(colorScheme == .dark ? 0.92 : 0.96),
-                    ],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-            )
-            .overlay {
-                shape.stroke(.white.opacity(colorScheme == .dark ? 0.22 : 0.34), lineWidth: 0.8)
-            }
-            .shadow(
-                color: color.opacity(colorScheme == .dark ? 0.15 : 0.20),
-                radius: 7,
-                y: 4
-            )
-            .accessibilityHidden(true)
-    }
-
-    private var folderFront: some View {
-        let shape = LibraryFolderPocketShape()
-        return shape
-            .fill(
-                LinearGradient(
-                    colors: [
-                        folderColor(mixedToward: .white, amount: 0.20),
-                        folderColor(mixedToward: .white, amount: 0.32),
-                        folderColor(mixedToward: .white, amount: 0.16),
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-            )
-            .overlay {
-                shape.stroke(.white.opacity(0.22), lineWidth: 0.7)
-            }
-            .overlay(alignment: .bottom) {
-                VStack(spacing: 3) {
-                    Rectangle().fill(.white.opacity(0.18)).frame(height: 1)
-                    Rectangle().fill(color.opacity(0.12)).frame(height: 2)
-                    Rectangle().fill(.white.opacity(0.15)).frame(height: 1)
-                }
-                .padding(.bottom, 5)
-                .clipShape(shape)
-            }
-            .accessibilityHidden(true)
-    }
-
-    private func folderColor(mixedToward tint: UIColor, amount: CGFloat) -> Color {
-        let traits = UITraitCollection(
-            userInterfaceStyle: colorScheme == .dark ? .dark : .light
-        )
-        let base = UIColor(color).resolvedColor(with: traits)
-        let tint = tint.resolvedColor(with: traits)
-        var red: CGFloat = 0
-        var green: CGFloat = 0
-        var blue: CGFloat = 0
-        var tintRed: CGFloat = 0
-        var tintGreen: CGFloat = 0
-        var tintBlue: CGFloat = 0
-        guard base.getRed(&red, green: &green, blue: &blue, alpha: nil),
-              tint.getRed(&tintRed, green: &tintGreen, blue: &tintBlue, alpha: nil) else {
-            return color
-        }
-        let fraction = min(max(amount, 0), 1)
-        return Color(
-            uiColor: UIColor(
-                red: red + (tintRed - red) * fraction,
-                green: green + (tintGreen - green) * fraction,
-                blue: blue + (tintBlue - blue) * fraction,
-                alpha: 1
-            )
-        )
-    }
-
-    private func folderGlyph(size: CGFloat) -> some View {
-        Image(systemName: symbolName)
-            .font(.system(size: size, weight: .regular))
-            .foregroundStyle(folderColor(mixedToward: .black, amount: 0.28))
-            .shadow(color: .white.opacity(0.6), radius: 0, y: 0.7)
-            .accessibilityHidden(true)
-    }
-
-    private var folderGlyphForeground: Color {
-        let resolved = UIColor(color).resolvedColor(
-            with: UITraitCollection(
-                userInterfaceStyle: colorScheme == .dark ? .dark : .light
-            )
-        )
-        var red: CGFloat = 0
-        var green: CGFloat = 0
-        var blue: CGFloat = 0
-        var alpha: CGFloat = 0
-        guard resolved.getRed(&red, green: &green, blue: &blue, alpha: &alpha) else {
-            return colorScheme == .dark ? .white : .black
-        }
-        let luminance = 0.299 * red + 0.587 * green + 0.114 * blue
-        return luminance > 0.58 ? Color.black : Color.white
-    }
-}
-
 /// Original, semantic fallback artwork used only when no explicit cover or
 /// verified durable preview exists. The card already presents the item name
 /// and kind as scalable text, so this thumbnail stays purely illustrative and
@@ -1875,11 +1607,12 @@ private extension LibraryGeneratedTitleFallback {
 struct LibraryNotebookArtwork: View {
     let coverChoice: LibraryCoverChoice
     var title: String? = nil
+    var verticalPadding: CGFloat = 3
 
     var body: some View {
         LibraryCoverArtwork(choice: coverChoice, title: title)
-            .aspectRatio(3 / 4, contentMode: .fit)
-            .padding(.vertical, 3)
+            .aspectRatio(2 / 3, contentMode: .fit)
+            .padding(.vertical, verticalPadding)
             .shadow(color: .black.opacity(0.10), radius: 4, y: 2)
     }
 }
@@ -1893,12 +1626,14 @@ struct LibraryCoverArtwork: View {
         Group {
             switch choice {
             case .automatic:
-                LibraryAutomaticCoverArtwork(title: title)
+                LibraryNoCoverArtwork()
+            case .noCover:
+                LibraryNoCoverArtwork()
             case let .preset(preset):
                 if let cover = LibraryCuratedCover.curated.first(where: { $0.preset == preset }) {
                     LibraryPhysicalCoverArtwork(cover: cover, title: title)
                 } else {
-                    LibraryAutomaticCoverArtwork(title: title)
+                    LibraryNoCoverArtwork()
                 }
             case .customAsset:
                 LibraryDecodedCoverImage(
@@ -1922,6 +1657,31 @@ struct LibraryCoverArtwork: View {
             return "library-cover"
         }
         return relativePath
+    }
+}
+
+private struct LibraryNoCoverArtwork: View {
+    var body: some View {
+        GeometryReader { proxy in
+            let size = proxy.size
+            ZStack {
+                Color(red: 0.97, green: 0.96, blue: 0.92)
+                Rectangle()
+                    .fill(Color(red: 0.72, green: 0.70, blue: 0.63).opacity(0.54))
+                    .frame(width: max(1, size.width * 0.012))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Image(systemName: "book.closed")
+                    .font(.system(size: min(max(size.width * 0.22, 22), 42), weight: .light))
+                    .foregroundStyle(Color(red: 0.47, green: 0.48, blue: 0.43).opacity(0.66))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(Color.black.opacity(0.10), lineWidth: 0.8)
+            }
+        }
+        .accessibilityHidden(true)
     }
 }
 
@@ -2027,30 +1787,30 @@ private struct LibraryPhysicalCoverArtwork: View {
         GeometryReader { proxy in
             let size = proxy.size
             let cornerRadius = min(max(size.width * 0.052, 7), 13)
-            let spineWidth = min(max(size.width * 0.105, 11), 25)
             ZStack {
-                cover.palette.top.coverColor
-                LibraryCuratedCoverPattern(cover: cover)
-                Rectangle()
-                    .fill(cover.palette.spine.coverColor)
-                    .frame(width: spineWidth)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                Rectangle()
-                    .fill(.white.opacity(0.42))
-                    .frame(width: max(1, size.width * 0.007))
-                    .offset(x: spineWidth / 2)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                Rectangle()
-                    .fill(Color(red: 0.99, green: 0.97, blue: 0.89))
-                    .frame(width: max(2.5, size.width * 0.025))
-                    .padding(.vertical, 0.42 * cornerRadius)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-                LibraryCoverTitlePlaque(title: title, ink: cover.palette.ink.coverColor)
-                    .frame(
-                        width: size.width * 0.61,
-                        height: min(max(size.height * 0.155, 38), 72)
+                if let image = LibraryCoverArtAtlas.image(for: cover.preset) {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: size.width, height: size.height)
+                        .clipped()
+                } else {
+                    LinearGradient(
+                        colors: [cover.palette.top.coverColor, cover.palette.bottom.coverColor],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
                     )
-                    .position(x: size.width * 0.56, y: size.height * 0.35)
+                }
+                if let displayTitle = title?.nilIfLibraryBlank {
+                    Text(displayTitle)
+                        .font(.system(size: min(max(size.width * 0.056, 8), 13), weight: .semibold))
+                        .foregroundStyle(cover.palette.ink.coverColor)
+                        .multilineTextAlignment(.center)
+                        .lineLimit(2)
+                        .minimumScaleFactor(0.62)
+                        .frame(width: size.width * 0.54, height: size.height * 0.13)
+                        .position(x: size.width * 0.50, y: size.height * labelCenterY)
+                }
             }
             .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
             .overlay {
@@ -2059,313 +1819,51 @@ private struct LibraryPhysicalCoverArtwork: View {
             }
         }
     }
-}
 
-private struct LibraryCuratedCoverPattern: View {
-    let cover: LibraryCuratedCover
-
-    var body: some View {
-        Canvas { context, size in
-            switch cover.motif {
-            case .compositionSpeckle:
-                drawCompositionSpeckles(in: context, size: size)
-            case .orchardSprig:
-                drawOrchardSprigs(in: context, size: size)
-            case .candyStripe:
-                drawCandyStripes(in: context, size: size)
-            }
-        }
-        .allowsHitTesting(false)
-    }
-
-    private func drawCompositionSpeckles(in context: GraphicsContext, size: CGSize) {
-        guard size.width.isFinite,
-            size.height.isFinite,
-            size.width > 0,
-            size.height > 0 else { return }
-        let columns = Int(min(max(size.width / 23, 5), 8))
-        let rows = Int(min(max(size.height / 25, 7), 11))
-        let cellWidth = size.width / CGFloat(columns)
-        let cellHeight = size.height / CGFloat(rows)
-        let color = cover.palette.pattern.coverColor.opacity(0.66)
-        for row in 0..<rows {
-            for column in 0..<columns {
-                let seed = (row * 41 + column * 67 + row * column * 13) % 97
-                let x = (CGFloat(column) + 0.24 + CGFloat(seed % 5) * 0.11) * cellWidth
-                let y = (CGFloat(row) + 0.22 + CGFloat(seed % 7) * 0.075) * cellHeight
-                let length = min(max(cellWidth * 0.20, 2.2), 5.0)
-                let bend = CGFloat((seed % 3) - 1) * min(1.8, cellHeight * 0.12)
-                var fleck = Path()
-                if seed.isMultiple(of: 2) {
-                    fleck.move(to: CGPoint(x: x - length / 2, y: y))
-                    fleck.addQuadCurve(
-                        to: CGPoint(x: x + length / 2, y: y + bend),
-                        control: CGPoint(x: x, y: y - bend - 1)
-                    )
-                } else {
-                    fleck.move(to: CGPoint(x: x, y: y - length / 2))
-                    fleck.addQuadCurve(
-                        to: CGPoint(x: x + bend, y: y + length / 2),
-                        control: CGPoint(x: x - bend - 1, y: y)
-                    )
-                }
-                context.stroke(
-                    fleck,
-                    with: .color(color),
-                    style: StrokeStyle(lineWidth: 1.15, lineCap: .round)
-                )
-                if seed.isMultiple(of: 7) {
-                    let diameter = min(max(cellWidth * 0.10, 1.1), 2.1)
-                    context.fill(
-                        Path(
-                            ellipseIn: CGRect(
-                                x: x + length * 0.54,
-                                y: y - diameter / 2,
-                                width: diameter,
-                                height: diameter
-                            )
-                        ),
-                        with: .color(color.opacity(0.72))
-                    )
-                }
-            }
-        }
-    }
-
-    private func drawOrchardSprigs(in context: GraphicsContext, size: CGSize) {
-        guard size.width.isFinite,
-            size.height.isFinite,
-            size.width > 0,
-            size.height > 0 else { return }
-        let columns = Int(min(max(size.width / 38, 3), 5))
-        let rows = Int(min(max(size.height / 42, 4), 7))
-        let cellWidth = size.width / CGFloat(columns)
-        let cellHeight = size.height / CGFloat(rows)
-        let leaf = cover.palette.pattern.coverColor.opacity(0.62)
-        let stem = cover.palette.ink.coverColor.opacity(0.30)
-        for row in 0..<rows {
-            for column in 0..<columns {
-                let seed = (row * 29 + column * 43 + row * column * 7) % 31
-                let stagger = row.isMultiple(of: 2) ? cellWidth * 0.12 : -cellWidth * 0.12
-                let center = CGPoint(
-                    x: (CGFloat(column) + 0.50) * cellWidth + stagger,
-                    y: (CGFloat(row) + 0.50) * cellHeight
-                )
-                let direction: CGFloat = seed.isMultiple(of: 2) ? 1 : -1
-                let stemLength = min(max(cellHeight * 0.27, 6), 12)
-                var stemPath = Path()
-                stemPath.move(
-                    to: CGPoint(
-                        x: center.x - direction * stemLength * 0.34,
-                        y: center.y + stemLength * 0.48
-                    )
-                )
-                stemPath.addLine(
-                    to: CGPoint(
-                        x: center.x + direction * stemLength * 0.34,
-                        y: center.y - stemLength * 0.48
-                    )
-                )
-                context.stroke(
-                    stemPath,
-                    with: .color(stem),
-                    style: StrokeStyle(lineWidth: 0.9, lineCap: .round)
-                )
-                let leafWidth = min(max(cellWidth * 0.20, 4.2), 8.0)
-                let leafHeight = leafWidth * 0.66
-                let firstLeaf = CGRect(
-                    x: center.x - leafWidth * 0.92,
-                    y: center.y - leafHeight * 0.88,
-                    width: leafWidth,
-                    height: leafHeight
-                )
-                let secondLeaf = CGRect(
-                    x: center.x + leafWidth * 0.02,
-                    y: center.y - leafHeight * 0.02,
-                    width: leafWidth,
-                    height: leafHeight
-                )
-                context.fill(Path(ellipseIn: firstLeaf), with: .color(leaf))
-                context.fill(Path(ellipseIn: secondLeaf), with: .color(leaf.opacity(0.82)))
-                if seed.isMultiple(of: 4) {
-                    let blossom = min(max(cellWidth * 0.13, 2.8), 5.2)
-                    context.fill(
-                        Path(
-                            ellipseIn: CGRect(
-                                x: center.x - blossom / 2,
-                                y: center.y - stemLength * 0.70,
-                                width: blossom,
-                                height: blossom
-                            )
-                        ),
-                        with: .color(Color.white.opacity(0.68))
-                    )
-                }
-            }
-        }
-    }
-
-    private func drawCandyStripes(in context: GraphicsContext, size: CGSize) {
-        guard size.width.isFinite,
-            size.height.isFinite,
-            size.width > 0,
-            size.height > 0 else { return }
-        let stripeWidth = min(max(size.width / 8.8, 10), 24)
-        let count = Int(min(max(size.width / stripeWidth, 5) + 1, 12))
-        let stripe = cover.palette.pattern.coverColor.opacity(0.42)
-        for index in 0..<count {
-            let x = CGFloat(index) * stripeWidth * 1.58
-            context.fill(
-                Path(
-                    CGRect(
-                        x: x,
-                        y: 0,
-                        width: stripeWidth,
-                        height: size.height
-                    )
-                ),
-                with: .color(stripe)
-            )
+    private var labelCenterY: CGFloat {
+        switch cover.preset {
+        case .softLinen, .blueprint, .warmPaper: 0.36
+        case .skyComposition: 0.42
+        case .peachOrchard, .butterStripe: 0.39
+        case .aquaComposition, .periwinkleOrchard: 0.28
         }
     }
 }
 
-private struct LibraryCoverTitlePlaque: View {
-    let title: String?
-    let ink: Color
+@MainActor
+private enum LibraryCoverArtAtlas {
+    private static var cache: [LibraryCoverPreset: UIImage] = [:]
 
-    private var displayTitle: String? {
-        title?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfLibraryBlank
+    static func image(for preset: LibraryCoverPreset) -> UIImage? {
+        if let cached = cache[preset] { return cached }
+        let location = location(for: preset)
+        guard let atlas = UIImage(named: location.assetName)?.cgImage,
+              atlas.width.isMultiple(of: 2) else { return nil }
+        let cellWidth = atlas.width / 2
+        let rect = CGRect(
+            x: CGFloat(location.column * cellWidth),
+            y: 0,
+            width: CGFloat(cellWidth),
+            height: CGFloat(atlas.height)
+        )
+        guard let crop = atlas.cropping(to: rect) else { return nil }
+        let image = UIImage(cgImage: crop, scale: 1, orientation: .up)
+        cache[preset] = image
+        return image
     }
 
-    var body: some View {
-        GeometryReader { proxy in
-            ZStack {
-                RoundedRectangle(cornerRadius: min(7, proxy.size.height * 0.15), style: .continuous)
-                    .fill(Color(red: 0.99, green: 0.97, blue: 0.88))
-                RoundedRectangle(cornerRadius: min(7, proxy.size.height * 0.15), style: .continuous)
-                    .strokeBorder(ink.opacity(0.30), lineWidth: 0.9)
-                    .padding(2.5)
-                if let displayTitle {
-                    // This duplicate is decorative; the card button below the cover
-                    // owns the accessible title. Drawing it into the artwork keeps
-                    // SwiftUI from assigning the entire patterned cover to a Text node
-                    // during contrast analysis, while retaining the authored plaque.
-                    Canvas { context, size in
-                        let baseFontSize = min(max(size.width * 0.095, 8), 16)
-                        let availableSize = CGSize(
-                            width: size.width * 0.76,
-                            height: size.height * 0.72
-                        )
-                        let estimatedTwoLineWidth = availableSize.width * 2
-                        let estimatedTitleWidth = CGFloat(displayTitle.count) * baseFontSize * 0.56
-                        let fittedFontSize = max(
-                            baseFontSize * 0.58,
-                            min(baseFontSize, baseFontSize * estimatedTwoLineWidth / max(estimatedTitleWidth, 1))
-                        )
-                        var resolvedTitle = context.resolve(
-                            Text(displayTitle)
-                                .font(
-                                    .system(
-                                        size: fittedFontSize,
-                                        weight: .semibold,
-                                        design: .rounded
-                                    )
-                                )
-                        )
-                        resolvedTitle.shading = .color(
-                            Color(red: 0.14, green: 0.11, blue: 0.13)
-                        )
-                        let measuredSize = resolvedTitle.measure(in: availableSize)
-                        let drawingSize = CGSize(
-                            width: min(measuredSize.width, availableSize.width),
-                            height: min(measuredSize.height, availableSize.height)
-                        )
-                        context.draw(
-                            resolvedTitle,
-                            in: CGRect(
-                                x: (size.width - drawingSize.width) / 2,
-                                y: (size.height - drawingSize.height) / 2,
-                                width: drawingSize.width,
-                                height: drawingSize.height
-                            )
-                        )
-                    }
-                    .accessibilityHidden(true)
-                } else {
-                    VStack(spacing: max(4, proxy.size.height * 0.14)) {
-                        Rectangle()
-                            .fill(ink.opacity(0.38))
-                        Rectangle().fill(ink.opacity(0.28))
-                    }
-                    .frame(width: proxy.size.width * 0.56)
-                    .frame(height: max(6, proxy.size.height * 0.23))
-                }
-            }
-        }
-        .accessibilityHidden(true)
-    }
-}
-
-private struct LibraryAutomaticCoverArtwork: View {
-    let title: String?
-
-    var body: some View {
-        GeometryReader { proxy in
-            let size = proxy.size
-            let cornerRadius = min(max(size.width * 0.052, 7), 13)
-            ZStack {
-                Color(red: 0.985, green: 0.978, blue: 0.94)
-                Canvas { context, canvasSize in
-                    let spacing = min(max(canvasSize.height / 13, 9), 22)
-                    var rules = Path()
-                    for y in stride(
-                        from: spacing * 2.2,
-                        through: canvasSize.height - spacing * 0.65,
-                        by: spacing
-                    ) {
-                        rules.move(to: CGPoint(x: spacing * 0.78, y: y))
-                        rules.addLine(to: CGPoint(x: canvasSize.width - spacing * 0.55, y: y))
-                    }
-                    context.stroke(
-                        rules,
-                        with: .color(Color(red: 0.49, green: 0.67, blue: 0.81).opacity(0.24)),
-                        lineWidth: 0.75
-                    )
-                }
-                Rectangle()
-                    .fill(Color(red: 0.89, green: 0.40, blue: 0.43).opacity(0.52))
-                    .frame(width: max(1, size.width * 0.012))
-                    .offset(x: size.width * 0.18)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                VStack(spacing: 5) {
-                    Text("FIRST PAGE")
-                        .font(.system(size: min(max(size.width * 0.055, 7), 11), weight: .bold, design: .rounded))
-                        .tracking(1.2)
-                        .foregroundStyle(Color(red: 0.27, green: 0.39, blue: 0.48).opacity(0.62))
-                    if let displayTitle = title?.nilIfLibraryBlank {
-                        Text(displayTitle)
-                            .font(.system(size: min(max(size.width * 0.078, 8), 14), weight: .semibold, design: .rounded))
-                            .foregroundStyle(Color(red: 0.24, green: 0.28, blue: 0.30))
-                            .lineLimit(2)
-                            .minimumScaleFactor(0.62)
-                    }
-                }
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, size.width * 0.20)
-                .frame(maxHeight: .infinity, alignment: .top)
-                .padding(.top, size.height * 0.09)
-                Rectangle()
-                    .fill(Color(red: 0.91, green: 0.89, blue: 0.82))
-                    .frame(width: max(2.5, size.width * 0.025))
-                    .padding(.vertical, cornerRadius * 0.42)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-            }
-            .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .strokeBorder(.black.opacity(0.13), lineWidth: 0.8)
-            }
+    private static func location(
+        for preset: LibraryCoverPreset
+    ) -> (assetName: String, column: Int) {
+        switch preset {
+        case .softLinen: ("NotebookCoverHeartsStripe", 0)
+        case .blueprint: ("NotebookCoverHeartsStripe", 1)
+        case .warmPaper: ("NotebookCoverBlueStripeBow", 0)
+        case .skyComposition: ("NotebookCoverBlueStripeBow", 1)
+        case .peachOrchard: ("NotebookCoverCompositionGrid", 0)
+        case .butterStripe: ("NotebookCoverCompositionGrid", 1)
+        case .aquaComposition: ("NotebookCoverBlushSandstone", 0)
+        case .periwinkleOrchard: ("NotebookCoverBlushSandstone", 1)
         }
     }
 }
@@ -2682,8 +2180,6 @@ private struct LibraryFileTypeArtwork: View {
                 .strokeBorder(.primary.opacity(0.11), lineWidth: 0.8)
         }
         .shadow(color: .black.opacity(0.13), radius: 6, y: 4)
-        .padding(.vertical, 3)
-        .padding(.horizontal, 12)
     }
 }
 
@@ -2721,26 +2217,31 @@ private struct LibraryShelfDesignPreview: View {
     ]
 
     var body: some View {
-        ScrollView {
-            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 28), count: 4),
-                      spacing: NotateDesign.Library.Shelf.rowSpacing) {
-                ForEach(samples) { item in
-                    tile(title: item.name, metadata: item.kind == .folder ? "3 items" : "Today") {
-                        LibraryItemArtwork(item: item, placesFolderGlyphOnFront: true)
+        GeometryReader { proxy in
+            let layout = LibraryShelfLayout(availableWidth: proxy.size.width,
+                                           horizontalPadding: 28,
+                                           zoom: NotateDesign.Library.Shelf.comfortableZoom)
+            ScrollView {
+                LazyVGrid(columns: layout.columns,
+                          spacing: NotateDesign.Library.Shelf.rowSpacing) {
+                    ForEach(samples) { item in
+                        tile(title: item.name, metadata: item.kind == .folder ? "3 items" : "Today") {
+                            LibraryItemArtwork(item: item, placesFolderGlyphOnFront: true)
+                        }
+                    }
+                    tile(title: "A5 sheet", metadata: "Format example") {
+                        LibraryShelfArtwork(aspectRatio: NotateDesign.Library.Shelf.aSeriesAspectRatio) {
+                            sheetSample(color: .white)
+                        }
+                    }
+                    tile(title: "Quick note", metadata: "Format example") {
+                        LibraryShelfArtwork(aspectRatio: 4 / 3) {
+                            sheetSample(color: Color(red: 1, green: 0.94, blue: 0.70))
+                        }
                     }
                 }
-                tile(title: "A5 sheet", metadata: "Format example") {
-                    LibraryShelfArtwork(aspectRatio: NotateDesign.Library.Shelf.aSeriesAspectRatio) {
-                        sheetSample(color: .white)
-                    }
-                }
-                tile(title: "Quick note", metadata: "Format example") {
-                    LibraryShelfArtwork(aspectRatio: 4 / 3) {
-                        sheetSample(color: Color(red: 1, green: 0.94, blue: 0.70))
-                    }
-                }
+                .padding(28)
             }
-            .padding(28)
         }
         .background(NotateDesign.Palette.background)
     }
@@ -2749,9 +2250,10 @@ private struct LibraryShelfDesignPreview: View {
                                      @ViewBuilder artwork: () -> Artwork) -> some View {
         VStack(spacing: NotateDesign.Library.Shelf.labelSpacing) {
             artwork().aspectRatio(NotateDesign.Library.Shelf.artworkAspectRatio, contentMode: .fit)
+                .frame(width: NotateDesign.Library.Shelf.comfortableEnvelope)
             VStack(spacing: NotateDesign.Library.Shelf.metadataSpacing) {
                 Text(title).font(.subheadline.weight(.medium))
-                    .frame(height: NotateDesign.Library.Shelf.titleHeight, alignment: .top)
+                    .lineLimit(2)
                 Text(metadata).font(.caption).foregroundStyle(.secondary)
             }
         }

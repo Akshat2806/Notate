@@ -203,8 +203,8 @@ private struct LibraryEmptyArtwork: View {
     }
 
     private func rasterArtwork(named assetName: String) -> some View {
-        // Each asset catalog entry supplies a matching luminosity variant,
-        // allowing UIImage to resolve coordinated artwork in either mode.
+        // Soft neutral backdrops keep these transparent illustrations legible
+        // in both appearances without separate artwork variants.
         rasterImage(named: assetName)
     }
 

@@ -776,42 +776,63 @@ struct CanvasPaperSetupSheet: View {
         let pageSize = model.currentPageDisplaySize
         let importingPage = isImportingPage
 
-        return VStack(alignment: .leading, spacing: 14) {
-            sectionHeading(model.currentPageHasImportedBackground ? "Page" : "Paper")
+        return VStack(alignment: .leading, spacing: 22) {
+            sectionHeading(
+                model.currentPageHasImportedBackground ? "Page" : "Choose a layout"
+            )
+
+            if model.currentPageHasImportedBackground == false {
+                templateGroup("Essentials", styles: [.blank, .dotted, .grid, .ruled], pageSize: pageSize)
+                templateGroup("Writing Papers", styles: [.cornell], pageSize: pageSize)
+                templateGroup("Music", styles: [.music], pageSize: pageSize)
+            }
+
+            if model.supportsPageStack {
+                PhotosPicker(
+                    selection: $selectedPhoto,
+                    matching: .images,
+                    preferredItemEncoding: .current
+                ) {
+                    CanvasPaperImportTile(
+                        pageSize: pageSize,
+                        isLoading: importingPage
+                    )
+                    .frame(maxWidth: 124, alignment: .leading)
+                }
+                .buttonStyle(.plain)
+                .disabled(importingPage)
+                .accessibilityLabel("Import page")
+                .accessibilityHint("Opens Photos and adds the chosen image as a new page")
+                .accessibilityIdentifier("paper-setup.import-page")
+            }
+        }
+    }
+
+    private func templateGroup(
+        _ title: String,
+        styles: [CanvasPaperStyle],
+        pageSize: CGSize
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title.uppercased())
+                .font(.caption.weight(.semibold))
+                .tracking(0.7)
+                .foregroundStyle(.secondary)
+                .accessibilityAddTraits(.isHeader)
 
             LazyVGrid(columns: templateColumns, alignment: .leading, spacing: 16) {
-                if model.currentPageHasImportedBackground == false {
-                    ForEach(CanvasPaperStyle.allCases, id: \.self) { style in
-                        CanvasPaperPresetTile(
-                            style: style,
-                            tone: draft.tone,
-                            density: draft.density,
-                            pageSize: pageSize,
-                            isSelected: style == draft.style
-                        ) {
-                            withAnimation(reduceMotion ? nil : NotateDesign.Motion.selection) {
-                                draft.style = style
-                            }
+                ForEach(styles, id: \.self) { style in
+                    CanvasPaperPresetTile(
+                        style: style,
+                        tone: draft.tone,
+                        density: draft.density,
+                        pageSize: pageSize,
+                        isSelected: style == draft.style
+                    ) {
+                        withAnimation(reduceMotion ? nil : NotateDesign.Motion.selection) {
+                            draft.style = style
                         }
                     }
-                }
-
-                if model.supportsPageStack {
-                    PhotosPicker(
-                        selection: $selectedPhoto,
-                        matching: .images,
-                        preferredItemEncoding: .current
-                    ) {
-                        CanvasPaperImportTile(
-                            pageSize: pageSize,
-                            isLoading: importingPage
-                        )
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(importingPage)
-                    .accessibilityLabel("Import page")
-                    .accessibilityHint("Opens Photos and adds the chosen image as a new page")
-                    .accessibilityIdentifier("paper-setup.import-page")
                 }
             }
         }
@@ -1032,16 +1053,17 @@ private struct CanvasPaperPresetTile: View {
                     }
                 }
 
-                Text(style.title)
+                Text(displayTitle)
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.primary)
                     .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(style.title)
+        .accessibilityLabel(displayTitle)
         .accessibilityValue(isSelected ? "Selected" : "")
         .accessibilityAddTraits(isSelected ? .isSelected : [])
         .accessibilityIdentifier("paper-setup.template.\(templateIdentifier)")
@@ -1052,6 +1074,17 @@ private struct CanvasPaperPresetTile: View {
         case .grid: "squared"
         case .music: "music-staff"
         default: style.rawValue
+        }
+    }
+
+    private var displayTitle: String {
+        switch style {
+        case .blank: "Blank"
+        case .ruled: "Ruled \(density.title)"
+        case .grid: "Squared \(density.title)"
+        case .dotted: "Dotted \(density.title)"
+        case .cornell: "Cornell Notes"
+        case .music: "Music Staff"
         }
     }
 }

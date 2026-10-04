@@ -3,6 +3,7 @@ import Foundation
 import Observation
 import SwiftUI
 import UniformTypeIdentifiers
+import UIKit
 
 /// A single semantic treatment for labels bridged into UIKit-backed menus.
 ///
@@ -30,6 +31,46 @@ struct LibraryMenuActionLabel: View {
         }
         .foregroundStyle(color)
         .tint(color)
+    }
+}
+
+
+/// Original-color menu artwork avoids UIKit's accent-colored template tint.
+@MainActor
+struct LibraryTileSizeLabel: View {
+    let title: String
+    let columns: Int
+
+    @Environment(\.colorScheme) private var colorScheme
+    private static let lightIcons = makeIcons(color: .black)
+    private static let darkIcons = makeIcons(color: .white)
+
+    private static func makeIcons(color: UIColor) -> [UIImage] {
+        (1...3).map { columns in
+        UIGraphicsImageRenderer(size: CGSize(width: 26, height: 26)).image { renderer in
+            color.setStroke()
+            let gap: CGFloat = 2
+            let edge = (18 - gap * CGFloat(columns - 1)) / CGFloat(columns)
+            for row in 0..<columns {
+                for column in 0..<columns {
+                    let rect = CGRect(x: 4 + CGFloat(column) * (edge + gap),
+                                      y: 4 + CGFloat(row) * (edge + gap), width: edge, height: edge)
+                    let tile = UIBezierPath(roundedRect: rect, cornerRadius: 1.2)
+                    tile.lineWidth = 1
+                    tile.stroke()
+                }
+            }
+        }.withRenderingMode(.alwaysOriginal)
+        }
+    }
+
+    var body: some View {
+        Label {
+            Text(title).foregroundStyle(.primary)
+        } icon: {
+            Image(uiImage: (colorScheme == .dark ? Self.darkIcons : Self.lightIcons)[min(max(columns, 1), 3) - 1])
+                .renderingMode(.original)
+        }
     }
 }
 
@@ -220,24 +261,15 @@ struct LibraryTagDraft: Sendable {
 }
 
 struct LibraryCuratedCover: Identifiable, Hashable, Sendable {
-    enum Motif: Hashable, Sendable {
-        case compositionSpeckle
-        case orchardSprig
-        case candyStripe
-    }
-
     struct Palette: Hashable, Sendable {
         let top: LibraryRGBAColor
         let bottom: LibraryRGBAColor
         let spine: LibraryRGBAColor
-        let pattern: LibraryRGBAColor
         let ink: LibraryRGBAColor
     }
 
     let preset: LibraryCoverPreset
     let title: String
-    let subtitle: String
-    let motif: Motif
     let palette: Palette
 
     var id: LibraryCoverPreset { preset }
@@ -245,106 +277,82 @@ struct LibraryCuratedCover: Identifiable, Hashable, Sendable {
     static let curated: [LibraryCuratedCover] = [
         LibraryCuratedCover(
             preset: .softLinen,
-            title: "Rose Composition",
-            subtitle: "Soft rose with sparse composition marks",
-            motif: .compositionSpeckle,
+            title: "Golden Hearts",
             palette: Palette(
-                top: LibraryRGBAColor(red: 0.94, green: 0.68, blue: 0.79),
-                bottom: LibraryRGBAColor(red: 0.94, green: 0.68, blue: 0.79),
-                spine: LibraryRGBAColor(red: 0.67, green: 0.35, blue: 0.50),
-                pattern: LibraryRGBAColor(red: 1.00, green: 0.94, blue: 0.84),
-                ink: LibraryRGBAColor(red: 0.31, green: 0.20, blue: 0.25)
+                top: LibraryRGBAColor(red: 0.95, green: 0.92, blue: 0.86),
+                bottom: LibraryRGBAColor(red: 0.91, green: 0.87, blue: 0.79),
+                spine: LibraryRGBAColor(red: 0.66, green: 0.56, blue: 0.44),
+                ink: LibraryRGBAColor(red: 0.34, green: 0.28, blue: 0.24)
             )
         ),
         LibraryCuratedCover(
             preset: .blueprint,
-            title: "Mint Orchard",
-            subtitle: "Soft mint with simple orchard sprigs",
-            motif: .orchardSprig,
+            title: "Ivory Stripe",
             palette: Palette(
-                top: LibraryRGBAColor(red: 0.78, green: 0.90, blue: 0.80),
-                bottom: LibraryRGBAColor(red: 0.78, green: 0.90, blue: 0.80),
-                spine: LibraryRGBAColor(red: 0.44, green: 0.65, blue: 0.51),
-                pattern: LibraryRGBAColor(red: 0.96, green: 0.90, blue: 0.59),
-                ink: LibraryRGBAColor(red: 0.20, green: 0.34, blue: 0.25)
+                top: LibraryRGBAColor(red: 0.29, green: 0.37, blue: 0.27),
+                bottom: LibraryRGBAColor(red: 0.23, green: 0.31, blue: 0.23),
+                spine: LibraryRGBAColor(red: 0.16, green: 0.23, blue: 0.17),
+                ink: LibraryRGBAColor(red: 0.25, green: 0.24, blue: 0.19)
             )
         ),
         LibraryCuratedCover(
             preset: .warmPaper,
-            title: "Lavender Stripe",
-            subtitle: "Lavender with crisp blush stripes",
-            motif: .candyStripe,
+            title: "Blue Stripe",
             palette: Palette(
-                top: LibraryRGBAColor(red: 0.86, green: 0.79, blue: 0.93),
-                bottom: LibraryRGBAColor(red: 0.86, green: 0.79, blue: 0.93),
-                spine: LibraryRGBAColor(red: 0.57, green: 0.45, blue: 0.70),
-                pattern: LibraryRGBAColor(red: 0.96, green: 0.78, blue: 0.86),
-                ink: LibraryRGBAColor(red: 0.29, green: 0.23, blue: 0.36)
+                top: LibraryRGBAColor(red: 0.79, green: 0.87, blue: 0.89),
+                bottom: LibraryRGBAColor(red: 0.69, green: 0.80, blue: 0.84),
+                spine: LibraryRGBAColor(red: 0.40, green: 0.56, blue: 0.65),
+                ink: LibraryRGBAColor(red: 0.24, green: 0.32, blue: 0.37)
             )
         ),
         LibraryCuratedCover(
             preset: .skyComposition,
-            title: "Sky Composition",
-            subtitle: "Airy blue with cream composition marks",
-            motif: .compositionSpeckle,
+            title: "Bow & Bloom",
             palette: Palette(
-                top: LibraryRGBAColor(red: 0.70, green: 0.86, blue: 0.98),
-                bottom: LibraryRGBAColor(red: 0.70, green: 0.86, blue: 0.98),
-                spine: LibraryRGBAColor(red: 0.35, green: 0.61, blue: 0.82),
-                pattern: LibraryRGBAColor(red: 1.00, green: 0.96, blue: 0.82),
-                ink: LibraryRGBAColor(red: 0.18, green: 0.30, blue: 0.40)
+                top: LibraryRGBAColor(red: 0.94, green: 0.70, blue: 0.75),
+                bottom: LibraryRGBAColor(red: 0.90, green: 0.62, blue: 0.69),
+                spine: LibraryRGBAColor(red: 0.72, green: 0.34, blue: 0.45),
+                ink: LibraryRGBAColor(red: 0.37, green: 0.22, blue: 0.28)
             )
         ),
         LibraryCuratedCover(
             preset: .peachOrchard,
-            title: "Peach Orchard",
-            subtitle: "Warm peach with quiet botanical marks",
-            motif: .orchardSprig,
+            title: "Blue Composition",
             palette: Palette(
-                top: LibraryRGBAColor(red: 1.00, green: 0.80, blue: 0.72),
-                bottom: LibraryRGBAColor(red: 1.00, green: 0.80, blue: 0.72),
-                spine: LibraryRGBAColor(red: 0.88, green: 0.51, blue: 0.43),
-                pattern: LibraryRGBAColor(red: 0.99, green: 0.93, blue: 0.58),
-                ink: LibraryRGBAColor(red: 0.42, green: 0.25, blue: 0.21)
+                top: LibraryRGBAColor(red: 0.43, green: 0.57, blue: 0.76),
+                bottom: LibraryRGBAColor(red: 0.34, green: 0.48, blue: 0.67),
+                spine: LibraryRGBAColor(red: 0.23, green: 0.34, blue: 0.51),
+                ink: LibraryRGBAColor(red: 0.23, green: 0.29, blue: 0.39)
             )
         ),
         LibraryCuratedCover(
             preset: .butterStripe,
-            title: "Butter Stripe",
-            subtitle: "Soft yellow with clean ivory bands",
-            motif: .candyStripe,
+            title: "Sage Grid",
             palette: Palette(
-                top: LibraryRGBAColor(red: 1.00, green: 0.90, blue: 0.61),
-                bottom: LibraryRGBAColor(red: 1.00, green: 0.90, blue: 0.61),
-                spine: LibraryRGBAColor(red: 0.82, green: 0.65, blue: 0.25),
-                pattern: LibraryRGBAColor(red: 1.00, green: 0.97, blue: 0.86),
-                ink: LibraryRGBAColor(red: 0.40, green: 0.33, blue: 0.16)
+                top: LibraryRGBAColor(red: 0.61, green: 0.77, blue: 0.69),
+                bottom: LibraryRGBAColor(red: 0.51, green: 0.69, blue: 0.61),
+                spine: LibraryRGBAColor(red: 0.31, green: 0.51, blue: 0.42),
+                ink: LibraryRGBAColor(red: 0.23, green: 0.34, blue: 0.29)
             )
         ),
         LibraryCuratedCover(
             preset: .aquaComposition,
-            title: "Aqua Composition",
-            subtitle: "Clear aqua with fine notebook flecks",
-            motif: .compositionSpeckle,
+            title: "Blush Grid",
             palette: Palette(
-                top: LibraryRGBAColor(red: 0.67, green: 0.91, blue: 0.91),
-                bottom: LibraryRGBAColor(red: 0.67, green: 0.91, blue: 0.91),
-                spine: LibraryRGBAColor(red: 0.32, green: 0.67, blue: 0.69),
-                pattern: LibraryRGBAColor(red: 0.98, green: 0.98, blue: 0.84),
-                ink: LibraryRGBAColor(red: 0.17, green: 0.35, blue: 0.36)
+                top: LibraryRGBAColor(red: 0.96, green: 0.88, blue: 0.88),
+                bottom: LibraryRGBAColor(red: 0.92, green: 0.72, blue: 0.76),
+                spine: LibraryRGBAColor(red: 0.72, green: 0.42, blue: 0.48),
+                ink: LibraryRGBAColor(red: 0.39, green: 0.25, blue: 0.29)
             )
         ),
         LibraryCuratedCover(
             preset: .periwinkleOrchard,
-            title: "Periwinkle Orchard",
-            subtitle: "Cool periwinkle with subtle sprigs",
-            motif: .orchardSprig,
+            title: "Sandstone Stripe",
             palette: Palette(
-                top: LibraryRGBAColor(red: 0.75, green: 0.80, blue: 1.00),
-                bottom: LibraryRGBAColor(red: 0.75, green: 0.80, blue: 1.00),
-                spine: LibraryRGBAColor(red: 0.48, green: 0.53, blue: 0.82),
-                pattern: LibraryRGBAColor(red: 0.95, green: 0.90, blue: 0.64),
-                ink: LibraryRGBAColor(red: 0.25, green: 0.27, blue: 0.45)
+                top: LibraryRGBAColor(red: 0.79, green: 0.64, blue: 0.48),
+                bottom: LibraryRGBAColor(red: 0.70, green: 0.54, blue: 0.38),
+                spine: LibraryRGBAColor(red: 0.48, green: 0.34, blue: 0.24),
+                ink: LibraryRGBAColor(red: 0.32, green: 0.25, blue: 0.20)
             )
         ),
     ]
@@ -421,6 +429,16 @@ final class LibraryAppSession {
             scopeBrowsingStates[scope, default: LibraryScopeBrowsingState()].scrollPositionID = newValue
         }
     }
+    func scrollPosition(for scope: LibraryScope) -> UUID? {
+        scopeBrowsingStates[scope]?.scrollPositionID
+    }
+
+    func setScrollPosition(_ id: UUID?, for scope: LibraryScope) {
+        // A disappearing scroll view must update its own scope, even when a
+        // folder navigation has already selected the destination scope.
+        scopeBrowsingStates[scope, default: LibraryScopeBrowsingState()].scrollPositionID = id
+    }
+
     var sortField: LibrarySortField = .activity
     var sortOrder: LibrarySortDirection = .descending
     var recentPeriod: LibraryRecentPeriod = .thirtyDays
@@ -638,6 +656,12 @@ final class LibraryAppSession {
             )
         }
         return repository.cachedChildCount(of: item.id)
+    }
+
+    func folderArtworkPreviewItems(for item: LibraryItemRecord) -> [LibraryFolderPreviewItem] {
+        guard item.kind == .folder,
+            let children = repository.cachedChildren(of: item.id) else { return [] }
+        return LibraryFolderPreviewPolicy.previewItems(for: item.id, candidates: children)
     }
 
     func selectScope(_ newScope: LibraryScope) {

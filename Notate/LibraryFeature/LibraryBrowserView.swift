@@ -13,6 +13,8 @@ struct LibraryBrowserView: View {
     @AppStorage("notate.library.hasCreatedFirstItem") private var hasCreatedFirstLibraryItem = false
     @AppStorage("notate.library.gridZoom") private var gridZoom = 0.84
     @State private var gridMagnificationStart: CGFloat?
+    @State private var isHeaderCollapsed = false
+    @State private var expandedHeaderHeight: CGFloat = 140
     @AccessibilityFocusState private var isAddButtonAccessibilityFocused: Bool
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -28,7 +30,9 @@ struct LibraryBrowserView: View {
                 LibraryBrowserHeader(
                     session: session,
                     folderNavigationNamespace: folderNavigationNamespace,
-                    gridZoom: $gridZoom
+                    gridZoom: $gridZoom,
+                    isCompact: true,
+                    showsCompactTitle: isHeaderCollapsed
                 )
                 browserContent
             }
@@ -116,26 +120,28 @@ struct LibraryBrowserView: View {
             NotateLaunchInstrumentation.endLaunchToLibraryVisibility()
             recordExistingLibraryItems()
         }
+        .onChange(of: session.scope) { _, _ in
+            isHeaderCollapsed = session.scrollPositionID != nil
+        }
         .onChange(of: session.repository.readyItemCount) { _, count in
             if count > 0 { hasCreatedFirstLibraryItem = true }
         }
-        .accessibilityIdentifier("library-browser")
     }
 
     @ViewBuilder
     private var browserContent: some View {
         if session.visibleItems.isEmpty && session.visibleDeletedPages.isEmpty {
-            LibraryEmptyStateView(
-                scope: session.scope,
-                searchQuery: session.searchQuery,
-                onPrimaryAction: primaryEmptyAction
-            )
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if session.scope == .trash {
-            VStack(spacing: 0) {
-                trashBanner
-                trashContent
+            ScrollView {
+                expandedHeader
+                LibraryEmptyStateView(
+                    scope: session.scope,
+                    searchQuery: session.searchQuery,
+                    onPrimaryAction: primaryEmptyAction
+                )
             }
+            .accessibilityIdentifier("library-browser")
+        } else if session.scope == .trash {
+            trashContent
         } else {
             switch session.viewStyle {
             case .grid:
@@ -147,6 +153,18 @@ struct LibraryBrowserView: View {
             case .list:
                 list
             }
+        }
+    }
+
+    private var expandedHeader: some View {
+        VStack(spacing: 0) {
+            LibraryBrowserHeader(session: session,
+                                 folderNavigationNamespace: folderNavigationNamespace,
+                                 gridZoom: $gridZoom)
+            if session.scope == .trash { trashBanner }
+        }
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+            expandedHeaderHeight = height
         }
     }
 
@@ -196,9 +214,11 @@ struct LibraryBrowserView: View {
 
     private var trashGrid: some View {
         GeometryReader { proxy in
+            let layout = shelfLayout(for: proxy.size.width)
             ScrollView {
+                expandedHeader
                 LazyVGrid(
-                    columns: gridColumns(for: proxy.size.width),
+                    columns: layout.columns,
                     alignment: gridAlignment,
                     spacing: NotateDesign.Library.Shelf.rowSpacing
                 ) {
@@ -213,6 +233,7 @@ struct LibraryBrowserView: View {
                                     folderNavigationNamespace: folderNavigationNamespace,
                                     itemTransitionNamespace: itemTransitionNamespace
                                 )
+                                .frame(width: layout.cardWidth)
                             }
                         } header: {
                             trashSectionHeader("Items")
@@ -223,12 +244,14 @@ struct LibraryBrowserView: View {
                         Section {
                             ForEach(session.visibleDeletedPages) { page in
                                 LibraryDeletedPageCard(record: page, session: session)
+                                    .frame(width: layout.cardWidth)
                             }
                         } header: {
                             trashSectionHeader("Pages")
                         }
                     }
                 }
+                .scrollTargetLayout()
                 .padding(.horizontal, gridHorizontalPadding)
                 .padding(.top, NotateDesign.Spacing.page)
                 .padding(.bottom, 112)
@@ -236,12 +259,22 @@ struct LibraryBrowserView: View {
                 .frame(maxWidth: .infinity)
             }
             .scrollEdgeEffectStyle(.soft, for: .top)
-            .scrollPosition(id: scrollPositionBinding)
+            .accessibilityIdentifier("library-browser")
+            .scrollPosition(id: scrollPositionBinding, anchor: .top)
+            .onScrollGeometryChange(for: Bool.self) { geometry in
+                geometry.contentOffset.y + geometry.contentInsets.top >= expandedHeaderHeight
+            } action: { _, collapsed in
+                isHeaderCollapsed = collapsed
+            }
         }
     }
 
     private var trashList: some View {
         List {
+            expandedHeader
+                .listRowInsets(EdgeInsets())
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
             if session.visibleItems.isEmpty == false {
                 Section("Items") {
                     ForEach(session.visibleItems) { item in
@@ -272,7 +305,13 @@ struct LibraryBrowserView: View {
         .scrollContentBackground(.hidden)
         .contentMargins(.bottom, 100, for: .scrollContent)
         .scrollEdgeEffectStyle(.soft, for: .top)
-        .scrollPosition(id: scrollPositionBinding)
+            .accessibilityIdentifier("library-browser")
+        .scrollPosition(id: scrollPositionBinding, anchor: .top)
+        .onScrollGeometryChange(for: Bool.self) { geometry in
+            geometry.contentOffset.y + geometry.contentInsets.top >= expandedHeaderHeight
+        } action: { _, collapsed in
+            isHeaderCollapsed = collapsed
+        }
     }
 
     private func trashSectionHeader(_ title: String) -> some View {
@@ -286,9 +325,11 @@ struct LibraryBrowserView: View {
 
     private var grid: some View {
         GeometryReader { proxy in
+            let layout = shelfLayout(for: proxy.size.width)
             ScrollView {
+                expandedHeader
                 LazyVGrid(
-                    columns: gridColumns(for: proxy.size.width),
+                    columns: layout.columns,
                     alignment: gridAlignment,
                     spacing: NotateDesign.Library.Shelf.rowSpacing
                 ) {
@@ -301,8 +342,10 @@ struct LibraryBrowserView: View {
                             folderNavigationNamespace: folderNavigationNamespace,
                             itemTransitionNamespace: itemTransitionNamespace
                         )
+                        .frame(width: layout.cardWidth)
                     }
                 }
+                .scrollTargetLayout()
                 .padding(.horizontal, gridHorizontalPadding)
                 .padding(.top, NotateDesign.Spacing.page)
                 .padding(.bottom, 112)
@@ -310,13 +353,21 @@ struct LibraryBrowserView: View {
                 .frame(maxWidth: .infinity)
             }
             .scrollEdgeEffectStyle(.soft, for: .top)
-            .scrollPosition(id: scrollPositionBinding)
+            .accessibilityIdentifier("library-browser")
+            .scrollPosition(id: scrollPositionBinding, anchor: .top)
+            .onScrollGeometryChange(for: Bool.self) { geometry in
+                geometry.contentOffset.y + geometry.contentInsets.top >= expandedHeaderHeight
+            } action: { _, collapsed in
+                isHeaderCollapsed = collapsed
+            }
             .simultaneousGesture(
                 MagnifyGesture()
                     .onChanged { value in
                         let start = gridMagnificationStart ?? CGFloat(gridZoom)
                         gridMagnificationStart = start
-                        gridZoom = Double(min(max(start * value.magnification, 0.72), 1.48))
+                        gridZoom = Double(min(max(start * value.magnification,
+                                                 NotateDesign.Library.Shelf.smallZoom),
+                                             NotateDesign.Library.Shelf.largeZoom))
                     }
                     .onEnded { _ in
                         gridMagnificationStart = nil
@@ -333,61 +384,18 @@ struct LibraryBrowserView: View {
         dynamicTypeSize.isAccessibilitySize ? .center : .leading
     }
 
-    private func gridColumns(for totalWidth: CGFloat) -> [GridItem] {
-        let cappedWidth = min(totalWidth, NotateLibraryDesign.contentMaximumWidth)
-        let contentWidth = max(0, cappedWidth - (gridHorizontalPadding * 2))
-        let twoColumnMinimum = (gridCardMinimumWidth * 2) + NotateDesign.Library.Shelf.columnSpacing
-
-        // Regular-width split-view columns can still be narrower than two
-        // comfortable cards. Accessibility sizes also benefit from a single
-        // reading column instead of compressed metadata.
-        if dynamicTypeSize.isAccessibilitySize || contentWidth < twoColumnMinimum {
-            return [
-                GridItem(
-                    .fixed(
-                        min(
-                            contentWidth,
-                            NotateLibraryDesign.accessibilityCardMaximumWidth
-                        )
-                    ),
-                    spacing: 0,
-                    alignment: .top
-                ),
-            ]
-        }
-
-        let columnSpacing = NotateDesign.Library.Shelf.columnSpacing
-        let fittingColumnCount = max(
-            1,
-            Int((contentWidth + columnSpacing) / (gridCardMinimumWidth + columnSpacing))
-        )
-        // Five columns keep the library feeling like a deliberate document
-        // shelf on iPad and desktop while the pinch gesture still changes the
-        // number of visible tiles at every zoom level.
-        let columnCount = min(fittingColumnCount, 5)
-        let columnWidth = max(
-            gridCardMinimumWidth,
-            (contentWidth - columnSpacing * CGFloat(columnCount - 1)) / CGFloat(columnCount)
-        )
-        return Array(
-            repeating: GridItem(
-                .flexible(minimum: gridCardMinimumWidth, maximum: columnWidth),
-                spacing: columnSpacing,
-                alignment: .top
-            ),
-            count: columnCount
-        )
-    }
-
-    private var gridCardMinimumWidth: CGFloat {
-        let compactMinimum: CGFloat = 144
-        let compactMaximum: CGFloat = horizontalSizeClass == .compact ? 220 : 248
-        return compactMinimum + (compactMaximum - compactMinimum)
-            * CGFloat((gridZoom - 0.72) / (1.48 - 0.72))
+    private func shelfLayout(for width: CGFloat) -> LibraryShelfLayout {
+        LibraryShelfLayout(availableWidth: width,
+                           horizontalPadding: gridHorizontalPadding,
+                           zoom: gridZoom)
     }
 
     private var list: some View {
         List {
+            expandedHeader
+                .listRowInsets(EdgeInsets())
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
             ForEach(session.visibleItems) { item in
                 LibraryListRow(
                     item: item,
@@ -413,13 +421,20 @@ struct LibraryBrowserView: View {
         .scrollContentBackground(.hidden)
         .contentMargins(.bottom, 100, for: .scrollContent)
         .scrollEdgeEffectStyle(.soft, for: .top)
-        .scrollPosition(id: scrollPositionBinding)
+            .accessibilityIdentifier("library-browser")
+        .scrollPosition(id: scrollPositionBinding, anchor: .top)
+        .onScrollGeometryChange(for: Bool.self) { geometry in
+            geometry.contentOffset.y + geometry.contentInsets.top >= expandedHeaderHeight
+        } action: { _, collapsed in
+            isHeaderCollapsed = collapsed
+        }
     }
 
     private var scrollPositionBinding: Binding<UUID?> {
-        Binding(
-            get: { session.scrollPositionID },
-            set: { session.scrollPositionID = $0 }
+        let scope = session.scope
+        return Binding(
+            get: { session.scrollPosition(for: scope) },
+            set: { session.setScrollPosition($0, for: scope) }
         )
     }
 
@@ -857,74 +872,78 @@ private struct LibraryBrowserHeader: View {
     let session: LibraryAppSession
     let folderNavigationNamespace: Namespace.ID
     @Binding var gridZoom: Double
+    var isCompact = false
+    var showsCompactTitle = false
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @FocusState private var isSearchFocused: Bool
 
     private var tileSizeSelection: Binding<Int> {
-        Binding<Int>(
-            get: {
-                if gridZoom < 0.88 { return 0 }
-                if gridZoom > 1.18 { return 2 }
-                return 1
-            },
-            set: { selection in
-                gridZoom = switch selection {
-                case 0: 0.72
-                case 2: 1.48
-                default: 0.84
-                }
-            }
+        Binding(
+            get: { NotateDesign.Library.Shelf.tileSizeSelection(for: gridZoom) },
+            set: { gridZoom = NotateDesign.Library.Shelf.zoom(for: $0) }
         )
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            topControls
-
-            title
-                .padding(.top, 2)
-
-            if session.isSearchExpanded == false {
-                HStack(spacing: NotateDesign.Spacing.control) {
-                    Spacer(minLength: 0)
-                    libraryTools
+        Group {
+            if isCompact {
+                compactBar
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    if session.breadcrumbItems.isEmpty == false { breadcrumbs }
+                    title
+                    HStack {
+                        Spacer(minLength: 0)
+                        libraryTools
+                    }
                 }
-                .frame(minHeight: NotateLibraryDesign.minimumHitTarget)
-                .padding(.top, NotateDesign.Spacing.compact)
+                .padding(.horizontal, dynamicTypeSize.isAccessibilitySize ? 18 : 28)
+                .padding(.bottom, 10)
             }
         }
-        .padding(.horizontal, dynamicTypeSize.isAccessibilitySize ? 18 : 28)
-        .padding(.top, 2)
-        .padding(.bottom, 10)
         .background(NotateLibraryDesign.warmBackground)
     }
 
-    private var topControls: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: NotateDesign.Spacing.control) {
-                LibraryRevealSidebarButton()
-                if session.breadcrumbItems.isEmpty == false {
-                    breadcrumbs
+    private var compactBar: some View {
+        HStack(spacing: 8) {
+            LibraryRevealSidebarButton()
+            if case .folder = session.scope {
+                Button {
+                    let ancestors = session.breadcrumbItems.dropLast()
+                    selectScope(ancestors.last.map { .folder($0.id) } ?? .home)
+                } label: {
+                    Path { path in
+                        path.move(to: CGPoint(x: 14, y: 4))
+                        path.addLine(to: CGPoint(x: 6, y: 12))
+                        path.addLine(to: CGPoint(x: 14, y: 20))
+                    }
+                    .stroke(.primary, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+                    .frame(width: 20, height: 24)
+                    .notateMinimumHitTarget()
                 }
-                Spacer(minLength: NotateDesign.Spacing.control)
-                if session.isSearchExpanded {
-                    searchControl
-                }
+                .accessibilityLabel("Back to parent folder")
+                .accessibilityIdentifier("library.folder.back")
             }
-            .frame(minHeight: 46)
-
-            VStack(alignment: .leading, spacing: NotateDesign.Spacing.tight) {
-                LibraryRevealSidebarButton()
-                if session.breadcrumbItems.isEmpty == false {
-                    breadcrumbs
-                }
-                if session.isSearchExpanded {
-                    searchControl
-                }
+            if session.isSearchExpanded == false {
+                Text(session.scopeTitle)
+                    .font(.headline)
+                    .lineLimit(dynamicTypeSize.isAccessibilitySize ? 2 : 1)
+                    .opacity(showsCompactTitle ? 1 : 0)
+                    .accessibilityHidden(!showsCompactTitle)
+                    .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: showsCompactTitle)
+                    .accessibilityIdentifier("library.compact.title")
+                Spacer(minLength: 0)
             }
+            searchControl
+                .layoutPriority(1)
         }
+        .buttonStyle(.plain)
+        .padding(.horizontal, dynamicTypeSize.isAccessibilitySize ? 12 : 16)
+        .frame(minHeight: 56)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("library.compact.header")
     }
 
     private var title: some View {
@@ -934,9 +953,6 @@ private struct LibraryBrowserHeader: View {
                 titleText
                     .layoutPriority(1)
                 Spacer(minLength: 0)
-                if session.isSearchExpanded == false {
-                    searchControl
-                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -953,21 +969,20 @@ private struct LibraryBrowserHeader: View {
     private var folderHeaderIcon: some View {
         if let folderHeaderItem {
             let tint = (folderHeaderItem.folderSettings?.color ?? .folderBlue).swiftUIColor
-            Image(systemName: folderHeaderItem.folderSettings?.symbolName ?? "folder")
-                .symbolRenderingMode(.hierarchical)
-                .font(.system(size: 19, weight: .semibold))
-                .foregroundStyle(tint)
-                .frame(width: 34, height: 34)
-                .background(
-                    tint.opacity(0.13),
-                    in: RoundedRectangle(cornerRadius: 10, style: .continuous)
-                )
-                .notateFolderGeometryTransition(
-                    itemID: folderHeaderItem.id,
-                    in: folderNavigationNamespace,
-                    isSource: false
-                )
-                .accessibilityHidden(true)
+            let symbol = folderHeaderItem.folderSettings?.symbolName ?? "folder"
+            Group {
+                if let kind = NotateAppGlyphKind.customFolderGlyph(for: symbol) {
+                    NotateAppGlyph(kind: kind, tint: tint, usesTintedOutline: true, size: 22)
+                } else {
+                    Image(systemName: symbol).foregroundStyle(tint)
+                }
+            }
+            .frame(width: 34, height: 34)
+            .background(tint.opacity(0.13), in: RoundedRectangle(cornerRadius: 10))
+            .id(folderHeaderItem.id)
+            .transition(.opacity)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: folderHeaderItem.id)
+            .accessibilityHidden(true)
         }
     }
 
@@ -1148,11 +1163,11 @@ private struct LibraryBrowserHeader: View {
                 if session.viewStyle == .grid {
                     Divider()
                     Picker("Tile Size", selection: tileSizeSelection) {
-                        Label("Small", systemImage: "square.grid.3x3")
+                        LibraryTileSizeLabel(title: "Small", columns: 3)
                             .tag(0)
-                        Label("Comfortable", systemImage: "square.grid.2x2")
+                        LibraryTileSizeLabel(title: "Comfortable", columns: 2)
                             .tag(1)
-                        Label("Large", systemImage: "rectangle")
+                        LibraryTileSizeLabel(title: "Large", columns: 1)
                             .tag(2)
                     }
                 }
@@ -1212,7 +1227,7 @@ private struct LibraryBrowserHeader: View {
                 .writingToolsBehavior(.disabled)
                 .focused($isSearchFocused)
                 .accessibilityIdentifier("library.search")
-                .frame(minWidth: 168, idealWidth: 236, maxWidth: 286)
+                .frame(minWidth: 40, idealWidth: 236, maxWidth: .infinity)
                 .onSubmit { isSearchFocused = false }
 
                 Button {
@@ -1268,9 +1283,6 @@ private struct LibraryBrowserHeader: View {
         if session.searchQuery.isEmpty == false {
             let count = session.visibleItems.count + session.visibleDeletedPages.count
             return "\(count) result\(count == 1 ? "" : "s")"
-        }
-        if case .folder = session.scope {
-            return "Folder level \(session.currentFolderDepth) of \(LibraryRepository.maximumFolderDepth)"
         }
         return nil
     }
@@ -1385,7 +1397,7 @@ private struct LibraryAddPanel: View {
                     session.parentID,
                     LibraryNotebookDraft(
                         name: "Quick Note",
-                        coverChoice: .automatic,
+                        coverChoice: .noCover,
                         customCover: nil
                     )
                 )
