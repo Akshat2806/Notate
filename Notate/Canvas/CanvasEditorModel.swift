@@ -1764,7 +1764,9 @@ public final class CanvasEditorModel {
 
         switch document {
         case .newDocument:
-            let initialViewport = Self.initialViewport(for: documentKind)
+            let initialViewport = Self.topAlignedViewport(
+                Self.initialViewport(for: documentKind)
+            )
             let page = CanvasPageSnapshot(
                 markup: Self.blankMarkup(for: documentKind),
                 viewport: initialViewport,
@@ -1775,7 +1777,9 @@ public final class CanvasEditorModel {
             initialPages = pages
             initialPageID = page.id
             initialMarkup = page.markup
-            viewport = documentMode == .freeform ? initialViewport : preferences.viewport
+            viewport = Self.topAlignedViewport(
+                documentMode == .freeform ? initialViewport : preferences.viewport
+            )
             updatePage(page.id, viewport: viewport)
             updatePagePositionState()
             generation = 0
@@ -1805,13 +1809,14 @@ public final class CanvasEditorModel {
                 let board = snapshot.pages[restoredIndex]
                 pages = [board]
                 currentPageID = board.id
-                viewport = board.viewport.usesFitPage
+                let restoredViewport = board.viewport.usesFitPage
                     ? Self.initialViewport(for: documentKind)
                     : board.viewport
+                viewport = Self.topAlignedViewport(restoredViewport)
             } else {
                 pages = snapshot.pages
                 currentPageID = snapshot.currentPageID
-                viewport = preferences.viewport
+                viewport = Self.topAlignedViewport(preferences.viewport)
             }
             updateZoomReadout(for: viewport.stackZoomScale)
             updatePage(currentPageID, viewport: viewport)
@@ -1986,6 +1991,16 @@ public final class CanvasEditorModel {
             normalizedCenterX: 0.5,
             normalizedCenterY: 0.5
         )
+    }
+
+    /// Each editor session opens at the top while retaining its saved zoom
+    /// and horizontal position. Scrolling during the session remains normal.
+    private static func topAlignedViewport(
+        _ viewport: CanvasViewportState
+    ) -> CanvasViewportState {
+        var viewport = viewport
+        viewport.normalizedCenterY = 0
+        return viewport
     }
 
     private func paperMarkupDidChange(_ markup: PaperMarkup, on pageID: UUID) {
