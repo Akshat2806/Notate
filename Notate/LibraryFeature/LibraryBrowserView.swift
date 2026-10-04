@@ -253,7 +253,7 @@ struct LibraryBrowserView: View {
                 }
                 .scrollTargetLayout()
                 .padding(.horizontal, gridHorizontalPadding)
-                .padding(.top, NotateDesign.Spacing.page)
+                .padding(.top, NotateDesign.Spacing.compact)
                 .padding(.bottom, 112)
                 .frame(maxWidth: NotateLibraryDesign.contentMaximumWidth, alignment: .leading)
                 .frame(maxWidth: .infinity)
@@ -347,7 +347,7 @@ struct LibraryBrowserView: View {
                 }
                 .scrollTargetLayout()
                 .padding(.horizontal, gridHorizontalPadding)
-                .padding(.top, NotateDesign.Spacing.page)
+                .padding(.top, NotateDesign.Spacing.compact)
                 .padding(.bottom, 112)
                 .frame(maxWidth: NotateLibraryDesign.contentMaximumWidth, alignment: .leading)
                 .frame(maxWidth: .infinity)
@@ -893,19 +893,55 @@ private struct LibraryBrowserHeader: View {
             } else {
                 VStack(alignment: .leading, spacing: 8) {
                     if isFolderScope {
-                        if session.breadcrumbItems.isEmpty == false { breadcrumbs }
+                        if session.breadcrumbItems.isEmpty == false {
+                            if dynamicTypeSize.isAccessibilitySize {
+                                breadcrumbs
+                                HStack {
+                                    Spacer(minLength: 0)
+                                    libraryTools
+                                }
+                            } else {
+                                HStack(alignment: .center, spacing: 12) {
+                                    breadcrumbs
+                                        .layoutPriority(1)
+                                    Spacer(minLength: 0)
+                                    libraryTools
+                                }
+                            }
+                        } else {
+                            HStack {
+                                Spacer(minLength: 0)
+                                libraryTools
+                            }
+                        }
                         if let subtitle {
                             Text(subtitle)
                                 .font(.callout)
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
                         }
-                    } else {
+                    } else if dynamicTypeSize.isAccessibilitySize {
                         title
-                    }
-                    HStack {
-                        Spacer(minLength: 0)
-                        libraryTools
+                        HStack {
+                            Spacer(minLength: 0)
+                            libraryTools
+                        }
+                    } else {
+                        ViewThatFits(in: .horizontal) {
+                            HStack(alignment: .center, spacing: NotateDesign.Spacing.section) {
+                                title
+                                Spacer(minLength: NotateDesign.Spacing.compact)
+                                libraryTools
+                            }
+
+                            VStack(alignment: .leading, spacing: NotateDesign.Spacing.compact) {
+                                title
+                                HStack {
+                                    Spacer(minLength: 0)
+                                    libraryTools
+                                }
+                            }
+                        }
                     }
                 }
                 .padding(.horizontal, dynamicTypeSize.isAccessibilitySize ? 18 : 28)
@@ -918,31 +954,16 @@ private struct LibraryBrowserHeader: View {
     private var compactBar: some View {
         HStack(spacing: 8) {
             LibraryRevealSidebarButton()
-            if case .folder = session.scope {
-                Button {
-                    let ancestors = session.breadcrumbItems.dropLast()
-                    selectScope(ancestors.last.map { .folder($0.id) } ?? .home)
-                } label: {
-                    Path { path in
-                        path.move(to: CGPoint(x: 14, y: 4))
-                        path.addLine(to: CGPoint(x: 6, y: 12))
-                        path.addLine(to: CGPoint(x: 14, y: 20))
-                    }
-                    .stroke(.primary, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
-                    .frame(width: 20, height: 24)
-                    .notateMinimumHitTarget()
-                }
-                .accessibilityLabel("Back to parent folder")
-                .accessibilityIdentifier("library.folder.back")
-            }
             if session.isSearchExpanded == false {
-                Text(session.scopeTitle)
-                    .font(.headline)
-                    .lineLimit(dynamicTypeSize.isAccessibilitySize ? 2 : 1)
-                    .opacity(isFolderScope || showsCompactTitle ? 1 : 0)
-                    .accessibilityHidden(isFolderScope == false && showsCompactTitle == false)
-                    .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: showsCompactTitle)
-                    .accessibilityIdentifier("library.compact.title")
+                if isFolderScope == false {
+                    Text(session.scopeTitle)
+                        .font(.headline)
+                        .lineLimit(dynamicTypeSize.isAccessibilitySize ? 2 : 1)
+                        .opacity(showsCompactTitle ? 1 : 0)
+                        .accessibilityHidden(showsCompactTitle == false)
+                        .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: showsCompactTitle)
+                        .accessibilityIdentifier("library.compact.title")
+                }
                 Spacer(minLength: 0)
             }
             searchControl
@@ -1008,19 +1029,23 @@ private struct LibraryBrowserHeader: View {
     @ViewBuilder
     private var breadcrumbs: some View {
         if session.breadcrumbItems.isEmpty == false {
+            let parentFolderID = session.breadcrumbItems.dropLast().last?.id
             ScrollView(.horizontal) {
                 HStack(spacing: 5) {
                     Button("Home") {
                         selectScope(.home)
                     }
                     .buttonStyle(.plain)
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(.secondary)
+                    .font(.body.weight(.medium))
+                    .foregroundStyle(.primary)
                     .notateMinimumHitTarget()
+                    .accessibilityIdentifier(
+                        parentFolderID == nil ? "library.folder.back" : "library.breadcrumb.home"
+                    )
 
                     ForEach(session.breadcrumbItems) { item in
                         Image(systemName: "chevron.right")
-                            .font(.caption2.weight(.semibold))
+                            .font(.caption.weight(.semibold))
                             .foregroundStyle(.tertiary)
                             .accessibilityHidden(true)
 
@@ -1028,9 +1053,18 @@ private struct LibraryBrowserHeader: View {
                             selectScope(.folder(item.id))
                         }
                         .buttonStyle(.plain)
-                        .font(.subheadline.weight(item.id == session.parentID ? .semibold : .regular))
-                        .foregroundStyle(item.id == session.parentID ? .primary : .secondary)
+                        .font(.body.weight(item.id == session.parentID ? .semibold : .medium))
+                        .foregroundStyle(
+                            item.id == session.parentID
+                                ? NotateLibraryDesign.accent
+                                : Color.primary
+                        )
                         .notateMinimumHitTarget()
+                        .accessibilityIdentifier(
+                            item.id == parentFolderID
+                                ? "library.folder.back"
+                                : "library.breadcrumb.\(item.id.uuidString)"
+                        )
                     }
                 }
             }
@@ -1141,7 +1175,9 @@ private struct LibraryBrowserHeader: View {
             } label: {
                 ViewThatFits(in: .horizontal) {
                     HStack(spacing: 7) {
-                        NotateAppGlyph(kind: .filter, tint: Color.primary, size: 18)
+                        Image(systemName: sortDirectionSystemImage)
+                            .font(.system(size: 17, weight: .medium))
+                            .frame(width: 20, height: 20)
                         Text(sortTitle)
                             .lineLimit(1)
                     }
@@ -1149,7 +1185,9 @@ private struct LibraryBrowserHeader: View {
                     .foregroundStyle(.primary)
                     .notateMinimumHitTarget()
 
-                    NotateAppGlyph(kind: .filter, tint: Color.primary, size: 18)
+                    Image(systemName: sortDirectionSystemImage)
+                        .font(.system(size: 17, weight: .medium))
+                        .frame(width: 20, height: 20)
                         .notateMinimumHitTarget()
                 }
             }
@@ -1308,6 +1346,10 @@ private struct LibraryBrowserHeader: View {
         case .created: "Created"
         case .type: "Type"
         }
+    }
+
+    private var sortDirectionSystemImage: String {
+        session.sortOrder == .descending ? "arrow.down" : "arrow.up"
     }
 
     private var sortAccessibilityValue: String {

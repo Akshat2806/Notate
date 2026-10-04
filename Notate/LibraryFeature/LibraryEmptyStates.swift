@@ -96,7 +96,7 @@ struct LibraryEmptyStateView: View {
     }
 
     var body: some View {
-        VStack(spacing: 14) {
+        VStack(spacing: 4) {
             LibraryEmptyArtwork(kind: artworkKind)
                 .id(artworkKind)
 
@@ -166,7 +166,6 @@ private struct LibraryEmptyArtwork: View {
         artwork
             .frame(maxWidth: kind.illustrationSize.width)
             .frame(maxWidth: .infinity)
-            .frame(height: kind.illustrationSize.height)
             .opacity(hasAppeared ? 0.96 : 0)
             .scaleEffect(reduceMotion || hasAppeared ? 1 : 0.978)
             .offset(y: reduceMotion || hasAppeared ? 0 : 6)
@@ -209,12 +208,16 @@ private struct LibraryEmptyArtwork: View {
     }
 
     private func rasterImage(named assetName: String) -> some View {
-        Image(assetName)
+        let imageSize = UIImage(named: assetName)?.size ?? kind.illustrationSize
+
+        return Image(assetName)
             .resizable()
             .interpolation(.high)
             .antialiased(true)
             .scaledToFit()
-            .frame(maxWidth: kind.illustrationSize.width)
+            .frame(width: imageSize.width, height: imageSize.height)
+            .aspectRatio(1, contentMode: .fit)
+            .offset(y: 14)
     }
 }
 
