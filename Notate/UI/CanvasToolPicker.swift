@@ -71,8 +71,8 @@ public struct CanvasToolPicker: View {
     }
 
     enum BarMetrics {
-        static let itemWidth: CGFloat = 38
-        static let itemHeight: CGFloat = 40
+        static let itemWidth: CGFloat = 44
+        static let itemHeight: CGFloat = 44
         static let itemSpacing: CGFloat = 2
         static let horizontalPadding: CGFloat = 6
         static let verticalPadding: CGFloat = 2
@@ -80,6 +80,7 @@ public struct CanvasToolPicker: View {
         static let itemCount = 11
         static let pipeCount = 3
         static let selectionDiameter: CGFloat = 34
+        static let toolbarSelectionDiameter: CGFloat = 36
     }
 
     /// One 6-column grid for every panel so switching tools never changes its
@@ -88,7 +89,8 @@ public struct CanvasToolPicker: View {
         static let column: CGFloat = 42
         static let columns = 6
         static let padding: CGFloat = 6
-        static let lineHeight: CGFloat = 42
+        static let lineHeight: CGFloat = 44
+        static let styleRowHeight: CGFloat = 54
         static let cornerRadius: CGFloat = 20
         static let gapBelowBar: CGFloat = 8
         static let edgeMargin: CGFloat = 16
@@ -302,7 +304,7 @@ private var barRow: some View {
                 .frame(width: BarMetrics.itemWidth, height: BarMetrics.itemHeight)
                 .background {
                     if isAddExpanded {
-                        selectedToolBackground
+                        selectedToolbarBackground
                     }
                 }
                 .contentShape(Rectangle())
@@ -332,12 +334,14 @@ private var barRow: some View {
             .frame(width: BarMetrics.itemWidth, height: BarMetrics.itemHeight)
             .background {
                 if isActive {
-                    selectedToolBackground
+                    selectedToolbarBackground
                 }
             }
-            .overlay(alignment: .bottomTrailing) {
+            .overlay(alignment: .topTrailing) {
                 if isActive {
                     chevron(isExpanded: isExpanded)
+                        .padding(.top, 3)
+                        .padding(.trailing, 3)
                 }
             }
             .contentShape(Rectangle())
@@ -363,9 +367,8 @@ private var barRow: some View {
 
     private func chevron(isExpanded: Bool) -> some View {
         Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-            .font(.system(size: 6, weight: .bold))
+            .font(.system(size: 7, weight: .semibold))
             .foregroundStyle(Color.secondary)
-            .padding(1)
             .accessibilityHidden(true)
     }
 
@@ -400,8 +403,8 @@ private var barRow: some View {
         let label = displayedTool.toolbarFamilyTitle
         let hasFamilyVariants = displayedTool.toolbarFamilyVariants.count > 1
         let familyOptionsExpanded = isFamilyOptionsExpanded(for: toolbarTool)
-        // Pen and Brush always hint at their hidden styles; every other tool
-        // with options shows the arrow only while selected.
+        // Pen hints at its grouped styles; other tools show the arrow when
+        // selected and their options are available.
         let showsChevron = hasFamilyVariants || (selected && displayedTool.supportsOptions)
 
         return Button { activate(displayedTool) } label: {
@@ -413,12 +416,14 @@ private var barRow: some View {
                 .frame(width: BarMetrics.itemWidth, height: BarMetrics.itemHeight)
                 .background {
                     if selected {
-                        selectedToolBackground
+                        selectedToolbarBackground
                     }
                 }
-                .overlay(alignment: .bottomTrailing) {
+                .overlay(alignment: .topTrailing) {
                     if showsChevron {
                         chevron(isExpanded: familyOptionsExpanded)
+                            .padding(.top, 3)
+                            .padding(.trailing, 3)
                     }
                 }
                 .contentShape(Rectangle())
@@ -443,20 +448,35 @@ private var barRow: some View {
         .help(label)
     }
 
-    /// Selection is an outlined circle: a soft accent fill with a ring.
+    /// A full glyph-sized plate makes the active tool easy to spot while
+    /// staying inside the 44-point hit target.
+    private var selectedToolbarBackground: some View {
+        selectionPlate(Circle())
+            .frame(
+                width: BarMetrics.toolbarSelectionDiameter,
+                height: BarMetrics.toolbarSelectionDiameter
+            )
+            .accessibilityHidden(true)
+    }
+
+    private var selectedPanelIndicator: some View {
+        selectionIndicator
+            .accessibilityHidden(true)
+    }
+
+    private var selectionIndicator: some View {
+        Capsule()
+            .fill(NotateDesign.Palette.accent)
+            .frame(width: 18, height: 3)
+    }
+
+    /// Compact selection for thickness samples, where there is no text label.
     private var selectedToolBackground: some View {
         selectionPlate(Circle())
             .frame(
                 width: BarMetrics.selectionDiameter,
                 height: BarMetrics.selectionDiameter
             )
-    }
-
-    /// Wide panel segments use the same outline, stretched to a stadium.
-    private var selectedSegmentBackground: some View {
-        selectionPlate(Capsule())
-            .padding(.vertical, 3)
-            .padding(.horizontal, 3)
     }
 
     private func selectionPlate<S: InsettableShape>(_ shape: S) -> some View {
@@ -570,13 +590,12 @@ private var barRow: some View {
     private func styleLine(for tool: CanvasTool) -> some View {
         let variants = tool.toolbarFamilyVariants
         let segment = PanelMetrics.contentWidth / CGFloat(max(variants.count, 1))
-
         return HStack(spacing: 0) {
             ForEach(variants, id: \.self) { variant in
                 styleSegment(variant, width: segment)
             }
         }
-        .frame(height: PanelMetrics.lineHeight)
+        .frame(height: PanelMetrics.styleRowHeight)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Style")
         .accessibilityIdentifier("canvas.tool.variants")
@@ -589,24 +608,27 @@ private var barRow: some View {
             // Picks the style and keeps the panel open.
             onIntent(.showOptions(tool))
         } label: {
-            HStack(spacing: 2) {
-                ToolGlyph(
-                    tool: tool,
-                    inkColor: Color(rgba: toolState.configuration(for: tool)?.color ?? .black),
-                    isSelected: isActive
-                )
+            VStack(spacing: 1) {
+                ZStack {
+                    if isActive {
+                        selectionPlate(Circle())
+                    }
+                    ToolGlyph(
+                        tool: tool,
+                        inkColor: Color(rgba: toolState.configuration(for: tool)?.color ?? .black),
+                        isSelected: isActive
+                    )
+                    .scaleEffect(0.78)
+                    .frame(width: 24, height: 27)
+                }
+                .frame(width: 30, height: 30)
                 Text(tool.title)
-                    .font(.system(size: 10, weight: .medium))
+                    .font(.caption2.weight(isActive ? .semibold : .regular))
                     .lineLimit(1)
-                    .minimumScaleFactor(0.8)
+                    .minimumScaleFactor(0.85)
                     .foregroundStyle(isActive ? Color.primary : Color.secondary)
             }
-            .frame(width: width, height: PanelMetrics.lineHeight)
-            .background {
-                if isActive {
-                    selectedSegmentBackground
-                }
-            }
+            .frame(width: width, height: PanelMetrics.styleRowHeight)
             .contentShape(Rectangle())
         }
         .buttonStyle(CanvasCrispToolButtonStyle(reduceMotion: reduceMotion))
@@ -752,18 +774,17 @@ private var barRow: some View {
                 Button {
                     onIntent(.setLaserPointerStyle(style))
                 } label: {
-                    HStack(spacing: 6) {
+                    VStack(spacing: 1) {
                         LaserPointerStyleGlyph(style: style, tint: tint)
                         Text(style.title)
-                            .font(.system(size: 11, weight: .medium))
+                            .font(.caption2.weight(isSelected ? .semibold : .regular))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.85)
                             .foregroundStyle(isSelected ? Color.primary : Color.secondary)
+                        selectedPanelIndicator
+                            .opacity(isSelected ? 1 : 0)
                     }
                     .frame(width: segment, height: PanelMetrics.lineHeight)
-                    .background {
-                        if isSelected {
-                            selectedSegmentBackground
-                        }
-                    }
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(CanvasCrispToolButtonStyle(reduceMotion: reduceMotion))
@@ -804,20 +825,17 @@ private var barRow: some View {
                 argument: isActive ? "\(tool.title) off" : "\(tool.title) on"
             )
         } label: {
-            HStack(spacing: 4) {
+            VStack(spacing: 1) {
                 CanvasGeometryToolGlyph(tool: tool, isSelected: isActive)
                 Text(tool.title)
-                    .font(.system(size: 10, weight: .medium))
+                    .font(.caption2.weight(isActive ? .semibold : .regular))
                     .lineLimit(1)
-                    .minimumScaleFactor(0.8)
+                    .minimumScaleFactor(0.85)
                     .foregroundStyle(isActive ? Color.primary : Color.secondary)
+                selectedPanelIndicator
+                    .opacity(isActive ? 1 : 0)
             }
             .frame(width: width, height: PanelMetrics.lineHeight)
-            .background {
-                if isActive {
-                    selectedSegmentBackground
-                }
-            }
             .contentShape(Rectangle())
         }
         .buttonStyle(CanvasCrispToolButtonStyle(reduceMotion: reduceMotion))

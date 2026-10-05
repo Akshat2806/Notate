@@ -369,9 +369,9 @@ private var programmaticNavigationPageID: UUID?
 private var programmaticNavigationViewport: CanvasViewportState?
 private let boundaryPageFeedbackGenerator = UIImpactFeedbackGenerator(style: .medium)
 private lazy var pencilInteraction = UIPencilInteraction(delegate: self)
-    // PaperKit owns a stable, geometry-budgeted native rendering scale. The
-    // outer scroll view carries the remaining logical 50-1000% zoom so large
-    // freeform boards never become equally large native editing surfaces.
+    // PaperKit owns a geometry-budgeted native rendering scale. The outer
+    // scroll view carries the remaining logical 50-1000% zoom, while paged
+    // surfaces can increase their native basis at high zoom for sharper ink.
 private var renderedZoomScale = CanvasConstants.defaultZoomScale
 private var isZoomScrubbing = false
 private var isNativeZoomInteractionActive = false
@@ -393,6 +393,8 @@ private var transientViewportPublicationPending = false
 private var zoomPresentationReleaseTask: Task<Void, Never>?
 private var zoomPresentationReleaseToken: UInt64 = 0
 private var isInteractiveZoomPresentationFrozen = false
+private var settledInkPreviewTask: Task<Void, Never>?
+private var settledInkPreviewToken: UInt64 = 0
     // Keyboard shortcuts and accessibility actions arrive as discrete zoom
     // commands instead of one UIScrollView pinch lifecycle. Coalesce a burst
     // of those commands so the large freeform PaperKit host is promoted only
@@ -441,6 +443,8 @@ private static let zoomPresentationReleaseDelay = Duration.milliseconds(140)
     // this delay in `contactDidBegin()` so drawing is never raster-backed.
 private static let programmaticFreeformZoomSettlementDelay = Duration.milliseconds(1_800)
 private static let zoomPresentationMaximumPixelDimension: CGFloat = 1_024
+private static let settledInkPreviewHighZoomThreshold: CGFloat = 8
+private static let settledInkPreviewOversampling: CGFloat = 1.2
 private static let imagePlaygroundMinimumSourceDimension = 384
 private static let imagePlaygroundMaximumSourceDimension = 1_024
 private static let minimumInteractiveTableCellDimension: CGFloat = 24
@@ -900,6 +904,7 @@ restoredViewportForCurrentPageMode(initialViewport),
 focusedOn: focusedPageID
 )
 settledEnvironment = environment
+scheduleSettledInkPreview()
 return
 }
 
@@ -918,6 +923,7 @@ prefersHorizontalFit: usesHorizontalPageFit
 ),
 focusedOn: retainedPageID
 )
+scheduleSettledInkPreview()
 }
 
 override func viewSafeAreaInsetsDidChange() {
@@ -927,6 +933,7 @@ view.setNeedsLayout()
 }
 override func didReceiveMemoryWarning() {
 super.didReceiveMemoryWarning()
+clearSettledInkPreviews()
 isUnderMemoryPressure = true
 // Pressure is transient. Leaving the flag set would disable prefetch and
 // discard undo history on every eviction for the rest of the session.
@@ -1190,6 +1197,7 @@ _ = detachPageHost(id: pageID)
         refreshTableAccessibilityElements()
         configureOuterPanForInputMode()
         refreshInteractionPolicy()
+        scheduleSettledInkPreview()
     }
 
     func applyInputMode(_ mode: CanvasInputMode) {
@@ -5098,6 +5106,7 @@ return
 zoomPresentationReleaseToken &+= 1
 zoomPresentationReleaseTask?.cancel()
 zoomPresentationReleaseTask = nil
+clearSettledInkPreviews()
 guard isInteractiveZoomPresentationFrozen == false else { return }
 isInteractiveZoomPresentationFrozen = true
 let displayScale = max(currentViewportEnvironment.displayScale, 1)
@@ -5152,7 +5161,117 @@ belowSubview: host.undoController.view
 }
 }
 }
+scheduleSettledInkPreview()
 }
+private func clearSettledInkPreviews() {
+settledInkPreviewToken &+= 1
+settledInkPreviewTask?.cancel()
+settledInkPreviewTask = nil
+for host in hostsByPageID.values {
+host.decorationView.setSettledInkPreview(nil, cropRect: nil)
+}
+}
+    private func scheduleSettledInkPreview() {
+        let activeTool = appliedToolState?.activeTool
+        let isInkTool = activeTool.map {
+            [
+                .pen, .ballpoint, .calligraphy,
+                .fountainPen, .watercolor, .crayon,
+                .pencil, .highlighter,
+            ].contains($0)
+        } ?? false
+        guard documentMode == .freeform,
+              effectiveZoomScale >= 2,
+              hasActiveContact == false,
+              isInteractiveZoomPresentationFrozen == false,
+              isReaderModeEnabled == false,
+              isInkTool else {
+            clearSettledInkPreviews()
+            return
+        }
+        settledInkPreviewToken &+= 1
+        let token = settledInkPreviewToken
+        settledInkPreviewTask?.cancel()
+        settledInkPreviewTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: .milliseconds(100))
+            } catch {
+                return
+            }
+            guard let self,
+                  token == settledInkPreviewToken,
+                  documentMode == .freeform,
+                  effectiveZoomScale >= 2,
+                  hasActiveContact == false,
+                  isInteractiveZoomPresentationFrozen == false,
+                  isReaderModeEnabled == false,
+                  let host = hostsByPageID[focusedPageID],
+                  let page = pages.first(where: { $0.id == focusedPageID }) else { return }
+
+            let visibleHostRect = host.undoController.view.convert(
+                scrollView.bounds,
+                from: scrollView
+            )
+            let visiblePageRect = CGRect(
+                x: visibleHostRect.minX / host.renderedZoomScale,
+                y: visibleHostRect.minY / host.renderedZoomScale,
+                width: visibleHostRect.width / host.renderedZoomScale,
+                height: visibleHostRect.height / host.renderedZoomScale
+            )
+            let pageBounds = CGRect(origin: .zero, size: page.displaySize)
+            let margin = max(12, max(visiblePageRect.width, visiblePageRect.height) * 0.12)
+            let cropRect = visiblePageRect
+                .insetBy(dx: -margin, dy: -margin)
+                .intersection(pageBounds)
+            guard cropRect.isNull == false, cropRect.isEmpty == false else { return }
+
+            let displayScale = max(currentViewportEnvironment.displayScale, 1)
+            // Keep previews at native display density for ordinary zooms.
+            // Oversample only at extreme zoom, where smoother subpixel edges
+            // are more noticeable. The dimension and pixel-count caps remain
+            // the final bound in either case.
+            let oversampling = effectiveZoomScale
+                >= Self.settledInkPreviewHighZoomThreshold
+                ? Self.settledInkPreviewOversampling
+                : 1
+            let pixelScale = effectiveZoomScale
+                * displayScale
+                * oversampling
+            let maximumDimensionScale = CGFloat(
+                CanvasDocumentExporter.maximumRasterPixelDimension
+            ) / max(cropRect.width, cropRect.height)
+            let maximumCountScale = sqrt(
+                CGFloat(CanvasDocumentExporter.maximumRasterPixelCount)
+                    / max(cropRect.width * cropRect.height, 1)
+            )
+            let renderScale = min(pixelScale, maximumDimensionScale, maximumCountScale)
+            guard renderScale.isFinite, renderScale > 0 else { return }
+
+            let renderPage = page.replacing(
+                markup: host.controller.markup ?? host.lastDeliveredMarkup
+            )
+            do {
+                let image = try await CanvasDocumentExporter.shared.renderImage(
+                    renderPage,
+                    cropRect: cropRect,
+                    scale: renderScale,
+                    mode: .authoredContent
+                )
+                guard token == settledInkPreviewToken,
+                      hasActiveContact == false,
+                      isInteractiveZoomPresentationFrozen == false,
+                      focusedPageID == page.id,
+                      let activeHost = hostsByPageID[page.id] else { return }
+                activeHost.decorationView.setSettledInkPreview(
+                    UIImage(cgImage: image),
+                    cropRect: cropRect
+                )
+            } catch {
+                // The live PaperKit surface remains available if a bounded
+                // preview cannot be produced for an unusual markup state.
+            }
+        }
+    }
 private func contactDidBegin() {
 // Reassert the live PaperKit hierarchy before drawing. Freeform paper
 // continues to use its independent vector template presentation.
@@ -5224,6 +5343,7 @@ publishUndoAvailability()
 // normal delegate usually delivered it already; this also covers an OS
 // revision that delays its last markup callback until touch teardown.
 deliverAllChangedMarkup()
+scheduleSettledInkPreview()
 callbacks.snapshotContactEnded()
 }
 private func synchronizeRulerState() {
@@ -6208,6 +6328,7 @@ extension PaperCanvasViewController: UIScrollViewDelegate {
     func viewForZooming(in scrollView: UIScrollView) -> UIView? { documentView }
 
     func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+        clearSettledInkPreviews()
         cancelProgrammaticNavigationForDirectInteraction()
         isDirectInteractionActive = false
         dragStartFocusedPageID = focusedPageID
@@ -6328,6 +6449,7 @@ extension PaperCanvasViewController: UIScrollViewDelegate {
             updateFocusFromVisibleArea(unlessDirectInteraction: false)
             updateRenderedPageWindow(force: true)
             flushTransientViewportPublication()
+            scheduleSettledInkPreview()
         }
     }
 
@@ -6386,6 +6508,7 @@ func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
     updateFocusFromVisibleArea(unlessDirectInteraction: false)
     updateRenderedPageWindow(force: true)
     flushTransientViewportPublication()
+    scheduleSettledInkPreview()
 }
 
 }
@@ -6422,6 +6545,7 @@ extension PaperCanvasViewController: @MainActor PaperMarkupViewController.Delega
         }
         guard pagesPreparingInsertionHistory.contains(pageID) == false else { return }
         deliverMarkupIfChanged(pageID: pageID)
+        if hasActiveContact == false { scheduleSettledInkPreview() }
         if pageID == focusedPageID { publishUndoAvailability() }
     }
 
@@ -7312,6 +7436,8 @@ final class PaperPageDecorationView: UIView {
 
     private let templateLayer = CAShapeLayer()
     private let guideLayer = CAShapeLayer()
+    private let settledInkPreviewView = UIImageView()
+    private var settledInkPreviewCropRect: CGRect?
     private var templateLayerConfiguration: TemplateLayerConfiguration?
     private(set) var isRenderingActive: Bool
     private(set) var isOverlayPresentationActive = false
@@ -7336,6 +7462,7 @@ final class PaperPageDecorationView: UIView {
         didSet {
             guard oldValue != renderScale else { return }
             invalidateTemplateLayer()
+            updateSettledInkPreviewFrame()
         }
     }
 
@@ -7395,6 +7522,11 @@ final class PaperPageDecorationView: UIView {
         ]
         layer.insertSublayer(templateLayer, at: 0)
         layer.insertSublayer(guideLayer, above: templateLayer)
+        settledInkPreviewView.isUserInteractionEnabled = false
+        settledInkPreviewView.contentMode = .scaleToFill
+        settledInkPreviewView.layer.minificationFilter = .linear
+        settledInkPreviewView.layer.magnificationFilter = .linear
+        addSubview(settledInkPreviewView)
     }
 
     func setRenderingActive(_ isActive: Bool) {
@@ -7413,11 +7545,32 @@ final class PaperPageDecorationView: UIView {
         refreshChromeAppearance()
     }
 
+    func setSettledInkPreview(_ image: UIImage?, cropRect: CGRect?) {
+        settledInkPreviewView.image = image
+        settledInkPreviewCropRect = image == nil ? nil : cropRect
+        settledInkPreviewView.isHidden = image == nil
+        updateSettledInkPreviewFrame()
+    }
+
     override func layoutSubviews() {
         super.layoutSubviews()
         templateLayer.frame = bounds
         guideLayer.frame = bounds
+        updateSettledInkPreviewFrame()
         updateTemplateLayerIfNeeded()
+    }
+
+    private func updateSettledInkPreviewFrame() {
+        guard let cropRect = settledInkPreviewCropRect else {
+            settledInkPreviewView.frame = .zero
+            return
+        }
+        settledInkPreviewView.frame = CGRect(
+            x: cropRect.minX * renderScale,
+            y: cropRect.minY * renderScale,
+            width: cropRect.width * renderScale,
+            height: cropRect.height * renderScale
+        )
     }
 
     override func didMoveToWindow() {
