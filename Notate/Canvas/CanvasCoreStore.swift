@@ -133,6 +133,7 @@ public enum CanvasCoreStoreError: Error, Equatable, LocalizedError, Sendable {
     case incompatibleMarkup
     case invalidEnvelope(String)
     case serializationFailed(String)
+    case resourceLimitExceeded(String)
     case verificationFailed(String)
     case staleGeneration(attempted: Int64, latest: Int64)
     case staleCheckpointToken(attempted: UInt64, latest: UInt64)
@@ -150,6 +151,8 @@ public enum CanvasCoreStoreError: Error, Equatable, LocalizedError, Sendable {
             "The canvas file is invalid: \(reason)"
         case let .serializationFailed(reason):
             "The canvas could not be serialized: \(reason)"
+        case let .resourceLimitExceeded(reason):
+            "The canvas exceeds a supported storage limit: \(reason)"
         case let .verificationFailed(reason):
             "The serialized canvas could not be verified: \(reason)"
         case let .staleGeneration(attempted, latest):
@@ -173,6 +176,18 @@ public enum CanvasCoreStoreError: Error, Equatable, LocalizedError, Sendable {
             "Opening the canvas was cancelled."
         }
     }
+
+    var isTransientCheckpointFailure: Bool {
+        switch self {
+        case .serializationFailed, .fileSystem, .cancelled:
+            true
+        case .invalidSnapshot, .incompatibleMarkup, .invalidEnvelope,
+             .resourceLimitExceeded, .verificationFailed,
+             .staleGeneration, .staleCheckpointToken, .unresolvedCorruption:
+            false
+        }
+    }
+
 }
 
 /// Async boundary around PaperKit's data representation. Tests can inject a
@@ -198,6 +213,18 @@ public struct PaperKitCanvasCoreCodec: CanvasCoreMarkupCoding, Sendable {
 public protocol CanvasCoreCheckpointing: Sendable {
     func load() async -> CanvasCoreLoadResult
     func checkpoint(_ snapshot: CanvasCoreSnapshot) async throws
+    func checkpointAndReturnVerifiedSnapshot(
+        _ snapshot: CanvasCoreSnapshot
+    ) async throws -> CanvasCoreSnapshot
+}
+
+public extension CanvasCoreCheckpointing {
+    func checkpointAndReturnVerifiedSnapshot(
+        _ snapshot: CanvasCoreSnapshot
+    ) async throws -> CanvasCoreSnapshot {
+        try await checkpoint(snapshot)
+        return snapshot
+    }
 }
 
 struct CanvasCoreResourceLimits: Equatable, Sendable {
@@ -877,7 +904,7 @@ public actor CanvasCoreStore: CanvasCoreCheckpointing {
                 nextMarkupByteCount
                     <= resourceLimits.maximumAggregateMarkupByteCount else {
                 group.cancelAll()
-                throw CanvasCoreStoreError.serializationFailed(
+                throw CanvasCoreStoreError.resourceLimitExceeded(
                     "The document exceeds the supported aggregate PaperKit size limit."
                 )
             }
@@ -913,7 +940,7 @@ public actor CanvasCoreStore: CanvasCoreCheckpointing {
         let markupByteCount = try Self.validateStoredMarkupResourceLimits(
             storedPages.map(\.paperMarkupData),
             limits: resourceLimits,
-            error: { CanvasCoreStoreError.serializationFailed($0) }
+            error: { CanvasCoreStoreError.resourceLimitExceeded($0) }
         )
         guard markupByteCount == admittedMarkupByteCount else {
             throw CanvasCoreStoreError.verificationFailed(
@@ -929,7 +956,7 @@ public actor CanvasCoreStore: CanvasCoreCheckpointing {
                 currentPageID: snapshot.currentPageID
             )
             guard envelopeData.count <= resourceLimits.maximumCheckpointEncodedByteCount else {
-                throw CanvasCoreStoreError.serializationFailed(
+                throw CanvasCoreStoreError.resourceLimitExceeded(
                     "The encoded checkpoint exceeds the supported size limit."
                 )
             }
@@ -938,7 +965,7 @@ public actor CanvasCoreStore: CanvasCoreCheckpointing {
                 markupByteCount: markupByteCount,
                 importedSourceByteCount: importedSourceByteCount,
                 limits: resourceLimits,
-                error: { CanvasCoreStoreError.serializationFailed($0) }
+                error: { CanvasCoreStoreError.resourceLimitExceeded($0) }
             )
             let verifiedEnvelope = try Self.decodeEnvelope(
                 envelopeData,
@@ -2170,7 +2197,7 @@ private nonisolated static func encodeAndVerify(
         )
     }
     guard markupData.count <= limits.maximumMarkupByteCountPerPage else {
-        throw CanvasCoreStoreError.serializationFailed(
+        throw CanvasCoreStoreError.resourceLimitExceeded(
             "Page \(page.id.uuidString) exceeds the supported PaperKit payload limit."
         )
     }

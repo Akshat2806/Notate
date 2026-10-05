@@ -1688,7 +1688,9 @@ public struct CanvasPreferences: Codable, Equatable, Sendable {
     public enum PaperCanvasInsertionCommitError: Error, LocalizedError, Equatable, Sendable {
         case controllerBusy
         case pageUnavailable
-        case serializationOrHostValidationFailed
+        case insertionRejected
+        case serializationFailed(stage: String, reason: String)
+        case hostValidationFailed(String)
 
         public var errorDescription: String? {
             switch self {
@@ -1696,10 +1698,14 @@ public struct CanvasPreferences: Codable, Equatable, Sendable {
                 "The canvas is finishing another interaction. Try the insertion again."
             case .pageUnavailable:
                 "The destination page is no longer available."
-            case .serializationOrHostValidationFailed:
-                "The canvas could not safely serialize the insertion. Try again."
-    }
-    }
+            case .insertionRejected:
+                "PaperKit did not add the requested content."
+            case let .serializationFailed(stage, reason):
+                "PaperKit could not serialize the canvas during \(stage): \(reason)"
+            case let .hostValidationFailed(reason):
+                "The inserted content could not be confirmed in the live canvas: \(reason)"
+            }
+        }
 }
 
 public struct PaperCanvasCallbacks {
@@ -1931,6 +1937,9 @@ public protocol PaperCanvasCommanding: AnyObject {
     /// Temporarily prevents interaction while a newly-created controller is
     /// waiting for an older controller's accepted insertion tail.
     func setDocumentSynchronizationPending(_ isPending: Bool)
+    /// Locks editing while a transient checkpoint retry owns the current
+    /// document generation.
+    func setCheckpointRetryPending(_ isPending: Bool)
     /// Hydrates a replacement controller from the authoritative model without
     /// creating user-visible undo history.
     @discardableResult
@@ -1946,16 +1955,15 @@ public protocol PaperCanvasCommanding: AnyObject {
     /// to whichever page happens to be focused when replay begins.
     func performInsertion(_ insertion: CanvasInsertion, on pageID: UUID)
     /// Accepts one insertion for an explicit page and returns only after the
-    /// controller has serialized its undo pair, retained the authoritative
-    /// host, and delivered the resulting page snapshot to the model.
+    /// controller retained and delivered the resulting page snapshot. Undo
+    /// serialization is best-effort and never discards accepted document edits.
     func performInsertionWithReceipt(
         _ insertion: CanvasInsertion,
         on pageID: UUID
     ) async throws -> PaperCanvasInsertionReceipt
-    /// Waits until a programmatic insertion has a serialized before/after
-    /// history pair and has been published to Canvas Core. One-shot producers
-    /// such as Image Playground must not consume their source request merely
-    /// because an asynchronous insertion was queued.
+    /// Waits until a programmatic insertion has been published to the model.
+    /// One-shot producers such as Image Playground must not consume their source
+    /// request merely because an asynchronous insertion was queued.
     @discardableResult
     func performInsertionAndWait(_ insertion: CanvasInsertion) async -> Bool
     /// Waits for the insertion tail that was accepted before this call. A
@@ -1978,6 +1986,7 @@ public protocol PaperCanvasCommanding: AnyObject {
 public extension PaperCanvasCommanding {
     var hasActiveSnapshotContact: Bool { false }
     var hasPendingProgrammaticInsertions: Bool { false }
+    func setCheckpointRetryPending(_ isPending: Bool) {}
     func completeDismantle() {}
     @discardableResult
     func setReaderModeEnabled(_ isEnabled: Bool) -> Bool { isEnabled == false }
@@ -2016,7 +2025,9 @@ public extension PaperCanvasCommanding {
         // A legacy conformer cannot prove that its implicit focused-page
         // command was applied to `pageID`, nor that the returned snapshot is
         // the exact post-insertion value. Durable callers must fail closed.
-        throw PaperCanvasInsertionCommitError.serializationOrHostValidationFailed
+        throw PaperCanvasInsertionCommitError.hostValidationFailed(
+            "This canvas controller cannot confirm a durable insertion."
+        )
     }
     @discardableResult
     func performInsertionAndWait(_ insertion: CanvasInsertion) async -> Bool {
