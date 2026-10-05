@@ -8,6 +8,30 @@
 import XCTest
 @testable import Notate
 import UIKit
+import PaperKit
+
+@MainActor
+private final class FailOnceCanvasMarkupCodec: CanvasCoreMarkupCoding {
+    private var shouldFailEncoding = true
+
+    func encode(_ markup: PaperMarkup) async throws -> Data {
+        if shouldFailEncoding {
+            shouldFailEncoding = false
+            throw TestMarkupCodecError.injected
+        }
+        return try await PaperKitCanvasCoreCodec().encode(markup)
+    }
+
+    func decode(_ data: Data) async throws -> PaperMarkup {
+        try await PaperKitCanvasCoreCodec().decode(data)
+    }
+}
+
+private enum TestMarkupCodecError: Error, LocalizedError {
+    case injected
+
+    var errorDescription: String? { "injected PaperKit encode failure" }
+}
 
 final class NotateTests: XCTestCase {
 
@@ -34,6 +58,46 @@ final class NotateTests: XCTestCase {
         self.measure {
             // Put the code you want to measure the time of here.
         }
+    }
+
+    @MainActor
+    func testTransientPaperKitSerializationFailureIsClassifiedAndCanRetrySameGeneration() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Notate-FlakyCodec-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = CanvasCoreStore(rootURL: root, codec: FailOnceCanvasMarkupCodec())
+        let page = CanvasPageSnapshot(
+            markup: PaperMarkup(bounds: CGRect(x: 0, y: 0, width: 1_000, height: 1_400))
+        )
+        let snapshot = CanvasCoreSnapshot(
+            generation: 1,
+            pages: [page],
+            currentPageID: page.id
+        )
+
+        do {
+            try await store.checkpoint(snapshot)
+            XCTFail("The injected first serialization attempt should fail.")
+        } catch let error as CanvasCoreStoreError {
+            XCTAssertTrue(error.isTransientCheckpointFailure)
+            XCTAssertTrue(error.localizedDescription.contains("injected PaperKit encode failure"))
+        }
+
+        try await store.checkpoint(snapshot)
+        guard case let .restored(restored) = await store.load() else {
+            return XCTFail("The retry should publish a verified checkpoint.")
+        }
+        XCTAssertEqual(restored.generation, snapshot.generation)
+        XCTAssertEqual(restored.currentPageID, page.id)
+    }
+
+    func testResourceLimitFailureIsPermanentAndExplained() {
+        let error = CanvasCoreStoreError.resourceLimitExceeded(
+            "The document exceeds the supported PaperKit size limit."
+        )
+
+        XCTAssertFalse(error.isTransientCheckpointFailure)
+        XCTAssertTrue(error.localizedDescription.contains("supported storage limit"))
     }
 
     @MainActor

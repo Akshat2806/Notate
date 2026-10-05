@@ -1,4 +1,5 @@
 import Foundation
+import os
 import PaperKit
 import PencilKit
 import QuartzCore
@@ -7,6 +8,18 @@ import UIKit
 private enum CanvasTableTransformKind {
     case move
     case resize
+}
+
+enum SerializedInsertionFailureForTesting: Equatable, Sendable {
+    case undoSerialization
+    case redoSerialization
+    case retainedHostValidation
+}
+
+private enum CanvasInsertionSerializationTestError: LocalizedError {
+    case injected
+
+    var errorDescription: String? { "Injected serialization failure" }
 }
 
 /// PaperKit can begin a direct-touch drawing recognizer before the third
@@ -23,6 +36,14 @@ private final class CanvasHistorySwipeGestureRecognizer: UISwipeGestureRecognize
 
 @MainActor
 final class PaperCanvasViewController: UIViewController, PaperCanvasCommanding {
+    private static let insertionLogger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "Notate",
+        category: "CanvasInsertion"
+    )
+    private static let insertionSerializationRetryDelays: [Duration] = [
+        .milliseconds(40),
+        .milliseconds(120),
+    ]
     /// PaperKit's insertion controller registers process-lifetime notification
     /// helpers on current SDKs. Reusing one feature-identical context keeps
     /// those framework-owned helpers bounded across editor lifecycles. All
@@ -322,6 +343,7 @@ private var retainedProgrammaticInsertionImageBytes = 0
 private var retainedProgrammaticInsertionTextBytes = 0
 private var pagesPreparingInsertionHistory: Set<UUID> = []
 private var isDocumentSynchronizationPending = false
+private var isCheckpointRetryPending = false
 private var hasAppliedInitialViewport = false
 private var isApplyingGeometry = false
 private var isDirectInteractionActive = false
@@ -436,11 +458,6 @@ private var virtualizesPageHosts: Bool {
 enum TableGrowthAxisForTesting: Equatable {
     case rows
     case columns
-}
-
-enum SerializedInsertionFailureForTesting: Equatable, Sendable {
-    case redoSerialization
-    case retainedHostValidation
 }
 
 var pageSnapshotsForTesting: [CanvasPageSnapshot] { pages }
@@ -890,6 +907,7 @@ settledEnvironment = environment
 scheduleSettledInkPreview()
 return
 }
+
 guard isApplyingGeometry == false, settledEnvironment != environment else { return }
 let retainedPageID = lastPublishedViewportPageID.flatMap { id in
 pages.contains(where: { $0.id == id }) ? id : nil
@@ -907,6 +925,7 @@ focusedOn: retainedPageID
 )
 scheduleSettledInkPreview()
 }
+
 override func viewSafeAreaInsetsDidChange() {
 super.viewSafeAreaInsetsDidChange()
 guard hasAppliedInitialViewport else { return }
@@ -1071,6 +1090,7 @@ _ = detachPageHost(id: pageID)
             && laserIsActive == false
             && regionSelectionIsActive == false
             && isDocumentSynchronizationPending == false
+            && isCheckpointRetryPending == false
 
         contactMonitor.isEnabled = isReaderModeEnabled == false
         threeFingerUndoSwipeGestureRecognizer.isEnabled = isReaderModeEnabled == false
@@ -1119,6 +1139,13 @@ _ = detachPageHost(id: pageID)
         isDocumentSynchronizationPending = isPending
         // Before the view loads there is nothing to lock yet; the flag is
         // honored by the first `refreshInteractionPolicy()` after load.
+        guard isViewLoaded else { return }
+        refreshInteractionPolicy()
+    }
+
+    func setCheckpointRetryPending(_ isPending: Bool) {
+        guard isCheckpointRetryPending != isPending else { return }
+        isCheckpointRetryPending = isPending
         guard isViewLoaded else { return }
         refreshInteractionPolicy()
     }
@@ -1742,7 +1769,7 @@ _ = detachPageHost(id: pageID)
             guard let page = pages.first(where: { $0.id == pageID }),
                 page.tables != previousTables else {
                 callbacks.programmaticInsertionFailed(
-                    .serializationOrHostValidationFailed
+                    .hostValidationFailed("PaperKit rejected the table change.")
                 )
                 return
             }
@@ -1752,14 +1779,16 @@ _ = detachPageHost(id: pageID)
         guard let insertionTask = enqueueInsertionTask(pendingInsertion) else {
             settleProgrammaticInsertion(pendingInsertion)
             callbacks.programmaticInsertionFailed(
-                .serializationOrHostValidationFailed
+                .hostValidationFailed("The destination page could not be mounted.")
             )
             return
         }
         Task { @MainActor [weak self] in
             guard await insertionTask.value == false else { return }
             self?.callbacks.programmaticInsertionFailed(
-                .serializationOrHostValidationFailed
+                .hostValidationFailed(
+                    "PaperKit changed or detached the destination page during insertion."
+                )
             )
         }
     }
@@ -1793,7 +1822,9 @@ _ = detachPageHost(id: pageID)
             settleProgrammaticInsertion(acceptedInsertion)
             guard let page = pages.first(where: { $0.id == pageID }),
                 page.tables != previousTables else {
-                throw PaperCanvasInsertionCommitError.serializationOrHostValidationFailed
+                throw PaperCanvasInsertionCommitError.hostValidationFailed(
+                    "PaperKit did not publish the requested table."
+                )
             }
             return PaperCanvasInsertionReceipt(
                 acceptanceSequence: acceptedInsertion.acceptanceSequence,
@@ -1807,11 +1838,15 @@ _ = detachPageHost(id: pageID)
         clearActiveTableTarget()
         guard let task = enqueueInsertionTask(acceptedInsertion) else {
             settleProgrammaticInsertion(acceptedInsertion)
-            throw PaperCanvasInsertionCommitError.serializationOrHostValidationFailed
+            throw PaperCanvasInsertionCommitError.hostValidationFailed(
+                "The destination page could not be mounted."
+            )
         }
         guard await task.value,
             let page = pages.first(where: { $0.id == pageID }) else {
-            throw PaperCanvasInsertionCommitError.serializationOrHostValidationFailed
+            throw PaperCanvasInsertionCommitError.hostValidationFailed(
+                "PaperKit did not confirm the inserted markup."
+            )
         }
         return PaperCanvasInsertionReceipt(
             acceptanceSequence: acceptedInsertion.acceptanceSequence,
@@ -5343,11 +5378,11 @@ let previous = pages[index]
 pages[index] = previous.replacing(markup: markup)
 }
 private func performSerializedInsertion(
-_ insertion: CanvasInsertion, pageID: UUID
+    _ insertion: CanvasInsertion, pageID: UUID
 ) async -> Bool {
-guard let host = hostsByPageID[pageID],
-let originalMarkup = host.controller.markup
-else { return false }
+    guard let host = hostsByPageID[pageID],
+        let originalMarkup = host.controller.markup
+    else { return false }
 let paperController = host.controller
 let controllerIdentity = ObjectIdentifier(paperController)
 let interactionWasEnabled = paperController.view.isUserInteractionEnabled
@@ -5359,126 +5394,192 @@ paperController.view.isUserInteractionEnabled = interactionWasEnabled
 drainDeferredCommandsAfterSerializedInsertion()
 }
 #if DEBUG
-await pauseSerializedInsertionIfRequestedForTesting()
+    await pauseSerializedInsertionIfRequestedForTesting()
 #endif
-guard let undoData = try? await originalMarkup.dataRepresentation(),
-undoData.count
-<= effectiveMaximumAppOwnedUndoActionSerializedByteCount,
-let currentHost = hostsByPageID[pageID],
-ObjectIdentifier(currentHost.controller) == controllerIdentity,
-currentHost.controller.markup == originalMarkup else { return false }
-let historyManager = paperController.undoManager
-let shouldResumeNativeRegistration = historyManager?.isUndoRegistrationEnabled == true
-if shouldResumeNativeRegistration { historyManager?.disableUndoRegistration() }
-var nativeRegistrationIsSuspended = shouldResumeNativeRegistration
+    let undoData = await insertionHistoryData(
+        for: originalMarkup,
+        stage: "before insertion",
+        injectedFailure: .undoSerialization
+    )
+    guard let currentHost = hostsByPageID[pageID],
+        ObjectIdentifier(currentHost.controller) == controllerIdentity,
+        currentHost.controller.markup == originalMarkup else {
+        return false
+    }
+    let historyManager = paperController.undoManager
+    let canUseAppOwnedHistory = undoData.map {
+        $0.count <= effectiveMaximumAppOwnedUndoActionSerializedByteCount
+    } ?? false
+    let shouldResumeNativeRegistration = canUseAppOwnedHistory
+        && historyManager?.isUndoRegistrationEnabled == true
+    if shouldResumeNativeRegistration { historyManager?.disableUndoRegistration() }
+    var nativeRegistrationIsSuspended = shouldResumeNativeRegistration
 defer {
 if nativeRegistrationIsSuspended {
 historyManager?.enableUndoRegistration()
 }
 }
-let originalSelection = paperController.selectedMarkup
-insertImmediately(insertion, into: paperController)
-guard let insertedMarkup = paperController.markup,
-insertedMarkup != originalMarkup else {
-    await restoreFailedInsertion(
-on: paperController,
-originalMarkup: originalMarkup,
-originalSelection: originalSelection,
-undoData: undoData
-)
-return false
-}
-#if DEBUG
-if consumeSerializedInsertionFailureForTesting(.redoSerialization) {
-await restoreFailedInsertion(
-on: paperController,
-originalMarkup: originalMarkup,
-originalSelection: originalSelection,
-undoData: undoData
-)
-return false
-}
-#endif
-guard let redoData = try? await insertedMarkup.dataRepresentation() else {
-await restoreFailedInsertion(
-on: paperController,
-originalMarkup: originalMarkup,
-originalSelection: originalSelection,
-undoData: undoData
-)
-return false
-}
-let (serializedHistoryBytes, historyByteCountOverflowed) = undoData.count
-.addingReportingOverflow(redoData.count)
-guard historyByteCountOverflowed == false,
-serializedHistoryBytes
-<= effectiveMaximumAppOwnedUndoActionSerializedByteCount else {
-await restoreFailedInsertion(
-on: paperController,
-originalMarkup: originalMarkup,
-originalSelection: originalSelection,
-undoData: undoData
-)
-return false
-}
-#if DEBUG
-if consumeSerializedInsertionFailureForTesting(.retainedHostValidation) {
-await restoreFailedInsertion(
-on: paperController,
-originalMarkup: originalMarkup,
-originalSelection: originalSelection,
-undoData: undoData
-)
-return false
-}
-#endif
-guard let retainedHost = hostsByPageID[pageID],
-    ObjectIdentifier(retainedHost.controller) == controllerIdentity,
-    retainedHost.controller.markup == insertedMarkup else {
-    await restoreFailedInsertion(
-        on: paperController,
-        originalMarkup: originalMarkup,
-        originalSelection: originalSelection,
-        undoData: undoData
-    )
-    return false
-}
-
-        // PaperKit 26.0 can enqueue its own undo registration after the
-        // insertion call returns. Keep registration suspended through the
-        // serialization suspension point so that delayed framework action
-        // cannot sit above Notate's immutable before/after history entry.
-        await Task.yield()
-        guard let finalHost = hostsByPageID[pageID],
-            ObjectIdentifier(finalHost.controller) == controllerIdentity,
-            finalHost.controller.markup == insertedMarkup,
-            pages.contains(where: { $0.id == pageID }) else {
-            // An unexpected framework-side mutation must not be overwritten
-            // by rolling back a detached/stale controller. Refuse the
-            // acknowledgement; ordinary snapshot capture will publish the
-            // live authoritative value on its next safe pass.
-            return false
+    let originalSelection = paperController.selectedMarkup
+    insertImmediately(insertion, into: paperController)
+    guard let insertedMarkup = paperController.markup,
+        insertedMarkup != originalMarkup else {
+        if let undoData {
+            await restoreFailedInsertion(
+                on: paperController,
+                originalMarkup: originalMarkup,
+                originalSelection: originalSelection,
+                undoData: undoData
+            )
         }
+        return false
+    }
+    let redoData: Data?
+    if canUseAppOwnedHistory, undoData != nil {
+        redoData = await insertionHistoryData(
+            for: insertedMarkup,
+            stage: "after insertion",
+            injectedFailure: .redoSerialization
+        )
+    } else {
+        redoData = nil
+    }
+    let canRegisterAppOwnedHistory: Bool
+    if let undoData, let redoData {
+        let (serializedHistoryBytes, overflowed) = undoData.count
+            .addingReportingOverflow(redoData.count)
+        canRegisterAppOwnedHistory = overflowed == false
+            && serializedHistoryBytes
+                <= effectiveMaximumAppOwnedUndoActionSerializedByteCount
+    } else {
+        canRegisterAppOwnedHistory = false
+    }
+
+    // The document mutation remains accepted even when immutable app-owned
+    // undo data cannot be produced. Retain the live PaperKit result and let
+    // Canvas Core's independently retried checkpoint establish durability.
+    #if DEBUG
+    let injectedHostValidationFailure = consumeSerializedInsertionFailureForTesting(
+        .retainedHostValidation
+    )
+    #else
+    let injectedHostValidationFailure = false
+    #endif
+    let retainedHostIsValid = injectedHostValidationFailure == false
+        && hostsByPageID[pageID].map {
+            ObjectIdentifier($0.controller) == controllerIdentity
+                && $0.controller.markup == insertedMarkup
+        } == true
+    guard retainedHostIsValid else {
+        Self.insertionLogger.error(
+            "Insertion accepted without undo history; retained host validation failed for page \(pageID.uuidString, privacy: .public)."
+        )
+        guard let acceptedMarkup = paperController.markup,
+            acceptedMarkup != originalMarkup,
+            pages.contains(where: { $0.id == pageID }) else { return false }
+        replacePageMarkup(id: pageID, markup: acceptedMarkup)
+        callbacks.markupChanged(pageID, acceptedMarkup)
+        return true
+    }
+
+    // PaperKit 26.0 may enqueue native undo work one run-loop turn after the
+    // insertion call returns. Keep registration suspended through serialization
+    // when snapshots exist; on failure, restore native registration and still
+    // publish the inserted markup.
+    await Task.yield()
+    guard let finalHost = hostsByPageID[pageID],
+        ObjectIdentifier(finalHost.controller) == controllerIdentity,
+        finalHost.controller.markup == insertedMarkup,
+        pages.contains(where: { $0.id == pageID }) else {
         if nativeRegistrationIsSuspended {
             historyManager?.enableUndoRegistration()
             nativeRegistrationIsSuspended = false
         }
+        if let liveHost = hostsByPageID[pageID],
+            ObjectIdentifier(liveHost.controller) == controllerIdentity {
+            deliverMarkupIfChanged(pageID: pageID, includingPreparedInsertion: true)
+        } else if let acceptedMarkup = paperController.markup,
+            acceptedMarkup != originalMarkup,
+            pages.contains(where: { $0.id == pageID }) {
+            // The representable may have detached the accepted host while this
+            // async history transaction was suspended. Publish its retained
+            // PaperKit value so the model can reconcile it with the replacement.
+            replacePageMarkup(id: pageID, markup: acceptedMarkup)
+            callbacks.markupChanged(pageID, acceptedMarkup)
+        }
+        return pages.first(where: { $0.id == pageID })?.markup != originalMarkup
+    }
 
+    if nativeRegistrationIsSuspended {
+        historyManager?.enableUndoRegistration()
+        nativeRegistrationIsSuspended = false
+    }
+
+    if canRegisterAppOwnedHistory, let undoData, let redoData {
         registerMarkupReplacement(
             pageID: pageID,
             undoData: undoData,
             redoData: redoData,
             actionName: insertion.historyActionName
         )
-        deliverMarkupIfChanged(
-            pageID: pageID,
-            includingPreparedInsertion: true
-        )
-        guard pages.first(where: { $0.id == pageID })?.markup == insertedMarkup else {
-            return false
+    }
+    deliverMarkupIfChanged(pageID: pageID, includingPreparedInsertion: true)
+    guard pages.first(where: { $0.id == pageID })?.markup == insertedMarkup else {
+        return false
+    }
+    if pageID == focusedPageID { publishUndoAvailability() }
+    return true
+}
+
+    private func insertionHistoryData(
+        for markup: PaperMarkup,
+        stage: String,
+        injectedFailure: SerializedInsertionFailureForTesting
+    ) async -> Data? {
+        for attempt in 0...Self.insertionSerializationRetryDelays.count {
+            do {
+                #if DEBUG
+                if consumeSerializedInsertionFailureForTesting(injectedFailure) {
+                    throw CanvasInsertionSerializationTestError.injected
+                }
+                #endif
+                return try await markup.dataRepresentation()
+            } catch is CancellationError {
+                let failure = PaperCanvasInsertionCommitError.serializationFailed(
+                    stage: stage,
+                    reason: "serialization task was cancelled"
+                )
+                Self.insertionLogger.error(
+                    "\(failure.localizedDescription, privacy: .public)"
+                )
+                return nil
+            } catch {
+                if attempt == Self.insertionSerializationRetryDelays.count {
+                    let failure = PaperCanvasInsertionCommitError.serializationFailed(
+                        stage: stage,
+                        reason: error.localizedDescription
+                    )
+                    Self.insertionLogger.error(
+                        "\(failure.localizedDescription, privacy: .public)"
+                    )
+                    return nil
+                }
+                do {
+                    try await Task.sleep(
+                        for: Self.insertionSerializationRetryDelays[attempt]
+                    )
+                } catch {
+                    let failure = PaperCanvasInsertionCommitError.serializationFailed(
+                        stage: stage,
+                        reason: "serialization retry was cancelled"
+                    )
+                    Self.insertionLogger.error(
+                        "\(failure.localizedDescription, privacy: .public)"
+                    )
+                    return nil
+                }
+            }
         }
-        if pageID == focusedPageID { publishUndoAvailability() }
-        return true
+        return nil
     }
 
     private var effectiveMaximumAppOwnedUndoActionSerializedByteCount: Int {
