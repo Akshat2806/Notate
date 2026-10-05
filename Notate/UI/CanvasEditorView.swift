@@ -522,7 +522,41 @@ struct CanvasEditorView: View {
 
     @ViewBuilder
     private var statusChrome: some View {
-        if case let .failed(message) = model.saveState {
+        if case let .retrying(message) = model.saveState {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: NotateDesign.Spacing.control) {
+                    saveRetryMessage(message)
+                    retrySaveButton
+                }
+
+                VStack(alignment: .leading, spacing: NotateDesign.Spacing.compact) {
+                    saveRetryMessage(message)
+                    retrySaveButton
+                }
+            }
+            .font(.footnote)
+            .padding(NotateDesign.Spacing.control)
+            .background(
+                NotateDesign.Palette.background,
+                in: .rect(cornerRadius: NotateDesign.Radius.control)
+            )
+            .overlay {
+                RoundedRectangle(
+                    cornerRadius: NotateDesign.Radius.control,
+                    style: .continuous
+                )
+                .stroke(
+                    NotateDesign.Palette.warning.opacity(0.52),
+                    lineWidth: NotateDesign.Hairline.standardWidth
+                )
+            }
+            .padding(.horizontal, NotateDesign.Spacing.section)
+            .padding(
+                .bottom,
+                NotateDesign.Control.standard + NotateDesign.Spacing.spacious
+            )
+            .accessibilityElement(children: .contain)
+        } else if case let .failed(message) = model.saveState {
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: NotateDesign.Spacing.control) {
                     saveFailureMessage(message, lineLimit: 2)
@@ -577,6 +611,22 @@ struct CanvasEditorView: View {
                 .lineLimit(lineLimit)
                 .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    private func saveRetryMessage(_ message: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: NotateDesign.Spacing.compact) {
+            ProgressView()
+                .controlSize(.small)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Save delayed. Retrying automatically.")
+                    .fontWeight(.semibold)
+                Text(message)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .accessibilityLabel("Save delayed. Retrying automatically. \(message)")
     }
 
     private var retrySaveButton: some View {
@@ -827,6 +877,14 @@ struct CanvasEditorView: View {
     }
 
     private func announceSaveFailureIfNeeded(_ state: CanvasEditorModel.SaveState) {
+        if case let .retrying(message) = state,
+           UIAccessibility.isVoiceOverRunning {
+            UIAccessibility.post(
+                notification: .announcement,
+                argument: "Saving is delayed. Notate is retrying automatically. \(message)"
+            )
+            return
+        }
         guard case let .failed(message) = state,
               UIAccessibility.isVoiceOverRunning else { return }
         UIAccessibility.post(

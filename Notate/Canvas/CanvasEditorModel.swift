@@ -117,6 +117,7 @@ public final class CanvasEditorModel {
     public enum SaveState: Equatable {
         case saved
         case saving
+        case retrying(String)
         case failed(String)
     }
 
@@ -221,6 +222,8 @@ public final class CanvasEditorModel {
     /// closed boundary explicit so cancelling the ordinary timers never turns
     /// into a permanent loss of the last generation.
     @ObservationIgnored private var requiresDeferredCheckpointRetry = false
+    @ObservationIgnored private var transientCheckpointFailureCount = 0
+    @ObservationIgnored private var isCheckpointRetryPending = false
     /// One fully-armed pull-to-add-page release that arrived while the canvas
     /// was briefly busy (for example the scrolling finger still counted as
     /// contact in Draw-with-Finger mode). It is applied at most once, and only
@@ -330,6 +333,8 @@ public final class CanvasEditorModel {
         launchState == .ready
             && isReaderMode == false
             && isReaderModeTransitioning == false
+            && isDurableInsertionInFlight == false
+            && isCheckpointRetryPending == false
     }
 
     public var resolvedReaderPageLayout: CanvasPageLayoutPreferences {
@@ -562,6 +567,7 @@ public final class CanvasEditorModel {
         pendingProgrammaticFocusPageID = nil
         controller.applyToolState(toolState)
         controller.applyInputMode(inputMode)
+        controller.setCheckpointRetryPending(isCheckpointRetryPending)
         let shouldLockForReader = isReaderMode || isReaderModeTransitioning
         let readerLockAccepted = controller.setReaderModeEnabled(shouldLockForReader)
         if isReaderMode, readerLockAccepted == false {
@@ -903,11 +909,11 @@ public final class CanvasEditorModel {
                 throw CanvasDurableInsertionError.controller(error)
             } catch {
                 // The command surface promises a typed commit result. Treat a
-                // legacy/unexpected controller error as the same fail-closed
-                // serialization boundary rather than leaking an unclassified
-                // failure past the UI's durable import contract.
+                // legacy/unexpected controller error as a host-validation
+                // failure rather than leaking an unclassified error past the
+                // UI's durable import contract.
                 throw CanvasDurableInsertionError.controller(
-                    .serializationOrHostValidationFailed
+                    .hostValidationFailed(error.localizedDescription)
                 )
             }
 
@@ -923,10 +929,28 @@ public final class CanvasEditorModel {
                 throw CanvasDurableInsertionError.generationDidNotAdvance
             }
             let insertionGeneration = generation
-            guard let verifiedSnapshot = await checkpointLatest() else {
+            var verifiedSnapshot: CanvasCoreSnapshot?
+            while verifiedSnapshot == nil {
+                verifiedSnapshot = await checkpointLatest()
+                guard verifiedSnapshot == nil else { break }
+                if case .retrying = saveState {
+                    do {
+                        try await Task.sleep(for: checkpointRetryDelay)
+                    } catch {
+                        throw CanvasDurableInsertionError.checkpointFailed(
+                            "The insertion remains pending while its checkpoint retries."
+                        )
+                    }
+                    continue
+                }
                 if case let .failed(description) = saveState {
                     throw CanvasDurableInsertionError.checkpointFailed(description)
                 }
+                throw CanvasDurableInsertionError.checkpointFailed(
+                    "Canvas Core did not return a verified checkpoint."
+                )
+            }
+            guard let verifiedSnapshot else {
                 throw CanvasDurableInsertionError.checkpointFailed(
                     "Canvas Core did not return a verified checkpoint."
                 )
@@ -949,6 +973,9 @@ public final class CanvasEditorModel {
         } catch let error as CanvasDurableInsertionError {
             if case .failed = saveState {
                 // Retain the more specific Canvas Core failure.
+            } else if case .retrying = saveState {
+                // The accepted content remains in the live model and the
+                // checkpoint retry timer remains armed after caller cancellation.
             } else {
                 saveState = .failed(error.localizedDescription)
             }
@@ -2506,11 +2533,11 @@ public final class CanvasEditorModel {
         guard token == forcedSaveToken else { return }
         forcedSaveTask = nil
         await checkpointLatest()
-        // A failed save is not retried on a timer: a deterministic failure
-        // (limits, invalid snapshot) would re-encode the whole document every
-        // few seconds and make the banner flicker. The next edit, the Retry
-        // button, and lifecycle flushes all re-attempt.
+        // Transient failures own their bounded-backoff retry timer. Permanent
+        // failures wait for an edit or an explicit retry so invalid content is
+        // not repeatedly re-encoded.
         if case .failed = saveState { return }
+        if case .retrying = saveState { return }
         if generation > committedGeneration {
             ensureForcedSave()
         }
@@ -2547,6 +2574,9 @@ public final class CanvasEditorModel {
             guard generation > committedGeneration else {
                 return latestVerifiedIndexSnapshot
             }
+            if case .retrying = saveState {
+                return nil
+            }
             guard case .failed = saveState else {
                 return await checkpointLatest()
             }
@@ -2564,9 +2594,14 @@ public final class CanvasEditorModel {
         }
 
         do {
-            try await checkpointStore.checkpoint(snapshot)
+            let verifiedSnapshot = try await checkpointStore
+                .checkpointAndReturnVerifiedSnapshot(snapshot)
+            transientCheckpointFailureCount = 0
+            isCheckpointRetryPending = false
+            canvasController?.setCheckpointRetryPending(false)
             committedGeneration = max(committedGeneration, snapshotGeneration)
-            publishVerifiedIndexDelta(for: snapshot)
+            publishVerifiedIndexDelta(for: verifiedSnapshot)
+            latestVerifiedIndexSnapshot = verifiedSnapshot
             verifiedCheckpointGeneration = max(
                 verifiedCheckpointGeneration,
                 snapshotGeneration
@@ -2579,7 +2614,7 @@ public final class CanvasEditorModel {
                 scheduleTrailingSave()
                 ensureForcedSave()
             }
-            return snapshot
+            return verifiedSnapshot
         } catch is CancellationError {
             if generation > committedGeneration {
                 retainDeferredCheckpointRetry()
@@ -2589,8 +2624,18 @@ public final class CanvasEditorModel {
                 scheduleTrailingSave()
                 ensureForcedSave()
             }
+        } catch let error as CanvasCoreStoreError where error.isTransientCheckpointFailure {
+            transientCheckpointFailureCount += 1
+            isCheckpointRetryPending = true
+            canvasController?.setCheckpointRetryPending(true)
+            saveState = .retrying(error.localizedDescription)
+            forcedSaveTask?.cancel()
+            forcedSaveTask = nil
+            scheduleTrailingSave(after: checkpointRetryDelay)
         } catch {
             if snapshotGeneration >= generation {
+                isCheckpointRetryPending = false
+                canvasController?.setCheckpointRetryPending(false)
                 saveState = .failed(error.localizedDescription)
             }
         }
@@ -2607,6 +2652,12 @@ public final class CanvasEditorModel {
         }
         scheduleTrailingSave()
         ensureForcedSave()
+    }
+
+    private var checkpointRetryDelay: Duration {
+        let exponent = min(max(transientCheckpointFailureCount - 1, 0), 5)
+        let seconds = min(30, 1 << exponent)
+        return .seconds(seconds)
     }
 
     /// Advances the index baseline only for a newly verified snapshot. The
