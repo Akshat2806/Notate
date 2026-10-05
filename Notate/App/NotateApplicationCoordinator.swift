@@ -842,7 +842,7 @@ final class NotateApplicationCoordinator {
         switch saveState {
         case let .failed(description):
             alertMessage = description
-        case .saving:
+        case .saving, .retrying(_):
             alertMessage = "The latest canvas edit is still being saved. Try closing the note again."
         case .saved:
             break
