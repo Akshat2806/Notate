@@ -125,6 +125,9 @@ public struct CanvasVerifiedIndexDelta: Equatable, Sendable {
 public enum CanvasCoreLoadResult: Equatable, Sendable {
     case newDocument
     case restored(CanvasCoreSnapshot)
+    /// The caller's task ended before the read could finish. This is not a
+    /// statement about whether either persisted checkpoint is valid.
+    case cancelled
     case failed(CanvasCoreStoreError)
 }
 
@@ -139,7 +142,6 @@ public enum CanvasCoreStoreError: Error, Equatable, LocalizedError, Sendable {
     case staleCheckpointToken(attempted: UInt64, latest: UInt64)
     case unresolvedCorruption(current: String?, previous: String?)
     case fileSystem(String)
-    case cancelled
 
     public var errorDescription: String? {
         switch self {
@@ -172,14 +174,12 @@ public enum CanvasCoreStoreError: Error, Equatable, LocalizedError, Sendable {
             }
         case let .fileSystem(reason):
             "The canvas files could not be accessed: \(reason)"
-        case .cancelled:
-            "Opening the canvas was cancelled."
         }
     }
 
     var isTransientCheckpointFailure: Bool {
         switch self {
-        case .serializationFailed, .fileSystem, .cancelled:
+        case .serializationFailed, .fileSystem:
             true
         case .invalidSnapshot, .incompatibleMarkup, .invalidEnvelope,
              .resourceLimitExceeded, .verificationFailed,
@@ -754,12 +754,12 @@ public actor CanvasCoreStore: CanvasCoreCheckpointing {
             do {
                 inspection = try await inspectSlots()
             } catch is CancellationError {
-                return .failed(.cancelled)
+                return .cancelled
             } catch {
                 return .failed(.fileSystem(Self.describe(error)))
             }
             guard startingRevision == publicationRevision else { continue }
-            guard Task.isCancelled == false else { return .failed(.cancelled) }
+            guard Task.isCancelled == false else { return .cancelled }
 
             let finalization = await CanvasCoreRootSerialization.withExclusiveAccess(
                 to: rootURL
@@ -1001,7 +1001,7 @@ public actor CanvasCoreStore: CanvasCoreCheckpointing {
         _ inspection: SlotInspection
     ) -> LoadFinalization {
         guard Task.isCancelled == false else {
-            return .completed(.failed(.cancelled))
+            return .completed(.cancelled)
         }
         let diskState = readDiskState()
         guard diskState.identity == inspection.diskIdentity else {
@@ -1018,7 +1018,7 @@ public actor CanvasCoreStore: CanvasCoreCheckpointing {
 
         if candidate.slot == .previous {
             guard Task.isCancelled == false else {
-                return .completed(.failed(.cancelled))
+                return .completed(.cancelled)
             }
             do {
                 guard let envelopeData = candidate.envelopeDataForPromotion else {
