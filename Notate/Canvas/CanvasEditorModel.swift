@@ -489,6 +489,9 @@ public final class CanvasEditorModel {
             paperTemplateChanged: { [weak self] pageID, template in
                 self?.paperTemplateDidChange(template, on: pageID)
             },
+            paperTemplatesChanged: { [weak self] templates in
+                self?.paperTemplatesDidChange(templates)
+            },
             interactionBegan: { [weak self] pageID in
                 self?.drawingInteractionDidBegin(on: pageID)
             },
@@ -1161,6 +1164,44 @@ public final class CanvasEditorModel {
         initialPages = pages
         canvasController?.setPaperTemplate(template, for: page.id)
         markDocumentChanged()
+    }
+
+    public func setPaperTemplateForAllPages(_ template: CanvasPaperTemplate) {
+        guard allowsAuthoring,
+              isDurableInsertionInFlight == false,
+              pageTrashMutationsInFlight.isEmpty,
+              captureLatestControllerDocumentIfNeeded() else { return }
+
+        let targetPageIDs = Set(
+            Self.paperTemplateTargetPageIDs(in: pages, template: template)
+        )
+        let pageIndices = pages.indices.filter { targetPageIDs.contains(pages[$0].id) }
+        guard pageIndices.isEmpty == false else { return }
+
+        let pageIDs = pageIndices.map { pages[$0].id }
+        for index in pageIndices {
+            pages[index] = pages[index].replacing(paperTemplate: template)
+        }
+        initialPages = pages
+
+        if let currentIndex = indexOfCurrentPage {
+            currentPaperTemplate = pages[currentIndex].paperTemplate
+            updateLegacyInitialPage(to: pages[currentIndex])
+        }
+
+        canvasController?.setPaperTemplate(template, forPageIDs: pageIDs)
+        markDocumentChanged()
+    }
+
+    static func paperTemplateTargetPageIDs(
+        in pages: [CanvasPageSnapshot],
+        template: CanvasPaperTemplate
+    ) -> [UUID] {
+        pages.compactMap { page in
+            guard page.background.isImported == false,
+                  page.paperTemplate != template else { return nil }
+            return page.id
+        }
     }
 
     private func declineIfPageLimitReached(addingImagePage: Bool = false) -> Bool {
@@ -2087,6 +2128,30 @@ public final class CanvasEditorModel {
         initialPages = pages
         if pageID == currentPageID {
             currentPaperTemplate = template
+            updateLegacyInitialPage(to: pages[index])
+        }
+        markDocumentChanged()
+    }
+
+    private func paperTemplatesDidChange(
+        _ templates: [UUID: CanvasPaperTemplate]
+    ) {
+        guard isReaderMode == false,
+              isReaderModeTransitioning == false else { return }
+
+        var changedPageIDs: Set<UUID> = []
+        for (pageID, template) in templates {
+            guard let index = pages.firstIndex(where: { $0.id == pageID }),
+                  pages[index].paperTemplate != template else { continue }
+            pages[index] = pages[index].replacing(paperTemplate: template)
+            changedPageIDs.insert(pageID)
+        }
+        guard changedPageIDs.isEmpty == false else { return }
+
+        initialPages = pages
+        if let index = indexOfCurrentPage,
+           changedPageIDs.contains(pages[index].id) {
+            currentPaperTemplate = pages[index].paperTemplate
             updateLegacyInitialPage(to: pages[index])
         }
         markDocumentChanged()

@@ -1355,6 +1355,23 @@ _ = detachPageHost(id: pageID)
         performPaperTemplateChange(template, for: pageID, registersUndo: true)
     }
 
+    func setPaperTemplate(_ template: CanvasPaperTemplate, forPageIDs pageIDs: [UUID]) {
+        guard isReaderModeEnabled == false,
+              hasActiveContact == false,
+              pagesPreparingInsertionHistory.isEmpty,
+              queuedInsertionCountByPageID.isEmpty else { return }
+        let requestedPageIDs = Set(pageIDs)
+        guard requestedPageIDs.isEmpty == false else { return }
+
+        var changes: [UUID: CanvasPaperTemplate] = [:]
+        for page in pages where requestedPageIDs.contains(page.id) {
+            guard page.paperTemplate != template else { continue }
+            changes[page.id] = template
+        }
+        guard changes.isEmpty == false else { return }
+        performPaperTemplateChanges(changes, registersUndo: true)
+    }
+
     func insertPage(_ page: CanvasPageSnapshot, at index: Int, scrollTo: Bool) {
         insertPage(page, at: index, scrollTo: scrollTo, animated: false)
     }
@@ -4339,6 +4356,50 @@ private func performPaperTemplateChange(
         callbacks.paperTemplateChanged(pageID, template)
         if pageID == focusedPageID { publishUndoAvailability() }
     }
+
+private func performPaperTemplateChanges(
+    _ requestedTemplates: [UUID: CanvasPaperTemplate],
+    registersUndo: Bool
+) {
+    guard isReaderModeEnabled == false,
+          requestedTemplates.isEmpty == false else { return }
+
+    let changedPages = pages.compactMap {
+        page -> (UUID, CanvasPaperTemplate, CanvasPaperTemplate, PageHost)? in
+        guard let requested = requestedTemplates[page.id],
+              page.paperTemplate != requested,
+              let host = ensurePageHostMounted(for: page.id) else { return nil }
+        return (page.id, page.paperTemplate, requested, host)
+    }
+    guard changedPages.isEmpty == false else { return }
+
+    if registersUndo {
+        let previousTemplates = Dictionary(
+            uniqueKeysWithValues: changedPages.map { ($0.0, $0.1) }
+        )
+        registerAppOwnedUndo(
+            pageID: focusedPageID,
+            actionName: "Change Paper on All Pages"
+        ) { target in
+            target.performPaperTemplateChanges(
+                previousTemplates,
+                registersUndo: true
+            )
+        }
+    }
+
+    var appliedTemplates: [UUID: CanvasPaperTemplate] = [:]
+    for (pageID, _, template, host) in changedPages {
+        guard let index = pages.firstIndex(where: { $0.id == pageID }) else { continue }
+        pages[index] = pages[index].replacing(paperTemplate: template)
+        host.contentView.template = template
+        host.decorationView.template = template
+        appliedTemplates[pageID] = template
+    }
+    guard appliedTemplates.isEmpty == false else { return }
+    callbacks.paperTemplatesChanged(appliedTemplates)
+    publishUndoAvailability()
+}
     private func performPageInsertion(
         _ page: CanvasPageSnapshot,
         at requestedIndex: Int,
@@ -7703,7 +7764,35 @@ final class CanvasPaperTemplateDrawingSource: @unchecked Sendable {
             drawCornellGuides(in: context, clip: logicalClip, lineWidth: guideWidth)
         case .music:
             drawMusicStaffs(in: context, clip: logicalClip, lineWidth: ruleWidth)
+        case .legal, .singleColumn, .mixed, .twoColumnLeft, .threeColumn,
+             .todo, .monthlyPlanner, .guitarScore, .guitarTab, .manuscript:
+            drawStructuredTemplate(in: context, clip: logicalClip, lineWidth: ruleWidth)
         }
+    }
+
+    private nonisolated func drawStructuredTemplate(
+        in context: CGContext,
+        clip: CGRect,
+        lineWidth: CGFloat
+    ) {
+        let artwork = CanvasPaperTemplateArtwork.paths(
+            for: template,
+            pageSize: pageSize,
+            visibleRect: clip
+        )
+        context.addPath(artwork.pattern)
+        if artwork.fillsPattern {
+            context.setFillColor(CanvasPaperTemplateArtwork.ruleColor(for: template.tone))
+            context.fillPath()
+        } else {
+            context.setStrokeColor(CanvasPaperTemplateArtwork.ruleColor(for: template.tone))
+            context.setLineWidth(lineWidth)
+            context.strokePath()
+        }
+        context.addPath(artwork.guides)
+        context.setStrokeColor(CanvasPaperTemplateArtwork.guideColor(for: template.tone))
+        context.setLineWidth(max(lineWidth, 0.7))
+        context.strokePath()
     }
 
     private nonisolated func drawHorizontalRules(

@@ -42,7 +42,7 @@ enum NotatePreferences {
     }
 
     static var defaultPaperTemplate: CanvasPaperTemplate {
-        .default
+        CanvasPaperTemplate(style: .blank, tone: .paperWhite)
     }
 
     static var drawWithFingerByDefault: Bool {

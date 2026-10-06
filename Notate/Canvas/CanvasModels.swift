@@ -274,6 +274,16 @@ public enum CanvasPaperStyle: String, CaseIterable, Codable, Sendable {
     case dotted
     case cornell
     case music
+    case legal
+    case singleColumn
+    case mixed
+    case twoColumnLeft
+    case threeColumn
+    case todo
+    case monthlyPlanner
+    case guitarScore
+    case guitarTab
+    case manuscript
 
     public var title: String {
         switch self {
@@ -281,8 +291,18 @@ public enum CanvasPaperStyle: String, CaseIterable, Codable, Sendable {
         case .ruled: "Ruled"
         case .grid: "Grid"
         case .dotted: "Dotted"
-        case .cornell: "Cornell"
-        case .music: "Music"
+        case .cornell: "Cornell Notes"
+        case .music: "Staff Paper"
+        case .legal: "Legal"
+        case .singleColumn: "Single Column"
+        case .mixed: "Mixed"
+        case .twoColumnLeft: "Two Column Left"
+        case .threeColumn: "Three Column"
+        case .todo: "To-do"
+        case .monthlyPlanner: "Monthly Planner"
+        case .guitarScore: "Guitar Score"
+        case .guitarTab: "Guitar Tab"
+        case .manuscript: "Manuscript"
         }
     }
 
@@ -294,6 +314,51 @@ public enum CanvasPaperStyle: String, CaseIterable, Codable, Sendable {
         case .dotted: "circle.grid.3x3.fill"
         case .cornell: "rectangle.split.2x1"
         case .music: "music.note.list"
+        case .legal: "text.alignleft"
+        case .singleColumn: "text.alignleft"
+        case .mixed: "rectangle.split.2x1"
+        case .twoColumnLeft: "rectangle.split.2x1"
+        case .threeColumn: "rectangle.split.3x1"
+        case .todo: "checklist"
+        case .monthlyPlanner: "calendar"
+        case .guitarScore: "music.note.list"
+        case .guitarTab: "guitars"
+        case .manuscript: "book.pages"
+        }
+    }
+}
+
+public enum CanvasPaperTemplateCategory: String, CaseIterable, Sendable {
+    case essentials
+    case writing
+    case planner
+    case music
+    case literature
+
+    public var title: String {
+        switch self {
+        case .essentials: "Essentials"
+        case .writing: "Writing"
+        case .planner: "Planner"
+        case .music: "Music"
+        case .literature: "Literature"
+        }
+    }
+
+    public var styles: [CanvasPaperStyle] {
+        switch self {
+        case .essentials: [.blank, .ruled, .grid, .dotted]
+        case .writing: [
+            .legal,
+            .singleColumn,
+            .cornell,
+            .mixed,
+            .twoColumnLeft,
+            .threeColumn,
+        ]
+        case .planner: [.todo, .monthlyPlanner]
+        case .music: [.music, .guitarScore, .guitarTab]
+        case .literature: [.manuscript]
         }
     }
 }
@@ -305,10 +370,19 @@ public enum CanvasPaperDensity: String, CaseIterable, Codable, Sendable {
 
     public var title: String {
         switch self {
-        case .narrow: "Narrow"
+        case .narrow: "Tight"
         case .standard: "Standard"
-        case .wide: "Wide"
+        case .wide: "Open"
         }
+    }
+
+    var sliderPosition: Double {
+        Double(Self.allCases.firstIndex(of: self) ?? 1)
+    }
+
+    static func atSliderPosition(_ position: Double) -> Self {
+        let rounded = position.isFinite ? Int(position.rounded()) : 1
+        return allCases[min(max(rounded, 0), allCases.count - 1)]
     }
 
     public var spacing: CGFloat {
@@ -324,26 +398,66 @@ public enum CanvasPaperTone: String, CaseIterable, Codable, Sendable {
     case white
     case warmWhite
     case cream
+    case darkCream
+    case beige
     case lightGray
+    case gray
     case blush
+    case lightBlue
+    case blue
     case sky
     case mint
     case charcoal
     case midnight
     case black
+    case paperWhite
+    case goodnotesYellow
+    case goodnotesDark
+    case trueBlack
+    case boardGreen
+    case blueprintBlue
+    case lightGrayPaper
+    case lightBeige
+    case beigePaper
+    case darkBeige
+    case paperGray
+    case paperCream
+    case paperBeige
+    case paperBlueGray
+    case paperCharcoal
 
     public var title: String {
         switch self {
         case .white: "White"
         case .warmWhite: "Warm White"
         case .cream: "Cream"
+        case .darkCream: "Dark Cream"
+        case .beige: "Beige"
         case .lightGray: "Light Gray"
+        case .gray: "Grey"
         case .blush: "Blush"
+        case .lightBlue: "Light Blue"
+        case .blue: "Blue"
         case .sky: "Sky"
         case .mint: "Mint"
         case .charcoal: "Charcoal"
         case .midnight: "Midnight"
         case .black: "Black"
+        case .paperWhite: "White"
+        case .goodnotesYellow: "Yellow"
+        case .goodnotesDark: "Charcoal"
+        case .trueBlack: "Black"
+        case .boardGreen: "Board"
+        case .blueprintBlue: "Blueprint"
+        case .lightGrayPaper: "Light Gray"
+        case .lightBeige: "Light Beige"
+        case .beigePaper: "Beige"
+        case .darkBeige: "Dark Beige"
+        case .paperGray: "Gray"
+        case .paperCream: "Cream"
+        case .paperBeige: "Beige"
+        case .paperBlueGray: "Light Blue"
+        case .paperCharcoal: "Charcoal"
         }
     }
 
@@ -363,11 +477,41 @@ public enum CanvasPaperTone: String, CaseIterable, Codable, Sendable {
         .black,
     ]
 
+    public static let paperSetupPalette: [CanvasPaperTone] = [
+        .paperWhite,
+        .paperCream,
+        .paperBeige,
+        .paperBlueGray,
+        .paperCharcoal,
+        .trueBlack,
+    ]
+
+    var paperSetupPaletteChoice: CanvasPaperTone {
+        switch self {
+        case .white, .warmWhite: .paperWhite
+        case .cream, .goodnotesYellow, .lightBeige: .paperCream
+        case .darkCream, .beige, .blush, .beigePaper, .darkBeige: .paperBeige
+        case .lightGray, .gray, .sky, .lightBlue, .blue, .mint,
+             .lightGrayPaper, .paperGray, .blueprintBlue:
+            .paperBlueGray
+        case .charcoal, .midnight, .goodnotesDark, .boardGreen:
+            .paperCharcoal
+        case .black, .trueBlack:
+            .trueBlack
+        case .paperWhite, .paperCream, .paperBeige, .paperBlueGray, .paperCharcoal:
+            self
+        }
+    }
+
     public var isDark: Bool {
         switch self {
-        case .charcoal, .midnight, .black:
+        case .charcoal, .midnight, .black, .goodnotesDark, .trueBlack, .paperCharcoal,
+             .boardGreen, .blueprintBlue:
             true
-        case .white, .warmWhite, .cream, .lightGray, .blush, .sky, .mint:
+        case .white, .warmWhite, .cream, .darkCream, .beige, .lightGray, .gray,
+             .blush, .lightBlue, .blue, .sky, .mint, .paperWhite, .goodnotesYellow,
+             .lightGrayPaper, .lightBeige, .beigePaper, .darkBeige, .paperGray,
+             .paperCream, .paperBeige, .paperBlueGray:
             false
         }
     }
@@ -380,10 +524,20 @@ public enum CanvasPaperTone: String, CaseIterable, Codable, Sendable {
             CGColor(srgbRed: 1, green: 254 / 255, blue: 252 / 255, alpha: 1)
         case .cream:
             CGColor(srgbRed: 1, green: 248 / 255, blue: 231 / 255, alpha: 1)
+        case .darkCream:
+            CGColor(srgbRed: 239 / 255, green: 235 / 255, blue: 220 / 255, alpha: 1)
+        case .beige:
+            CGColor(srgbRed: 232 / 255, green: 224 / 255, blue: 205 / 255, alpha: 1)
         case .lightGray:
             CGColor(srgbRed: 244 / 255, green: 244 / 255, blue: 242 / 255, alpha: 1)
+        case .gray:
+            CGColor(srgbRed: 231 / 255, green: 231 / 255, blue: 228 / 255, alpha: 1)
         case .blush:
             CGColor(srgbRed: 253 / 255, green: 238 / 255, blue: 241 / 255, alpha: 1)
+        case .lightBlue:
+            CGColor(srgbRed: 237 / 255, green: 245 / 255, blue: 249 / 255, alpha: 1)
+        case .blue:
+            CGColor(srgbRed: 217 / 255, green: 231 / 255, blue: 240 / 255, alpha: 1)
         case .sky:
             CGColor(srgbRed: 234 / 255, green: 243 / 255, blue: 251 / 255, alpha: 1)
         case .mint:
@@ -394,6 +548,36 @@ public enum CanvasPaperTone: String, CaseIterable, Codable, Sendable {
             CGColor(srgbRed: 25 / 255, green: 35 / 255, blue: 53 / 255, alpha: 1)
         case .black:
             CGColor(srgbRed: 17 / 255, green: 18 / 255, blue: 20 / 255, alpha: 1)
+        case .paperWhite:
+            CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1)
+        case .goodnotesYellow:
+            CGColor(srgbRed: 248 / 255, green: 247 / 255, blue: 234 / 255, alpha: 1)
+        case .goodnotesDark:
+            CGColor(srgbRed: 47 / 255, green: 47 / 255, blue: 47 / 255, alpha: 1)
+        case .trueBlack:
+            CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 1)
+        case .boardGreen:
+            CGColor(srgbRed: 19 / 255, green: 58 / 255, blue: 45 / 255, alpha: 1)
+        case .blueprintBlue:
+            CGColor(srgbRed: 18 / 255, green: 57 / 255, blue: 86 / 255, alpha: 1)
+        case .lightGrayPaper:
+            CGColor(srgbRed: 244 / 255, green: 244 / 255, blue: 242 / 255, alpha: 1)
+        case .lightBeige:
+            CGColor(srgbRed: 248 / 255, green: 247 / 255, blue: 234 / 255, alpha: 1)
+        case .beigePaper:
+            CGColor(srgbRed: 239 / 255, green: 230 / 255, blue: 213 / 255, alpha: 1)
+        case .darkBeige:
+            CGColor(srgbRed: 226 / 255, green: 211 / 255, blue: 182 / 255, alpha: 1)
+        case .paperGray:
+            CGColor(srgbRed: 223 / 255, green: 223 / 255, blue: 221 / 255, alpha: 1)
+        case .paperCream:
+            CGColor(srgbRed: 247 / 255, green: 246 / 255, blue: 234 / 255, alpha: 1)
+        case .paperBeige:
+            CGColor(srgbRed: 212 / 255, green: 197 / 255, blue: 167 / 255, alpha: 1)
+        case .paperBlueGray:
+            CGColor(srgbRed: 219 / 255, green: 226 / 255, blue: 236 / 255, alpha: 1)
+        case .paperCharcoal:
+            CGColor(srgbRed: 46 / 255, green: 46 / 255, blue: 46 / 255, alpha: 1)
         }
     }
 
@@ -1712,6 +1896,7 @@ public struct PaperCanvasCallbacks {
     public var markupChanged: @MainActor (UUID, PaperMarkup) -> Void
     public var pageReplaced: @MainActor (CanvasPageSnapshot) -> Void
     public var paperTemplateChanged: @MainActor (UUID, CanvasPaperTemplate) -> Void
+    public var paperTemplatesChanged: @MainActor ([UUID: CanvasPaperTemplate]) -> Void
     public var interactionBegan: @MainActor (UUID) -> Void
     public var undoAvailabilityChanged: @MainActor (UUID, Bool, Bool) -> Void
     public var viewportChanged: @MainActor (UUID, CanvasViewportState) -> Void
@@ -1738,6 +1923,7 @@ public struct PaperCanvasCallbacks {
         markupChanged: @escaping @MainActor (UUID, PaperMarkup) -> Void,
         pageReplaced: @escaping @MainActor (CanvasPageSnapshot) -> Void,
         paperTemplateChanged: @escaping @MainActor (UUID, CanvasPaperTemplate) -> Void = { _, _ in },
+        paperTemplatesChanged: @escaping @MainActor ([UUID: CanvasPaperTemplate]) -> Void = { _ in },
         interactionBegan: @escaping @MainActor (UUID) -> Void,
         undoAvailabilityChanged: @escaping @MainActor (UUID, Bool, Bool) -> Void,
         viewportChanged: @escaping @MainActor (UUID, CanvasViewportState) -> Void,
@@ -1757,6 +1943,7 @@ public struct PaperCanvasCallbacks {
         self.markupChanged = markupChanged
         self.pageReplaced = pageReplaced
         self.paperTemplateChanged = paperTemplateChanged
+        self.paperTemplatesChanged = paperTemplatesChanged
         self.interactionBegan = interactionBegan
         self.undoAvailabilityChanged = undoAvailabilityChanged
         self.viewportChanged = viewportChanged
@@ -1917,6 +2104,7 @@ public protocol PaperCanvasCommanding: AnyObject {
     func setZoomScale(_ scale: CGFloat) -> CGFloat
     func endZoomScrubbing()
     func setPaperTemplate(_ template: CanvasPaperTemplate, for pageID: UUID)
+    func setPaperTemplate(_ template: CanvasPaperTemplate, forPageIDs pageIDs: [UUID])
     func insertPage(_ page: CanvasPageSnapshot, at index: Int, scrollTo: Bool)
     func insertPage(
         _ page: CanvasPageSnapshot,
@@ -2002,6 +2190,7 @@ public extension PaperCanvasCommanding {
     }
     func endZoomScrubbing() {}
     func setPaperTemplate(_ template: CanvasPaperTemplate, for pageID: UUID) {}
+    func setPaperTemplate(_ template: CanvasPaperTemplate, forPageIDs pageIDs: [UUID]) {}
     func insertPage(_ page: CanvasPageSnapshot, at index: Int, scrollTo: Bool) {}
     func insertPage(
         _ page: CanvasPageSnapshot,
