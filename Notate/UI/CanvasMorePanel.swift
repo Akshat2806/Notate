@@ -690,16 +690,15 @@ struct CanvasPaperSetupSheet: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: NotateDesign.Spacing.page) {
+                VStack(alignment: .leading, spacing: NotateDesign.Spacing.section) {
                     if model.currentPageHasImportedBackground {
                         importedBackgroundNotice
+                    } else {
+                        colorSection
+                        spacingSection
                     }
 
                     templateSection
-
-                    if model.currentPageHasImportedBackground == false {
-                        appearanceSection
-                    }
                 }
                 .frame(maxWidth: 560, alignment: .leading)
                 .padding(.horizontal, dynamicTypeSize.isAccessibilitySize ? 16 : 20)
@@ -718,23 +717,21 @@ struct CanvasPaperSetupSheet: View {
                         .disabled(isImportingPage)
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button(
-                        model.currentPageHasImportedBackground ? "Done" : "Apply"
-                    ) {
-                        if model.currentPageHasImportedBackground == false {
-                            model.setCurrentPaperTemplate(draft)
+                    if model.currentPageHasImportedBackground {
+                        Button("Done") { dismiss() }
+                            .disabled(isImportingPage)
+                    } else {
+                        Menu {
+                            Button("Current Page", action: applyToCurrentPage)
+                            Button("All Paper Pages", action: applyToAllPaperPages)
+                        } label: {
+                            Text("Apply")
+                                .fontWeight(.semibold)
                         }
-                        dismiss()
+                        .disabled(isImportingPage)
+                        .accessibilityLabel("Apply paper setup")
+                        .accessibilityIdentifier("paper-setup.apply")
                     }
-                    .fontWeight(.semibold)
-                    .disabled(
-                        isImportingPage
-                        || (
-                            model.currentPageHasImportedBackground == false
-                            && draft == model.currentPaperTemplate
-                        )
-                    )
-                    .accessibilityIdentifier("paper-setup.apply")
                 }
             }
         }
@@ -772,19 +769,96 @@ struct CanvasPaperSetupSheet: View {
         .accessibilityIdentifier("paper-setup.imported-background-hint")
     }
 
+    private var colorSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                sectionHeading("Paper color")
+                Spacer(minLength: 12)
+                Text(draft.tone.title)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+
+            GeometryReader { geometry in
+                ScrollView(.horizontal) {
+                    HStack(spacing: 4) {
+                        ForEach(CanvasPaperTone.paperSetupPalette, id: \.self) { tone in
+                            colorSwatch(tone)
+                        }
+                    }
+                    .frame(minWidth: geometry.size.width, alignment: .center)
+                    .padding(.vertical, 2)
+                }
+                .scrollIndicators(.hidden)
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("paper-setup.colors")
+            }
+            .frame(height: NotateDesign.Control.minimumHitTarget)
+        }
+    }
+
+    private var spacingSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                sectionHeading("Spacing")
+                Spacer(minLength: 12)
+                Text(draft.density.title)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("paper-setup.spacing.value")
+            }
+
+            VStack(alignment: .leading, spacing: 0) {
+                Slider(value: densitySliderValue, in: 0...2, step: 1)
+                    .tint(NotateDesign.Palette.accent)
+                    .accessibilityLabel("Spacing")
+                    .accessibilityValue(draft.density.title)
+                    .accessibilityIdentifier("paper-setup.spacing")
+
+                HStack {
+                    Text("Tight")
+                    Spacer()
+                    Text("Standard")
+                    Spacer()
+                    Text("Open")
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+            }
+            .frame(maxWidth: 240, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .center)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
+        .background(
+            Color(uiColor: .secondarySystemGroupedBackground),
+            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+        )
+    }
+
+    private var densitySliderValue: Binding<Double> {
+        Binding(
+            get: { draft.density.sliderPosition },
+            set: { newPosition in
+                withAnimation(reduceMotion ? nil : NotateDesign.Motion.selection) {
+                    draft.density = CanvasPaperDensity.atSliderPosition(newPosition)
+                }
+            }
+        )
+    }
+
     private var templateSection: some View {
         let pageSize = model.currentPageDisplaySize
         let importingPage = isImportingPage
 
-        return VStack(alignment: .leading, spacing: 22) {
-            sectionHeading(
-                model.currentPageHasImportedBackground ? "Page" : "Choose a layout"
-            )
-
+        return VStack(alignment: .leading, spacing: NotateDesign.Spacing.section) {
             if model.currentPageHasImportedBackground == false {
-                templateGroup("Essentials", styles: [.blank, .dotted, .grid, .ruled], pageSize: pageSize)
-                templateGroup("Writing Papers", styles: [.cornell], pageSize: pageSize)
-                templateGroup("Music", styles: [.music], pageSize: pageSize)
+                sectionHeading("Choose a layout")
+
+                ForEach(CanvasPaperTemplateCategory.allCases, id: \.self) { category in
+                    templateGroup(category, pageSize: pageSize)
+                }
             }
 
             if model.supportsPageStack {
@@ -809,19 +883,18 @@ struct CanvasPaperSetupSheet: View {
     }
 
     private func templateGroup(
-        _ title: String,
-        styles: [CanvasPaperStyle],
+        _ category: CanvasPaperTemplateCategory,
         pageSize: CGSize
     ) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(title.uppercased())
+            Text(category.title)
                 .font(.caption.weight(.semibold))
                 .tracking(0.7)
                 .foregroundStyle(.secondary)
                 .accessibilityAddTraits(.isHeader)
 
-            LazyVGrid(columns: templateColumns, alignment: .leading, spacing: 16) {
-                ForEach(styles, id: \.self) { style in
+            LazyVGrid(columns: templateColumns, alignment: .leading, spacing: 14) {
+                ForEach(category.styles, id: \.self) { style in
                     CanvasPaperPresetTile(
                         style: style,
                         tone: draft.tone,
@@ -836,132 +909,19 @@ struct CanvasPaperSetupSheet: View {
                 }
             }
         }
-    }
-
-    private var appearanceSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            sectionHeading("Appearance")
-
-            VStack(spacing: 0) {
-                VStack(alignment: .leading, spacing: 12) {
-                    adaptiveValueRow(title: "Color", value: draft.tone.title)
-
-                    toneRow(title: "Light", tones: CanvasPaperTone.lightTones)
-                    toneRow(title: "Dark", tones: CanvasPaperTone.darkTones)
-
-                    if draft.tone.isDark {
-                        Text("Existing ink colors won't change.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .transition(.opacity)
-                            .accessibilityIdentifier("paper-setup.dark-paper-hint")
-                    }
-                }
-                .padding(16)
-
-                if draft.style != .blank {
-                    Divider()
-                        .padding(.leading, 16)
-
-                    Menu {
-                        ForEach(CanvasPaperDensity.allCases, id: \.self) { density in
-                            Button {
-                                withAnimation(reduceMotion ? nil : NotateDesign.Motion.selection) {
-                                    draft.density = density
-                                }
-                            } label: {
-                                HStack {
-                                    Text(density.title)
-                                    if density == draft.density {
-                                        Image(systemName: "checkmark")
-                                    }
-                                }
-                            }
-                        }
-                    } label: {
-                        HStack(alignment: .firstTextBaseline, spacing: NotateDesign.Spacing.control) {
-                            adaptiveValueRow(title: "Spacing", value: draft.density.title)
-
-                            Image(systemName: "chevron.up.chevron.down")
-                                .font(.caption2.weight(.semibold))
-                                .foregroundStyle(.tertiary)
-                        }
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, dynamicTypeSize.isAccessibilitySize ? 10 : 0)
-                        .frame(maxWidth: .infinity, minHeight: 50)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityIdentifier("paper-setup.density")
-                }
-            }
-            .background(
-                Color(uiColor: .secondarySystemGroupedBackground),
-                in: RoundedRectangle(cornerRadius: 14, style: .continuous)
-            )
-        }
-    }
-
-    @ViewBuilder
-    private func adaptiveValueRow(title: String, value: String) -> some View {
-        if dynamicTypeSize.isAccessibilitySize {
-            VStack(alignment: .leading, spacing: NotateDesign.Spacing.tight) {
-                Text(title)
-                    .font(.body.weight(.medium))
-                    .foregroundStyle(.primary)
-                Text(value)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        } else {
-            HStack {
-                Text(title)
-                    .font(.body.weight(.medium))
-                    .foregroundStyle(.primary)
-
-                Spacer(minLength: NotateDesign.Spacing.compact)
-
-                Text(value)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-            }
-        }
+        .accessibilityIdentifier("paper-setup.category.\(category.rawValue)")
     }
 
     private func colorSwatch(_ tone: CanvasPaperTone) -> some View {
-        CanvasPaperToneSwatch(
+        let isSelected = draft.tone.paperSetupPaletteChoice == tone
+        return CanvasPaperToneSwatch(
             tone: tone,
-            isSelected: draft.tone == tone
+            isSelected: isSelected
         ) {
             withAnimation(reduceMotion ? nil : NotateDesign.Motion.selection) {
                 draft.tone = tone
             }
         }
-    }
-
-    private func toneRow(
-        title: String,
-        tones: [CanvasPaperTone]
-    ) -> some View {
-        HStack(spacing: 8) {
-            Text(title)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: true, vertical: false)
-                .frame(minWidth: 34, alignment: .leading)
-
-            ScrollView(.horizontal) {
-                HStack(spacing: 6) {
-                    ForEach(tones, id: \.self) { tone in
-                        colorSwatch(tone)
-                    }
-                }
-            }
-            .scrollIndicators(.hidden)
-        }
-        .accessibilityElement(children: .contain)
     }
 
     private var templateColumns: [GridItem] {
@@ -981,6 +941,16 @@ struct CanvasPaperSetupSheet: View {
         Text(title)
             .font(.headline)
             .accessibilityAddTraits(.isHeader)
+    }
+
+    private func applyToCurrentPage() {
+        model.setCurrentPaperTemplate(draft)
+        dismiss()
+    }
+
+    private func applyToAllPaperPages() {
+        model.setPaperTemplateForAllPages(draft)
+        dismiss()
     }
 
     private func importPhotoPage(from item: PhotosPickerItem) {
@@ -1078,14 +1048,7 @@ private struct CanvasPaperPresetTile: View {
     }
 
     private var displayTitle: String {
-        switch style {
-        case .blank: "Blank"
-        case .ruled: "Ruled \(density.title)"
-        case .grid: "Squared \(density.title)"
-        case .dotted: "Dotted \(density.title)"
-        case .cornell: "Cornell Notes"
-        case .music: "Music Staff"
-        }
+        style.title
     }
 }
 

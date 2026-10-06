@@ -60,6 +60,149 @@ final class NotateTests: XCTestCase {
         }
     }
 
+    func testPaperSetupCatalogUsesTheIntendedCategoryOrderAndTemplates() {
+        XCTAssertEqual(
+            CanvasPaperTemplateCategory.allCases,
+            [.essentials, .writing, .planner, .music, .literature]
+        )
+        XCTAssertEqual(
+            CanvasPaperTemplateCategory.allCases.flatMap(\.styles),
+            [
+                .blank, .ruled, .grid, .dotted,
+                .legal, .singleColumn, .cornell, .mixed, .twoColumnLeft, .threeColumn,
+                .todo, .monthlyPlanner,
+                .music, .guitarScore, .guitarTab,
+                .manuscript,
+            ]
+        )
+    }
+
+    func testPaperSetupPaletteIsCuratedAndRepresentsLegacyTonesInPlace() {
+        XCTAssertEqual(
+            CanvasPaperTone.paperSetupPalette,
+            [
+                .paperWhite, .paperCream, .paperBeige, .paperBlueGray,
+                .paperCharcoal, .trueBlack,
+            ]
+        )
+        XCTAssertEqual(CanvasPaperTone.paperSetupPalette.count, 6)
+        XCTAssertEqual(CanvasPaperTone.white.paperSetupPaletteChoice, .paperWhite)
+        XCTAssertEqual(CanvasPaperTone.warmWhite.paperSetupPaletteChoice, .paperWhite)
+        XCTAssertEqual(CanvasPaperTone.cream.paperSetupPaletteChoice, .paperCream)
+        XCTAssertEqual(CanvasPaperTone.lightGray.paperSetupPaletteChoice, .paperBlueGray)
+        XCTAssertEqual(CanvasPaperTone.beige.paperSetupPaletteChoice, .paperBeige)
+        XCTAssertEqual(CanvasPaperTone.darkCream.paperSetupPaletteChoice, .paperBeige)
+        XCTAssertEqual(CanvasPaperTone.blush.paperSetupPaletteChoice, .paperBeige)
+        XCTAssertEqual(CanvasPaperTone.gray.paperSetupPaletteChoice, .paperBlueGray)
+        XCTAssertEqual(CanvasPaperTone.sky.paperSetupPaletteChoice, .paperBlueGray)
+        XCTAssertEqual(CanvasPaperTone.mint.paperSetupPaletteChoice, .paperBlueGray)
+        XCTAssertEqual(CanvasPaperTone.charcoal.paperSetupPaletteChoice, .paperCharcoal)
+        XCTAssertEqual(CanvasPaperTone.midnight.paperSetupPaletteChoice, .paperCharcoal)
+        XCTAssertEqual(CanvasPaperTone.black.paperSetupPaletteChoice, .trueBlack)
+        XCTAssertEqual(CanvasPaperTemplate.default.tone, .warmWhite)
+        XCTAssertEqual(NotatePreferences.defaultPaperTemplate.tone, .paperWhite)
+    }
+
+    func testPaperSpacingSliderSnapsToExistingDensityValues() {
+        XCTAssertEqual(CanvasPaperDensity.atSliderPosition(0), .narrow)
+        XCTAssertEqual(CanvasPaperDensity.atSliderPosition(1), .standard)
+        XCTAssertEqual(CanvasPaperDensity.atSliderPosition(2), .wide)
+        XCTAssertEqual(CanvasPaperDensity.atSliderPosition(0.8), .standard)
+        XCTAssertEqual(CanvasPaperDensity.narrow.sliderPosition, 0)
+        XCTAssertEqual(CanvasPaperDensity.standard.sliderPosition, 1)
+        XCTAssertEqual(CanvasPaperDensity.wide.sliderPosition, 2)
+    }
+
+    func testPaperTemplateArtworkBuildsAllNonblankLayoutsWithinPageBounds() {
+        let pageSize = CGSize(width: 840, height: 1_188)
+        for style in CanvasPaperStyle.allCases where style != .blank {
+            let artwork = CanvasPaperTemplateArtwork.paths(
+                for: CanvasPaperTemplate(style: style),
+                pageSize: pageSize
+            )
+            XCTAssertFalse(artwork.pattern.isEmpty, "\(style.rawValue) should draw a preview")
+            let bounds = artwork.pattern.boundingBoxOfPath
+            XCTAssertGreaterThanOrEqual(bounds.minX, -0.01, "\(style.rawValue) min x")
+            XCTAssertGreaterThanOrEqual(bounds.minY, -0.01, "\(style.rawValue) min y")
+            XCTAssertLessThanOrEqual(bounds.maxX, pageSize.width + 0.01, "\(style.rawValue) max x")
+            XCTAssertLessThanOrEqual(bounds.maxY, pageSize.height + 0.01, "\(style.rawValue) max y")
+        }
+    }
+
+    @MainActor
+    func testPaperTemplateAllPagesTargetsSkipImportedAndAlreadyMatchingPages() {
+        let markup = PaperMarkup(bounds: CGRect(x: 0, y: 0, width: 840, height: 1_188))
+        let requested = CanvasPaperTemplate(style: .grid)
+        let normalPage = CanvasPageSnapshot(markup: markup)
+        let importedPage = CanvasPageSnapshot(
+            markup: markup,
+            background: .image(data: Data([0x01]), suggestedName: "Imported")
+        )
+        let matchingPage = CanvasPageSnapshot(markup: markup, paperTemplate: requested)
+
+        XCTAssertEqual(
+            CanvasEditorModel.paperTemplateTargetPageIDs(
+                in: [normalPage, importedPage, matchingPage],
+                template: requested
+            ),
+            [normalPage.id]
+        )
+    }
+
+    func testPaperTemplateCodablePreservesOlderSavedValues() throws {
+        let oldTemplateData = Data(
+            #"{"style":"music","density":"narrow","tone":"midnight"}"#.utf8
+        )
+        let decoded = try JSONDecoder().decode(CanvasPaperTemplate.self, from: oldTemplateData)
+        XCTAssertEqual(
+            decoded,
+            CanvasPaperTemplate(style: .music, density: .narrow, tone: .midnight)
+        )
+    }
+
+    @MainActor
+    func testBulkPaperTemplateChangeUndoesAndRedoesAsOneAction() {
+        let markup = PaperMarkup(bounds: CGRect(x: 0, y: 0, width: 840, height: 1_188))
+        let original = CanvasPaperTemplate(style: .ruled)
+        let firstPage = CanvasPageSnapshot(markup: markup, paperTemplate: original)
+        let secondPage = CanvasPageSnapshot(markup: markup, paperTemplate: original)
+        let requested = CanvasPaperTemplate(style: .guitarTab, density: .wide, tone: .beige)
+        var reportedChanges: [UUID: CanvasPaperTemplate] = [:]
+        let callbacks = PaperCanvasCallbacks(
+            markupChanged: { _, _ in },
+            pageReplaced: { _ in },
+            paperTemplatesChanged: { reportedChanges = $0 },
+            interactionBegan: { _ in },
+            undoAvailabilityChanged: { _, _, _ in },
+            viewportChanged: { _, _ in },
+            focusedPageChanged: { _ in }
+        )
+        let controller = PaperCanvasViewController(
+            pages: [firstPage, secondPage],
+            currentPageID: firstPage.id,
+            viewport: CanvasViewportState(),
+            inputMode: .pencilOnly,
+            callbacks: callbacks
+        )
+        controller.loadViewIfNeeded()
+        controller.view.frame = CGRect(x: 0, y: 0, width: 500, height: 800)
+        controller.view.layoutIfNeeded()
+
+        controller.setPaperTemplate(requested, forPageIDs: [firstPage.id, secondPage.id])
+        XCTAssertEqual(controller.pageSnapshotsForTesting.map(\.paperTemplate), [requested, requested])
+        XCTAssertEqual(Set(reportedChanges.keys), [firstPage.id, secondPage.id])
+
+        reportedChanges = [:]
+        controller.undo()
+        XCTAssertEqual(controller.pageSnapshotsForTesting.map(\.paperTemplate), [original, original])
+        XCTAssertEqual(Set(reportedChanges.keys), [firstPage.id, secondPage.id])
+
+        reportedChanges = [:]
+        controller.redo()
+        XCTAssertEqual(controller.pageSnapshotsForTesting.map(\.paperTemplate), [requested, requested])
+        XCTAssertEqual(Set(reportedChanges.keys), [firstPage.id, secondPage.id])
+    }
+
     @MainActor
     func testTransientPaperKitSerializationFailureIsClassifiedAndCanRetrySameGeneration() async throws {
         let root = FileManager.default.temporaryDirectory
