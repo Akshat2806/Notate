@@ -204,6 +204,90 @@ final class NotateTests: XCTestCase {
     }
 
     @MainActor
+    func testBulkPaperTemplateStressKeepsLargeNotebookPageHostsVirtualized() {
+        let pageCount = max(
+            128,
+            PaperCanvasViewController.maximumEagerPageHostCountForTesting * 4
+        )
+        let markup = PaperMarkup(bounds: CGRect(x: 0, y: 0, width: 840, height: 1_188))
+        let original = CanvasPaperTemplate(style: .ruled)
+        let pages = (0..<pageCount).map { _ in
+            CanvasPageSnapshot(markup: markup, paperTemplate: original)
+        }
+        let pageIDs = pages.map(\.id)
+        let controller = PaperCanvasViewController(
+            pages: pages,
+            currentPageID: pageIDs[0],
+            viewport: CanvasViewportState(),
+            inputMode: .pencilOnly,
+            callbacks: PaperCanvasCallbacks(
+                markupChanged: { _, _ in },
+                pageReplaced: { _ in },
+                paperTemplatesChanged: { _ in },
+                interactionBegan: { _ in },
+                undoAvailabilityChanged: { _, _, _ in },
+                viewportChanged: { _, _ in },
+                focusedPageChanged: { _ in }
+            )
+        )
+        controller.loadViewIfNeeded()
+        controller.view.frame = CGRect(x: 0, y: 0, width: 500, height: 800)
+        controller.view.layoutIfNeeded()
+
+        XCTAssertTrue(controller.virtualizesPageHostsForTesting)
+        let initiallyMountedIDs = Set(controller.mountedPageIDsForTesting)
+        let initiallyMountedHostCount = controller.mountedPageHostCountForTesting
+        XCTAssertLessThan(initiallyMountedHostCount, pageCount)
+
+        let templates = [
+            CanvasPaperTemplate(style: .grid, tone: .paperCream),
+            CanvasPaperTemplate(style: .music, tone: .paperBlueGray),
+            CanvasPaperTemplate(style: .todo, tone: .paperBeige),
+            CanvasPaperTemplate(style: .guitarTab, tone: .paperCharcoal),
+            CanvasPaperTemplate(style: .dotted, tone: .trueBlack),
+        ]
+        var currentTemplate = original
+
+        // Repeat the all-page update and its full history round trip. This
+        // exercises large page arrays while proving each operation touches
+        // only the existing viewport/history hosts instead of mounting every
+        // offscreen PaperKit controller.
+        for iteration in 0..<15 {
+            let requested = templates[iteration % templates.count]
+            controller.setPaperTemplate(requested, forPageIDs: pageIDs)
+            XCTAssertEqual(
+                controller.pageSnapshotsForTesting.map(\.paperTemplate),
+                Array(repeating: requested, count: pageCount)
+            )
+            XCTAssertEqual(controller.mountedPageHostCountForTesting, initiallyMountedHostCount)
+            XCTAssertEqual(Set(controller.mountedPageIDsForTesting), initiallyMountedIDs)
+
+            controller.undo()
+            XCTAssertEqual(
+                controller.pageSnapshotsForTesting.map(\.paperTemplate),
+                Array(repeating: currentTemplate, count: pageCount)
+            )
+            XCTAssertEqual(controller.mountedPageHostCountForTesting, initiallyMountedHostCount)
+
+            controller.redo()
+            XCTAssertEqual(
+                controller.pageSnapshotsForTesting.map(\.paperTemplate),
+                Array(repeating: requested, count: pageCount)
+            )
+            XCTAssertEqual(controller.mountedPageHostCountForTesting, initiallyMountedHostCount)
+            currentTemplate = requested
+        }
+
+        let offscreenPageID = pageIDs[pageCount - 1]
+        XCTAssertNil(controller.paperTemplateViewForTesting(pageID: offscreenPageID))
+        controller.scrollToPage(id: offscreenPageID, animated: false)
+        XCTAssertEqual(
+            controller.paperTemplateViewForTesting(pageID: offscreenPageID)?.template,
+            currentTemplate
+        )
+    }
+
+    @MainActor
     func testTransientPaperKitSerializationFailureIsClassifiedAndCanRetrySameGeneration() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("Notate-FlakyCodec-\(UUID().uuidString)", isDirectory: true)
