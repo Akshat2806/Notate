@@ -123,6 +123,9 @@ public final class CanvasEditorModel {
 
     public private(set) var launchState: LaunchState = .loading
     public private(set) var saveState: SaveState = .saved
+    /// Changes with each editor model so a reused navigation destination can
+    /// restart its view-scoped initial load for the replacement session.
+    @ObservationIgnored public let loadSessionID = UUID()
     public private(set) var toolState = CanvasToolState()
     public private(set) var overlay: CanvasOverlay = .none
     public private(set) var inputMode: CanvasInputMode = .pencilOnly
@@ -194,6 +197,7 @@ public final class CanvasEditorModel {
     @ObservationIgnored private var lastVerifiedIndexPages: [CanvasPageSnapshot]
     @ObservationIgnored private var lastVerifiedIndexGeneration: Int64 = 0
     @ObservationIgnored private var hasStarted = false
+    @ObservationIgnored private var activeLoadAttemptID: UUID?
     @ObservationIgnored private var isImageAndSelectionActive = false
     @ObservationIgnored private var previousAccessoryTool: CanvasTool = .eraser
     @ObservationIgnored private var inFlightGenerations: Set<Int64> = []
@@ -484,6 +488,9 @@ public final class CanvasEditorModel {
             },
             paperTemplateChanged: { [weak self] pageID, template in
                 self?.paperTemplateDidChange(template, on: pageID)
+            },
+            paperTemplatesChanged: { [weak self] templates in
+                self?.paperTemplatesDidChange(templates)
             },
             interactionBegan: { [weak self] pageID in
                 self?.drawingInteractionDidBegin(on: pageID)
@@ -1159,6 +1166,44 @@ public final class CanvasEditorModel {
         markDocumentChanged()
     }
 
+    public func setPaperTemplateForAllPages(_ template: CanvasPaperTemplate) {
+        guard allowsAuthoring,
+              isDurableInsertionInFlight == false,
+              pageTrashMutationsInFlight.isEmpty,
+              captureLatestControllerDocumentIfNeeded() else { return }
+
+        let targetPageIDs = Set(
+            Self.paperTemplateTargetPageIDs(in: pages, template: template)
+        )
+        let pageIndices = pages.indices.filter { targetPageIDs.contains(pages[$0].id) }
+        guard pageIndices.isEmpty == false else { return }
+
+        let pageIDs = pageIndices.map { pages[$0].id }
+        for index in pageIndices {
+            pages[index] = pages[index].replacing(paperTemplate: template)
+        }
+        initialPages = pages
+
+        if let currentIndex = indexOfCurrentPage {
+            currentPaperTemplate = pages[currentIndex].paperTemplate
+            updateLegacyInitialPage(to: pages[currentIndex])
+        }
+
+        canvasController?.setPaperTemplate(template, forPageIDs: pageIDs)
+        markDocumentChanged()
+    }
+
+    static func paperTemplateTargetPageIDs(
+        in pages: [CanvasPageSnapshot],
+        template: CanvasPaperTemplate
+    ) -> [UUID] {
+        pages.compactMap { page in
+            guard page.background.isImported == false,
+                  page.paperTemplate != template else { return nil }
+            return page.id
+        }
+    }
+
     private func declineIfPageLimitReached(addingImagePage: Bool = false) -> Bool {
         if pages.count >= Self.maximumPageCount {
             actionNotice = "This notebook has reached its limit of \(Self.maximumPageCount) pages."
@@ -1768,9 +1813,28 @@ public final class CanvasEditorModel {
             return
         }
 
+        let attemptID = UUID()
+        activeLoadAttemptID = attemptID
+        defer {
+            if activeLoadAttemptID == attemptID {
+                activeLoadAttemptID = nil
+            }
+        }
+
         async let documentResult = checkpointStore.load()
         async let storedPreferences = preferencesStore.load()
         let (document, preferences) = await (documentResult, storedPreferences)
+
+        // SwiftUI cancels view-scoped tasks when an editor is dismissed or
+        // replaced. Cancellation says nothing about checkpoint integrity, so
+        // keep it out of the recovery screen and let a later appearance start
+        // a fresh read.
+        guard activeLoadAttemptID == attemptID else { return }
+        if Task.isCancelled || document == .cancelled {
+            hasStarted = false
+            launchState = .loading
+            return
+        }
 
         // The preferences projection enforces Pen as the active launch tool
         // while retaining the remembered Pen and Brush family members.
@@ -1864,6 +1928,10 @@ public final class CanvasEditorModel {
 
         case let .failed(error):
             launchState = .failed(error.localizedDescription)
+
+        case .cancelled:
+            hasStarted = false
+            launchState = .loading
         }
     }
 
@@ -2075,6 +2143,30 @@ public final class CanvasEditorModel {
         initialPages = pages
         if pageID == currentPageID {
             currentPaperTemplate = template
+            updateLegacyInitialPage(to: pages[index])
+        }
+        markDocumentChanged()
+    }
+
+    private func paperTemplatesDidChange(
+        _ templates: [UUID: CanvasPaperTemplate]
+    ) {
+        guard isReaderMode == false,
+              isReaderModeTransitioning == false else { return }
+
+        var changedPageIDs: Set<UUID> = []
+        for (pageID, template) in templates {
+            guard let index = pages.firstIndex(where: { $0.id == pageID }),
+                  pages[index].paperTemplate != template else { continue }
+            pages[index] = pages[index].replacing(paperTemplate: template)
+            changedPageIDs.insert(pageID)
+        }
+        guard changedPageIDs.isEmpty == false else { return }
+
+        initialPages = pages
+        if let index = indexOfCurrentPage,
+           changedPageIDs.contains(pages[index].id) {
+            currentPaperTemplate = pages[index].paperTemplate
             updateLegacyInitialPage(to: pages[index])
         }
         markDocumentChanged()

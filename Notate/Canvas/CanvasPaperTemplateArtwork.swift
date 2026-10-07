@@ -22,24 +22,86 @@ enum CanvasPaperTemplateArtwork {
         alpha: 0.82
     )
 
+    private static let goodnotesRuleColor = CGColor(
+        srgbRed: 209 / 255,
+        green: 211 / 255,
+        blue: 212 / 255,
+        alpha: 1
+    )
+
+    private static let goodnotesGuideColor = CGColor(
+        srgbRed: 174 / 255,
+        green: 177 / 255,
+        blue: 179 / 255,
+        alpha: 1
+    )
+
+    private static let boardRuleColor = CGColor(
+        srgbRed: 91 / 255,
+        green: 117 / 255,
+        blue: 101 / 255,
+        alpha: 1
+    )
+
+    private static let blueprintRuleColor = CGColor(
+        srgbRed: 77 / 255,
+        green: 112 / 255,
+        blue: 140 / 255,
+        alpha: 1
+    )
+
     static func ruleColor(for tone: CanvasPaperTone) -> CGColor {
-        guard tone.isDark else { return ruleColor }
-        return CGColor(
-            srgbRed: 190 / 255,
-            green: 204 / 255,
-            blue: 224 / 255,
-            alpha: 0.48
-        )
+        switch tone {
+        case .paperWhite, .goodnotesYellow, .gray, .lightGrayPaper, .lightBeige,
+             .beigePaper, .darkBeige, .paperGray, .paperCream, .paperBeige,
+             .paperBlueGray:
+            return goodnotesRuleColor
+        case .trueBlack:
+            return CGColor(srgbRed: 27 / 255, green: 27 / 255, blue: 29 / 255, alpha: 1)
+        case .boardGreen:
+            return boardRuleColor
+        case .blueprintBlue:
+            return blueprintRuleColor
+        case .paperCharcoal:
+            return CGColor(srgbRed: 78 / 255, green: 78 / 255, blue: 78 / 255, alpha: 1)
+        case .white, .warmWhite, .cream, .lightGray, .blush, .sky, .mint,
+             .charcoal, .midnight, .black, .darkCream, .beige, .lightBlue, .blue,
+             .goodnotesDark:
+            guard tone.isDark else { return ruleColor }
+            return CGColor(
+                srgbRed: 190 / 255,
+                green: 204 / 255,
+                blue: 224 / 255,
+                alpha: 0.48
+            )
+        }
     }
 
     static func guideColor(for tone: CanvasPaperTone) -> CGColor {
-        guard tone.isDark else { return guideColor }
-        return CGColor(
-            srgbRed: 213 / 255,
-            green: 222 / 255,
-            blue: 237 / 255,
-            alpha: 0.66
-        )
+        switch tone {
+        case .paperWhite, .goodnotesYellow, .gray, .lightGrayPaper, .lightBeige,
+             .beigePaper, .darkBeige, .paperGray, .paperCream, .paperBeige,
+             .paperBlueGray:
+            return goodnotesGuideColor
+        case .trueBlack:
+            return CGColor(srgbRed: 27 / 255, green: 27 / 255, blue: 29 / 255, alpha: 1)
+        case .boardGreen:
+            return CGColor(srgbRed: 150 / 255, green: 171 / 255, blue: 157 / 255, alpha: 1)
+        case .blueprintBlue:
+            return CGColor(srgbRed: 143 / 255, green: 174 / 255, blue: 198 / 255, alpha: 1)
+        case .paperCharcoal:
+            return CGColor(srgbRed: 125 / 255, green: 125 / 255, blue: 125 / 255, alpha: 1)
+        case .white, .warmWhite, .cream, .lightGray, .blush, .sky, .mint,
+             .charcoal, .midnight, .black, .darkCream, .beige, .lightBlue, .blue,
+             .goodnotesDark:
+            guard tone.isDark else { return guideColor }
+            return CGColor(
+                srgbRed: 213 / 255,
+                green: 222 / 255,
+                blue: 237 / 255,
+                alpha: 0.66
+            )
+        }
     }
 
     static func paths(
@@ -93,7 +155,12 @@ enum CanvasPaperTemplateArtwork {
                     intersecting: renderBounds.minY...renderBounds.maxY
                 )
                 : []
-        } else if template.style == .music {
+        } else if [
+            .music,
+            .guitarScore,
+            .guitarTab,
+            .monthlyPlanner,
+        ].contains(template.style) {
             horizontalRules = []
         } else {
             horizontalRules = visibleCenteredPositions(
@@ -205,6 +272,184 @@ enum CanvasPaperTemplateArtwork {
                     pattern.addLine(to: CGPoint(x: renderBounds.maxX, y: y))
                 }
             }
+        case .legal:
+            appendRules(
+                pattern,
+                positions: horizontalRules,
+                fromX: renderBounds.minX,
+                toX: renderBounds.maxX
+            )
+            appendVerticalGuide(
+                guides,
+                x: pageSize.width * 0.12,
+                fromY: renderBounds.minY,
+                toY: renderBounds.maxY,
+                visibleRect: renderBounds
+            )
+        case .singleColumn:
+            let leading = pageSize.width * 0.09
+            let trailing = pageSize.width * 0.91
+            appendRules(pattern, positions: horizontalRules, fromX: leading, toX: trailing)
+            appendVerticalGuide(
+                guides,
+                x: leading,
+                fromY: renderBounds.minY,
+                toY: renderBounds.maxY,
+                visibleRect: renderBounds
+            )
+            appendVerticalGuide(
+                guides,
+                x: trailing,
+                fromY: renderBounds.minY,
+                toY: renderBounds.maxY,
+                visibleRect: renderBounds
+            )
+        case .mixed:
+            let cueX = pageSize.width * 0.24
+            appendRules(
+                pattern,
+                positions: horizontalRules,
+                fromX: cueX,
+                toX: pageSize.width * 0.94
+            )
+            appendVerticalGuide(
+                guides,
+                x: cueX,
+                fromY: renderBounds.minY,
+                toY: renderBounds.maxY,
+                visibleRect: renderBounds
+            )
+        case .twoColumnLeft:
+            let leading = pageSize.width * 0.06
+            let divider = pageSize.width * 0.61
+            let trailing = pageSize.width * 0.94
+            appendRules(
+                pattern,
+                positions: horizontalRules,
+                fromX: leading,
+                toX: divider - pageSize.width * 0.025
+            )
+            appendRules(
+                pattern,
+                positions: horizontalRules,
+                fromX: divider + pageSize.width * 0.025,
+                toX: trailing
+            )
+            appendVerticalGuide(
+                guides,
+                x: divider,
+                fromY: renderBounds.minY,
+                toY: renderBounds.maxY,
+                visibleRect: renderBounds
+            )
+        case .threeColumn:
+            let leading = pageSize.width * 0.045
+            let first = pageSize.width / 3
+            let second = pageSize.width * 2 / 3
+            let trailing = pageSize.width * 0.955
+            appendRules(
+                pattern,
+                positions: horizontalRules,
+                fromX: leading,
+                toX: first - pageSize.width * 0.018
+            )
+            appendRules(
+                pattern,
+                positions: horizontalRules,
+                fromX: first + pageSize.width * 0.018,
+                toX: second - pageSize.width * 0.018
+            )
+            appendRules(
+                pattern,
+                positions: horizontalRules,
+                fromX: second + pageSize.width * 0.018,
+                toX: trailing
+            )
+            appendVerticalGuide(
+                guides,
+                x: first,
+                fromY: renderBounds.minY,
+                toY: renderBounds.maxY,
+                visibleRect: renderBounds
+            )
+            appendVerticalGuide(
+                guides,
+                x: second,
+                fromY: renderBounds.minY,
+                toY: renderBounds.maxY,
+                visibleRect: renderBounds
+            )
+        case .todo:
+            let checkboxSize = min(template.density.spacing * 0.58, pageSize.width * 0.055)
+            let checkboxX = pageSize.width * 0.09
+            let firstTextX = pageSize.width * 0.20
+            let ys = visibleCenteredPositions(
+                in: 0...pageSize.height,
+                spacing: template.density.spacing,
+                intersecting: renderBounds.minY...renderBounds.maxY
+            )
+            for y in ys {
+                let box = CGRect(
+                    x: checkboxX,
+                    y: y - checkboxSize / 2,
+                    width: checkboxSize,
+                    height: checkboxSize
+                )
+                if box.intersects(renderBounds) {
+                    pattern.addRect(box)
+                }
+                pattern.move(to: CGPoint(x: firstTextX, y: y))
+                pattern.addLine(to: CGPoint(x: pageSize.width * 0.94, y: y))
+            }
+        case .monthlyPlanner:
+            appendMonthlyPlannerGrid(
+                pattern,
+                pageSize: pageSize,
+                visibleRect: renderBounds
+            )
+        case .guitarScore:
+            appendGuitarScore(
+                pattern,
+                pageSize: pageSize,
+                visibleRect: renderBounds,
+                density: template.density
+            )
+        case .guitarTab:
+            appendGuitarTab(
+                pattern,
+                pageSize: pageSize,
+                visibleRect: renderBounds,
+                density: template.density
+            )
+        case .manuscript:
+            let left = pageSize.width * 0.13
+            let right = pageSize.width * 0.87
+            let headerY = pageSize.height * 0.10
+            let writingTop = pageSize.height * 0.15
+            let writingRules = visibleCenteredPositions(
+                in: writingTop...pageSize.height * 0.94,
+                spacing: template.density.spacing,
+                intersecting: renderBounds.minY...renderBounds.maxY
+            )
+            appendRules(pattern, positions: writingRules, fromX: left, toX: right)
+            appendVerticalGuide(
+                guides,
+                x: pageSize.width * 0.09,
+                fromY: renderBounds.minY,
+                toY: renderBounds.maxY,
+                visibleRect: renderBounds
+            )
+            appendVerticalGuide(
+                guides,
+                x: pageSize.width * 0.91,
+                fromY: renderBounds.minY,
+                toY: renderBounds.maxY,
+                visibleRect: renderBounds
+            )
+            if renderBounds.minY...renderBounds.maxY ~= headerY {
+                guides.move(to: CGPoint(x: left, y: headerY))
+                guides.addLine(to: CGPoint(x: right, y: headerY))
+            }
         }
 
         return Paths(
@@ -212,6 +457,113 @@ enum CanvasPaperTemplateArtwork {
             guides: guides,
             fillsPattern: template.style == .dotted
         )
+    }
+
+    private static func appendRules(
+        _ path: CGMutablePath,
+        positions: [CGFloat],
+        fromX: CGFloat,
+        toX: CGFloat
+    ) {
+        guard fromX < toX else { return }
+        for y in positions {
+            path.move(to: CGPoint(x: fromX, y: y))
+            path.addLine(to: CGPoint(x: toX, y: y))
+        }
+    }
+
+    private static func appendVerticalGuide(
+        _ path: CGMutablePath,
+        x: CGFloat,
+        fromY: CGFloat,
+        toY: CGFloat,
+        visibleRect: CGRect
+    ) {
+        guard visibleRect.minX...visibleRect.maxX ~= x,
+              fromY < toY else { return }
+        path.move(to: CGPoint(x: x, y: fromY))
+        path.addLine(to: CGPoint(x: x, y: toY))
+    }
+
+    private static func appendMonthlyPlannerGrid(
+        _ path: CGMutablePath,
+        pageSize: CGSize,
+        visibleRect: CGRect
+    ) {
+        let left = pageSize.width * 0.06
+        let right = pageSize.width * 0.94
+        let top = pageSize.height * 0.16
+        let bottom = pageSize.height * 0.94
+        let header = pageSize.height * 0.11
+        guard pageSize.width > 0, pageSize.height > 0 else { return }
+
+        if visibleRect.minY...visibleRect.maxY ~= header {
+            path.move(to: CGPoint(x: left, y: header))
+            path.addLine(to: CGPoint(x: right, y: header))
+        }
+        for column in 0...7 {
+            let x = left + (right - left) * CGFloat(column) / 7
+            guard visibleRect.minX...visibleRect.maxX ~= x else { continue }
+            path.move(to: CGPoint(x: x, y: top))
+            path.addLine(to: CGPoint(x: x, y: bottom))
+        }
+        for row in 0...6 {
+            let y = top + (bottom - top) * CGFloat(row) / 6
+            guard visibleRect.minY...visibleRect.maxY ~= y else { continue }
+            path.move(to: CGPoint(x: left, y: y))
+            path.addLine(to: CGPoint(x: right, y: y))
+        }
+    }
+
+    private static func appendGuitarScore(
+        _ path: CGMutablePath,
+        pageSize: CGSize,
+        visibleRect: CGRect,
+        density: CanvasPaperDensity
+    ) {
+        let lineGap = max(density.spacing / 4, 2)
+        let groupHeight = lineGap * 10
+        let groupStride = density.spacing * 2.7
+        let tops = visibleCenteredPositions(
+            in: 0...max(pageSize.height - groupHeight, 0),
+            spacing: groupStride,
+            intersecting: (visibleRect.minY - groupHeight)...visibleRect.maxY
+        )
+        for top in tops {
+            for line in 0..<5 {
+                let y = top + CGFloat(line) * lineGap
+                path.move(to: CGPoint(x: visibleRect.minX, y: y))
+                path.addLine(to: CGPoint(x: visibleRect.maxX, y: y))
+            }
+            for line in 0..<6 {
+                let y = top + lineGap * 5 + CGFloat(line) * lineGap
+                path.move(to: CGPoint(x: visibleRect.minX, y: y))
+                path.addLine(to: CGPoint(x: visibleRect.maxX, y: y))
+            }
+        }
+    }
+
+    private static func appendGuitarTab(
+        _ path: CGMutablePath,
+        pageSize: CGSize,
+        visibleRect: CGRect,
+        density: CanvasPaperDensity
+    ) {
+        let lineGap = max(density.spacing / 5, 2)
+        let groupHeight = lineGap * 5
+        let groupStride = density.spacing * 2.8
+        let tops = visibleCenteredPositions(
+            in: 0...max(pageSize.height - groupHeight, 0),
+            spacing: groupStride,
+            intersecting: (visibleRect.minY - groupHeight)...visibleRect.maxY
+        )
+        for top in tops {
+            for line in 0..<6 {
+                let y = top + CGFloat(line) * lineGap
+                path.move(to: CGPoint(x: visibleRect.minX, y: y))
+                path.addLine(to: CGPoint(x: visibleRect.maxX, y: y))
+            }
+        }
     }
 
     /// Returns only the authored lattice positions that can intersect the

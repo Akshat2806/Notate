@@ -17,8 +17,8 @@ enum NotateAppRoute: Hashable, Sendable {
     case tag(UUID)
     case trash
     case settings
-    case notebook(UUID)
-    case document(UUID)
+    case notebook(UUID, sessionID: UUID)
+    case document(UUID, sessionID: UUID)
     case attachment(UUID)
 }
 
@@ -842,7 +842,7 @@ final class NotateApplicationCoordinator {
         switch saveState {
         case let .failed(description):
             alertMessage = description
-        case .saving:
+        case .saving, .retrying(_):
             alertMessage = "The latest canvas edit is still being saved. Try closing the note again."
         case .saved:
             break
@@ -1118,13 +1118,15 @@ final class NotateApplicationCoordinator {
                 librarySession.selectScope(.folder(item.id))
                 synchronizeRoute(with: librarySession.scope)
             case .notebook:
-                activeEditor = makeActiveEditor(for: item)
-                route = .notebook(item.id)
+                let editor = makeActiveEditor(for: item)
+                activeEditor = editor
+                route = .notebook(item.id, sessionID: editor.model.loadSessionID)
             case .canvas, .legacyTypedNote:
                 throw LibraryAssetStoreError.itemNotFound(item.id)
             case .importedDocument:
-                activeEditor = makeActiveEditor(for: item)
-                route = .document(item.id)
+                let editor = makeActiveEditor(for: item)
+                activeEditor = editor
+                route = .document(item.id, sessionID: editor.model.loadSessionID)
             case .attachment:
                 guard let filename = item.sourceFilename else {
                     throw LibraryAssetStoreError.itemNotFound(item.id)
@@ -1462,6 +1464,8 @@ final class NotateApplicationCoordinator {
             throw CanvasCoreStoreError.invalidSnapshot(
                 "The notebook has no saved pages to update."
             )
+        case .cancelled:
+            throw CancellationError()
         case let .failed(error):
             throw error
         }
@@ -1706,6 +1710,8 @@ final class NotateApplicationCoordinator {
             throw CanvasCoreStoreError.invalidSnapshot(
                 "The page's document is no longer available."
             )
+        case .cancelled:
+            throw CancellationError()
         case let .failed(error):
             throw error
         }
@@ -1767,7 +1773,11 @@ final class NotateApplicationCoordinator {
             )
             do {
                 try await store.checkpoint(restoredSnapshot)
-                guard case let .restored(verified) = await store.load(),
+                let verificationLoad = await store.load()
+                if case .cancelled = verificationLoad {
+                    throw CancellationError()
+                }
+                guard case let .restored(verified) = verificationLoad,
                     verified.generation == publishedGeneration,
                     verified.pages.contains(where: { $0.id == page.id }) else {
                     throw CanvasCoreStoreError.verificationFailed(
@@ -1791,7 +1801,9 @@ final class NotateApplicationCoordinator {
                 currentPageID: rollbackCurrentPageID
             )
             try await store.checkpoint(rollbackSnapshot)
-            guard case let .restored(verifiedRollback) = await store.load(),
+            let rollbackLoad = await store.load()
+            if case .cancelled = rollbackLoad { throw CancellationError() }
+            guard case let .restored(verifiedRollback) = rollbackLoad,
                 verifiedRollback.generation == rollbackSnapshot.generation,
                 verifiedRollback.pages.contains(where: { $0.id == page.id }) == false else {
                 throw CanvasCoreStoreError.verificationFailed(
@@ -2407,6 +2419,7 @@ final class NotateApplicationCoordinator {
         guard compatibilityDerivedRefreshIsCurrent(claim, itemID: itemID) else {
             return false
         }
+        if case .cancelled = loadResult { return false }
         guard case let .restored(head) = loadResult else {
             if fencesPublishedProjectionOnMismatch {
                 _ = await failCloseCompatibilityDerivedProjection(
@@ -2762,6 +2775,11 @@ final class NotateApplicationCoordinator {
                 }
             }
             return true
+        } catch is CancellationError {
+            // A view-scoped startup task may be replaced while recovery is
+            // reading Canvas Core. Leave its journal intact and let the next
+            // startup resume instead of treating cancellation as corruption.
+            return false
         } catch {
             enterCatalogFailure("""
             Notate found interrupted library cleanup that it could not reconcile safely, so editing is disabled and every recovery copy was preserved. Quit and reopen Notate, then
@@ -2812,6 +2830,8 @@ final class NotateApplicationCoordinator {
             )
         case .newDocument:
             try await assetStore.restoreRecoveryTransaction(transaction)
+        case .cancelled:
+            throw CancellationError()
         case let .failed(error):
             throw error
         }
@@ -3001,6 +3021,8 @@ final class NotateApplicationCoordinator {
                 throw CanvasCoreStoreError.verificationFailed(
                     "A verified checkpoint is required before permanently deleting a page."
                 )
+            case .cancelled:
+                throw CancellationError()
             case let .failed(error):
                 throw error
             }
@@ -3227,7 +3249,9 @@ final class NotateApplicationCoordinator {
                     let migratedStore = CanvasCoreStore(
                         rootURL: assetStore.directories(for: itemID).canvas
                     )
-                    if case .restored = await migratedStore.load() {
+                    let existingLoad = await migratedStore.load()
+                    if case .cancelled = existingLoad { return }
+                    if case .restored = existingLoad {
                         try await migrationCoordinator.markCompleted(itemID: itemID)
                         return
                     }
@@ -3237,7 +3261,9 @@ final class NotateApplicationCoordinator {
                 return
             }
             let legacyStore = CanvasCoreStore(rootURL: candidate.legacyDirectory)
-            guard case let .restored(snapshot) = await legacyStore.load() else {
+            let legacyLoad = await legacyStore.load()
+            if case .cancelled = legacyLoad { return }
+            guard case let .restored(snapshot) = legacyLoad else {
                 try await migrationCoordinator.markDeferred(
                     reason: "The previous canvas could not be verified."
                 )
@@ -3288,7 +3314,9 @@ final class NotateApplicationCoordinator {
                 let migratedStore = CanvasCoreStore(
                     rootURL: assetStore.directories(for: item.id).canvas
                 )
-                guard case .restored = await migratedStore.load() else {
+                let copiedLoad = await migratedStore.load()
+                if case .cancelled = copiedLoad { throw CancellationError() }
+                guard case .restored = copiedLoad else {
                     throw CanvasCoreStoreError.verificationFailed(
                         "The copied legacy notebook did not reopen."
                     )
@@ -3514,8 +3542,10 @@ struct NotateRootView: View {
     @ViewBuilder
     private func editorDestination(for route: NotateAppRoute) -> some View {
         switch route {
-        case let .notebook(itemID), let .document(itemID):
-            if let editor = application.activeEditor, editor.itemID == itemID {
+        case let .notebook(itemID, sessionID), let .document(itemID, sessionID):
+            if let editor = application.activeEditor,
+                editor.itemID == itemID,
+                editor.model.loadSessionID == sessionID {
                 NotateCanvasEditorDestination(
                     editor: editor,
                     transitionNamespace: editorTransitionNamespace,
@@ -3535,9 +3565,14 @@ struct NotateRootView: View {
                         )
                     },
                     onDidDisappear: {
-                        finishClosing(route, itemID: editor.itemID)
+                        finishClosing(
+                            route,
+                            itemID: editor.itemID,
+                            sessionID: editor.model.loadSessionID
+                        )
                     }
                 )
+                .id(editor.model.loadSessionID)
             } else {
                 missingDestination(for: route)
             }
@@ -3580,11 +3615,21 @@ struct NotateRootView: View {
         application.closeActiveItem(beforeNavigation: beforeNavigation)
     }
 
-    private func finishClosing(_ route: NotateAppRoute, itemID: UUID) {
+    private func finishClosing(
+        _ route: NotateAppRoute,
+        itemID: UUID,
+        sessionID: UUID? = nil
+    ) {
         guard editorNavigationPath.contains(route) == false else { return }
-        let activeItemID = application.activeEditor?.itemID
-            ?? application.activeAttachment?.itemID
-        guard activeItemID == itemID else { return }
+        if let sessionID {
+            guard let editor = application.activeEditor,
+                editor.itemID == itemID,
+                editor.model.loadSessionID == sessionID else { return }
+        } else {
+            let activeItemID = application.activeEditor?.itemID
+                ?? application.activeAttachment?.itemID
+            guard activeItemID == itemID else { return }
+        }
         application.closeActiveItem()
     }
 
@@ -3638,7 +3683,7 @@ private struct NotateCatalogUnavailableView: View {
 private extension NotateAppRoute {
     var editorItemID: UUID? {
         switch self {
-        case let .notebook(id), let .document(id), let .attachment(id):
+        case let .notebook(id, _), let .document(id, _), let .attachment(id):
             id
         case .home, .folder, .favorites, .recent, .tag, .trash, .settings:
             nil
