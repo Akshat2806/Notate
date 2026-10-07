@@ -4364,18 +4364,17 @@ private func performPaperTemplateChanges(
     guard isReaderModeEnabled == false,
           requestedTemplates.isEmpty == false else { return }
 
-    let changedPages = pages.compactMap {
-        page -> (UUID, CanvasPaperTemplate, CanvasPaperTemplate, PageHost)? in
+    let changedPages = pages.enumerated().compactMap {
+        index, page -> (UUID, Int, CanvasPaperTemplate, CanvasPaperTemplate)? in
         guard let requested = requestedTemplates[page.id],
-              page.paperTemplate != requested,
-              let host = ensurePageHostMounted(for: page.id) else { return nil }
-        return (page.id, page.paperTemplate, requested, host)
+              page.paperTemplate != requested else { return nil }
+        return (page.id, index, page.paperTemplate, requested)
     }
     guard changedPages.isEmpty == false else { return }
 
     if registersUndo {
         let previousTemplates = Dictionary(
-            uniqueKeysWithValues: changedPages.map { ($0.0, $0.1) }
+            uniqueKeysWithValues: changedPages.map { ($0.0, $0.2) }
         )
         registerAppOwnedUndo(
             pageID: focusedPageID,
@@ -4389,11 +4388,15 @@ private func performPaperTemplateChanges(
     }
 
     var appliedTemplates: [UUID: CanvasPaperTemplate] = [:]
-    for (pageID, _, template, host) in changedPages {
-        guard let index = pages.firstIndex(where: { $0.id == pageID }) else { continue }
+    for (pageID, index, _, template) in changedPages {
         pages[index] = pages[index].replacing(paperTemplate: template)
-        host.contentView.template = template
-        host.decorationView.template = template
+        // Large notebooks keep most PaperKit controllers unmounted. The page
+        // snapshot is canonical, so only refresh an existing host; `mountPage`
+        // will read the new template when an offscreen page enters the window.
+        if let host = hostsByPageID[pageID] {
+            host.contentView.template = template
+            host.decorationView.template = template
+        }
         appliedTemplates[pageID] = template
     }
     guard appliedTemplates.isEmpty == false else { return }
