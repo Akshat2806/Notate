@@ -61,7 +61,7 @@ public enum LibraryCoverPreset: String, CaseIterable, Codable, Hashable, Identif
 public enum LibraryCoverChoice: Codable, Equatable, Hashable, Sendable {
     /// Render the first page when available, then fall back to generated artwork.
     case automatic
-    /// Keep the notebook's first page for notes and use a neutral shelf mark.
+    /// Use the first-page thumbnail when available without adding a designed cover.
     case noCover
     case preset(LibraryCoverPreset)
     /// A path relative to the item's asset directory. Absolute paths are never persisted.

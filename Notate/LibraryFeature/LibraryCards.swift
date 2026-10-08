@@ -1270,7 +1270,7 @@ enum LibraryArtworkResolver {
         thumbnailData: Data?,
         generatedFallback: LibraryGeneratedTitleFallback
     ) -> LibraryArtworkResolution {
-        guard coverChoice == .automatic else {
+        guard coverChoice == .automatic || coverChoice == .noCover else {
             return .explicitCover(coverChoice)
         }
         guard let thumbnailData, isValidThumbnailData(thumbnailData) else {
