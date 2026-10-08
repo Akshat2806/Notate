@@ -6,8 +6,8 @@ import UIKit
 /// PaperKit's native zoom determines how many physical pixels it allocates
 /// internally. Freeform boards grow without bound so the basis is kept
 /// independent of zoom and low enough that a 2x display's live surface
-/// stays inside Metal's texture dimension limits. Paged documents are
-/// authored at a 1× PaperKit scale and share one scroll view.
+/// stays inside Metal's texture dimension limits. Paged documents raise their
+/// PaperKit basis at settled high zoom, within a separate page-surface budget.
 ///
 /// Callers combine this value with UIScrollView's zoomScale separately.
 enum CanvasLiveRenderScale {
@@ -16,25 +16,26 @@ enum CanvasLiveRenderScale {
     static let maximumSurfacePixelDimension: CGFloat = 3_072
     static let pressuredSurfacePixelDimension: CGFloat = 2_048
 
-    /// Paged documents normally remain at their authored 1x PaperKit basis.
-    ///  Oversized imported pages may still be reduced to stay within this
-    ///  bounded live-surface budget.
-    static let pagedMaximumSurfacePixelDimension: CGFloat = 2_560
-    static let pagedMaximumNativeScale: CGFloat = 1
+    /// Paged pages can move to a sharper native basis at high zoom. The cap
+    /// leaves room for PaperKit's additional Metal layers on ordinary pages.
+    static let pagedMaximumSurfacePixelDimension: CGFloat = 4_096
+    static let pagedMaximumNativeScale: CGFloat = 2
 
     /// PaperKit rebuilds its entire tiled hierarchy whenever its native zoom
     ///  changes. Freeform boards can grow to tens of thousands of points, so
     ///  a quantized-mantissa ladder stops excessive rebuilds while keeping the
-    ///  basis as close to 1 as geometry allows. The ladder repeats at every
+    ///  basis close to the requested zoom. The ladder repeats at every
     ///  power-of-two exponent so the list itself stays short.
     ///
     private static let renderScaleMantissas: [CGFloat] = [1, 0.75, 0.5, 0.375]
 
     private static func quantizedScale(notExceeding upperBound: CGFloat) -> CGFloat {
         guard upperBound.isFinite, upperBound > 0 else { return 0.0001 }
-        if upperBound >= 1 { return 1 }
 
         var exponentScale: CGFloat = 1
+        while exponentScale < upperBound {
+            exponentScale *= 2
+        }
         while exponentScale > 0.0001 {
             for mantissa in renderScaleMantissas {
                 let candidate = exponentScale * mantissa
@@ -86,14 +87,18 @@ enum CanvasLiveRenderScale {
                 notExceeding: min(CanvasConstants.defaultZoomScale, geometryLimitedScale)
             )
         case .paged:
-            // Keep normal pages at one native PaperKit scale across the whole
-            // 50-1000% presentation range. This prevents held-to-shape ink
-            // from being re-tessellated when a pinch settles. Only geometry or
-            // memory pressure may lower the basis for an oversized page.
+            // Re-render at a higher PaperKit basis when zoomed in, so settled
+            // strokes do not rely on magnifying the original 1x surface.
+            // Page dimensions and the native-scale cap keep the extra detail
+            // within a bounded surface budget.
+            let zoomLimitedScale = min(
+                max(logicalZoomScale.isFinite ? logicalZoomScale : 1, 1),
+                pagedMaximumNativeScale
+            )
             return quantizedScale(
                 notExceeding: min(
                     geometryLimitedScale,
-                    pagedMaximumNativeScale
+                    zoomLimitedScale
                 )
             )
         }
