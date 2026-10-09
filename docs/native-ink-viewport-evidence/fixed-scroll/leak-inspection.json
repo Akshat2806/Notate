@@ -1,0 +1,14 @@
+{
+  "trace": "/tmp/notate-fixed-scroll-profiles/fixed-scroll-leaks.trace",
+  "device": "iPad Air (5th generation), M1",
+  "os": "27.0 (24A437)",
+  "durationSeconds": 45.840968,
+  "applicationBuild": "Release (profiling enabled), code coverage disabled",
+  "workload": "Constant 50% vertical scrolling of the dedicated saved 1,000-page notebook; first 45 seconds of the paced workload",
+  "inspection": "Instruments UI Leaks track; two green successful checks, empty Leaked Object table, snapshot status Idle",
+  "detectedLeaks": 0,
+  "successfulChecksObserved": 2,
+  "persistentIOSurfaceCount": 9,
+  "persistentIOSurfaceMiB": 16.39,
+  "limitation": "Limited scans of this workload; no claim of universal absence of leaks or retain cycles. Instrumented allocation values are distinct from uninstrumented process-footprint samples."
+}

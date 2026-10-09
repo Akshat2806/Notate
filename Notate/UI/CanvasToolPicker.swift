@@ -54,12 +54,11 @@ private extension View {
     }
 }
 
-/// The editor's tool bar and, when a tool is tapped a second time, a compact
-/// glass panel for it.
+/// The editor's tool bar and compact option panels for configurable tools.
 ///
 /// The bar is one control row: `Undo Redo | Lasso Pen Pencil Brush Highlighter
-/// | Eraser Ruler Laser | +`. The panel is rendered separately (as an overlay
-/// beneath the bar) so opening or closing it never changes the canvas inset.
+/// | Eraser Ruler Laser | +`. Tool panels are rendered separately (as an
+/// overlay beneath the bar) so opening or closing them never changes the inset.
 public struct CanvasToolPicker: View {
     /// Name of the coordinate space the editor gives the chrome; the bar
     /// reports its controls' frames in it.
@@ -155,8 +154,6 @@ public struct CanvasToolPicker: View {
     @AccessibilityFocusState private var focusedShape: CanvasShape?
     @AccessibilityFocusState private var focusedTableSize: CanvasTableSize?
     @AccessibilityFocusState private var isTableStepperFocused: Bool
-    @AccessibilityFocusState private var focusedGeometryTool: CanvasGeometryTool?
-    @AccessibilityFocusState private var isGeometrySlotFocused: Bool
 
     @FocusState private var keyboardFocusedTableSize: CanvasTableSize?
 
@@ -318,11 +315,9 @@ private var barRow: some View {
         .help("Add content")
     }
 
-    /// First tap turns the ruler on; tapping again opens the instrument panel
-    /// (Ruler, Protractor, Compass).
+    /// PaperKit owns the ruler interaction; each tap toggles it directly.
     private var rulerButton: some View {
         let isActive = activeGeometryTool != nil
-        let isExpanded = overlay == .geometryTools
 
         return Button {
             onIntent(.tapGeometryToolSlot)
@@ -337,32 +332,16 @@ private var barRow: some View {
                     selectedToolbarBackground
                 }
             }
-            .overlay(alignment: .topTrailing) {
-                if isActive {
-                    chevron(isExpanded: isExpanded)
-                        .padding(.top, 3)
-                        .padding(.trailing, 3)
-                }
-            }
             .contentShape(Rectangle())
         }
         .buttonStyle(CanvasCrispToolButtonStyle(reduceMotion: reduceMotion))
         .reportsToolFrame("ruler")
-        .accessibilityFocused($isGeometrySlotFocused)
         .accessibilityLabel("Ruler")
-        .accessibilityValue(
-            isActive
-                ? "\((activeGeometryTool ?? preferredGeometryTool).title) on, options \(isExpanded ? "expanded" : "collapsed")"
-                : "Off"
-        )
-        .accessibilityHint(
-            isActive
-                ? "Double tap to \(isExpanded ? "hide" : "show") the ruler, protractor and compass"
-                : "Turns on the \(preferredGeometryTool.title.lowercased())"
-        )
+        .accessibilityValue(isActive ? "On" : "Off")
+        .accessibilityHint(isActive ? "Turns off the ruler" : "Turns on the ruler")
         .accessibilityAddTraits(isActive ? .isSelected : [])
         .accessibilityIdentifier("canvas.geometry.slot")
-        .help("Ruler, protractor and compass")
+        .help("Ruler")
     }
 
     private func chevron(isExpanded: Bool) -> some View {
@@ -515,8 +494,6 @@ private var barRow: some View {
         switch overlay {
         case .toolOptions(let tool) where tool.supportsOptions:
             panelSurface(width: PanelMetrics.contentWidth) { toolPanelLines(for: tool) }
-        case .geometryTools:
-            panelSurface(width: PanelMetrics.contentWidth) { geometryLine }
         case .insert:
             panelSurface(width: nil) { insertRow }
         case .shapes:
@@ -797,59 +774,6 @@ private var barRow: some View {
         .frame(height: PanelMetrics.lineHeight)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Laser style")
-    }
-
-    // MARK: Ruler panel
-
-    private var geometryLine: some View {
-        let segment = PanelMetrics.contentWidth / CGFloat(CanvasGeometryTool.allCases.count)
-
-        return HStack(spacing: 0) {
-            ForEach(CanvasGeometryTool.allCases, id: \.self) { tool in
-                geometrySegment(tool, width: segment)
-            }
-        }
-        .frame(height: PanelMetrics.lineHeight)
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("Geometry tools")
-        .accessibilityIdentifier("canvas.geometry.picker")
-    }
-
-    private func geometrySegment(_ tool: CanvasGeometryTool, width: CGFloat) -> some View {
-        let isActive = activeGeometryTool == tool
-
-        return Button {
-            onIntent(.toggleGeometryTool(tool))
-            UIAccessibility.post(
-                notification: .announcement,
-                argument: isActive ? "\(tool.title) off" : "\(tool.title) on"
-            )
-        } label: {
-            VStack(spacing: 1) {
-                CanvasGeometryToolGlyph(tool: tool, isSelected: isActive)
-                Text(tool.title)
-                    .font(.caption2.weight(isActive ? .semibold : .regular))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.85)
-                    .foregroundStyle(isActive ? Color.primary : Color.secondary)
-                selectedPanelIndicator
-                    .opacity(isActive ? 1 : 0)
-            }
-            .frame(width: width, height: PanelMetrics.lineHeight)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(CanvasCrispToolButtonStyle(reduceMotion: reduceMotion))
-        .accessibilityFocused($focusedGeometryTool, equals: tool)
-        .accessibilityLabel(tool.title)
-        .accessibilityValue(isActive ? "On" : "Off")
-        .accessibilityHint(
-            isActive
-                ? "Turns off the \(tool.title.lowercased())"
-                : "Selects and turns on the \(tool.title.lowercased())"
-        )
-        .accessibilityAddTraits(isActive ? .isSelected : [])
-        .accessibilityIdentifier("canvas.geometry.option.\(tool.rawValue)")
-        .help(tool.title)
     }
 
     // MARK: Add panel

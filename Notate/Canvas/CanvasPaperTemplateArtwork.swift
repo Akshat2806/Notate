@@ -1,6 +1,6 @@
 import CoreGraphics
 
-enum CanvasPaperTemplateArtwork {
+nonisolated enum CanvasPaperTemplateArtwork {
     private static let maximumPathPrimitives = 100_000
     struct Paths {
         let pattern: CGPath
@@ -198,12 +198,12 @@ enum CanvasPaperTemplateArtwork {
                 in: 0...pageSize.width,
                 spacing: template.density.spacing,
                 intersecting: (renderBounds.minX - radius)...(renderBounds.maxX + radius)
-            )
+            ).filter { $0 >= radius && $0 <= pageSize.width - radius }
             let ys = visibleCenteredPositions(
                 in: 0...pageSize.height,
                 spacing: template.density.spacing,
                 intersecting: (renderBounds.minY - radius)...(renderBounds.maxY + radius)
-            )
+            ).filter { $0 >= radius && $0 <= pageSize.height - radius }
             guard xs.isEmpty || ys.count <= maximumPathPrimitives / xs.count else {
                 break
             }
@@ -395,7 +395,7 @@ enum CanvasPaperTemplateArtwork {
                     width: checkboxSize,
                     height: checkboxSize
                 )
-                if box.intersects(renderBounds) {
+                if pageBounds.contains(box), box.intersects(renderBounds) {
                     pattern.addRect(box)
                 }
                 pattern.move(to: CGPoint(x: firstTextX, y: y))

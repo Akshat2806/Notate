@@ -1,0 +1,56 @@
+{
+  "devicesAndConfigurations" : [
+    {
+      "device" : {
+        "architecture" : "arm64e",
+        "deviceId" : "00008103-000C793101E8A01E",
+        "deviceName" : "Akshat's ipad",
+        "modelName" : "iPad Air (5th generation)",
+        "osBuildNumber" : "24A437",
+        "osVersion" : "27.0",
+        "platform" : "iOS"
+      },
+      "expectedFailures" : 0,
+      "failedTests" : 0,
+      "passedTests" : 3,
+      "skippedTests" : 0,
+      "testPlanConfiguration" : {
+        "configurationId" : "1",
+        "configurationName" : "Test Scheme Action"
+      }
+    }
+  ],
+  "environmentDescription" : "Notate · Built with macOS 27.0.1",
+  "expectedFailures" : 0,
+  "failedTests" : 0,
+  "finishTime" : 1791478181.192,
+  "passedTests" : 3,
+  "result" : "Passed",
+  "runtimeWarnings" : [
+    {
+      "issueType" : "Runtime Warning",
+      "message" : "Type \"com.akshatsrivastava.notate.library-items\" was expected to be declared and exported in the Info.plist of Notate.app, but it was not found."
+    },
+    {
+      "issueType" : "Runtime Warning",
+      "message" : "Type \"com.akshatsrivastava.notate.library-items\" was expected to be declared and exported in the Info.plist of Notate.app, but it was not found."
+    },
+    {
+      "issueType" : "Runtime Warning",
+      "message" : "Type \"com.akshatsrivastava.notate.library-items\" was expected to be declared and exported in the Info.plist of Notate.app, but it was not found."
+    }
+  ],
+  "skippedTests" : 0,
+  "startTime" : 1791477761.536,
+  "statistics" : [
+
+  ],
+  "testFailures" : [
+
+  ],
+  "title" : "Test - Notate",
+  "topInsights" : [
+
+  ],
+  "totalTestCount" : 3
+}

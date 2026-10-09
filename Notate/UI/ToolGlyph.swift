@@ -766,14 +766,7 @@ public struct CanvasGeometryToolGlyph: View {
 
     public var body: some View {
         Canvas(opaque: false, rendersAsynchronously: false) { context, _ in
-            switch tool {
-            case .ruler:
-                drawRuler(in: &context)
-            case .protractor:
-                drawProtractor(in: &context)
-            case .compass:
-                drawCompass(in: &context)
-            }
+            drawRuler(in: &context)
         }
         .frame(width: 28, height: 22)
         .accessibilityHidden(true)
@@ -833,96 +826,4 @@ public struct CanvasGeometryToolGlyph: View {
         )
     }
 
-    private func drawProtractor(in context: inout GraphicsContext) {
-        var body = Path()
-        body.move(to: CGPoint(x: 2, y: 18.5))
-        body.addCurve(
-            to: CGPoint(x: 26, y: 18.5),
-            control1: CGPoint(x: 4.2, y: 3.2),
-            control2: CGPoint(x: 23.8, y: 3.2)
-        )
-        body.addLine(to: CGPoint(x: 2, y: 18.5))
-        body.closeSubpath()
-        context.fill(body, with: .color(instrumentFill.opacity(0.72)))
-        context.stroke(body, with: .color(outline), lineWidth: ToolGlyphKeyline.primary)
-
-        var innerArc = Path()
-        innerArc.move(to: CGPoint(x: 7.2, y: 17.5))
-        innerArc.addCurve(
-            to: CGPoint(x: 20.8, y: 17.5),
-            control1: CGPoint(x: 8.8, y: 8.7),
-            control2: CGPoint(x: 19.2, y: 8.7)
-        )
-        context.stroke(
-            innerArc,
-            with: .color(outline.opacity(0.76)),
-            style: StrokeStyle(lineWidth: ToolGlyphKeyline.detail, lineCap: .round)
-        )
-
-        var ticks = Path()
-        ticks.move(to: CGPoint(x: 14, y: 5.8))
-        ticks.addLine(to: CGPoint(x: 14, y: 9.1))
-        ticks.move(to: CGPoint(x: 7.2, y: 9.4))
-        ticks.addLine(to: CGPoint(x: 9.2, y: 11.8))
-        ticks.move(to: CGPoint(x: 20.8, y: 9.4))
-        ticks.addLine(to: CGPoint(x: 18.8, y: 11.8))
-        ticks.move(to: CGPoint(x: 3.7, y: 15.3))
-        ticks.addLine(to: CGPoint(x: 7, y: 15.8))
-        ticks.move(to: CGPoint(x: 24.3, y: 15.3))
-        ticks.addLine(to: CGPoint(x: 21, y: 15.8))
-        context.stroke(
-            ticks,
-            with: .color(outline.opacity(0.82)),
-            style: StrokeStyle(lineWidth: ToolGlyphKeyline.detail, lineCap: .round)
-        )
-    }
-
-    private func drawCompass(in context: inout GraphicsContext) {
-        var legs = Path()
-        legs.move(to: CGPoint(x: 14, y: 5.5))
-        legs.addLine(to: CGPoint(x: 5.5, y: 19.5))
-        legs.move(to: CGPoint(x: 14, y: 5.5))
-        legs.addLine(to: CGPoint(x: 22.5, y: 19.5))
-        context.stroke(
-            legs,
-            with: .color(outline),
-            style: StrokeStyle(lineWidth: 5, lineCap: .round, lineJoin: .round)
-        )
-        context.stroke(
-            legs,
-            with: .color(instrumentFill),
-            style: StrokeStyle(lineWidth: 2.8, lineCap: .round, lineJoin: .round)
-        )
-
-        let hinge = Path(ellipseIn: CGRect(x: 10.5, y: 1.5, width: 7, height: 7))
-        context.fill(hinge, with: .color(instrumentFill))
-        context.stroke(hinge, with: .color(outline), lineWidth: ToolGlyphKeyline.primary)
-        context.fill(
-            Path(ellipseIn: CGRect(x: 12.8, y: 3.8, width: 2.4, height: 2.4)),
-            with: .color(outline)
-        )
-
-        var brace = Path()
-        brace.move(to: CGPoint(x: 9.4, y: 12.5))
-        brace.addLine(to: CGPoint(x: 18.6, y: 12.5))
-        context.stroke(
-            brace,
-            with: .color(outline.opacity(0.76)),
-            style: StrokeStyle(lineWidth: ToolGlyphKeyline.detail, lineCap: .round)
-        )
-
-        var point = Path()
-        point.move(to: CGPoint(x: 4.5, y: 19))
-        point.addLine(to: CGPoint(x: 6.4, y: 19))
-        point.addLine(to: CGPoint(x: 5.1, y: 21.2))
-        point.closeSubpath()
-        context.fill(point, with: .color(outline))
-
-        var pencil = Path()
-        pencil.move(to: CGPoint(x: 21.4, y: 19))
-        pencil.addLine(to: CGPoint(x: 23.3, y: 19))
-        pencil.addLine(to: CGPoint(x: 22.8, y: 21.2))
-        pencil.closeSubpath()
-        context.fill(pencil, with: .color(outline))
-    }
 }

@@ -86,7 +86,6 @@ public enum CanvasOverlay: Equatable, Sendable {
     case none
     case toolOptions(CanvasTool)
     case insert
-    case geometryTools
     case shapes
     case tableSizePicker
 }
@@ -266,7 +265,7 @@ public struct CanvasBoundaryPagePull: Equatable, Sendable {
     public var isArmed: Bool { progress >= 1 }
 }
 
-public enum CanvasPaperStyle: String, CaseIterable, Codable, Sendable {
+public nonisolated enum CanvasPaperStyle: String, CaseIterable, Codable, Sendable {
     case blank
     case ruled
     case grid
@@ -362,7 +361,7 @@ public enum CanvasPaperTemplateCategory: String, CaseIterable, Sendable {
     }
 }
 
-public enum CanvasPaperDensity: String, CaseIterable, Codable, Sendable {
+public nonisolated enum CanvasPaperDensity: String, CaseIterable, Codable, Sendable {
     case narrow
     case standard
     case wide
@@ -393,7 +392,7 @@ public enum CanvasPaperDensity: String, CaseIterable, Codable, Sendable {
     }
 }
 
-public enum CanvasPaperTone: String, CaseIterable, Codable, Sendable {
+public nonisolated enum CanvasPaperTone: String, CaseIterable, Codable, Sendable {
     case white
     case warmWhite
     case cream
@@ -586,7 +585,7 @@ public enum CanvasPaperTone: String, CaseIterable, Codable, Sendable {
     }
 }
 
-public struct CanvasPaperTemplate: Codable, Equatable, Sendable {
+public nonisolated struct CanvasPaperTemplate: Codable, Equatable, Sendable {
     public var style: CanvasPaperStyle
     public var density: CanvasPaperDensity
     public var tone: CanvasPaperTone
@@ -872,7 +871,7 @@ public enum CanvasPageBackground: Equatable, Sendable {
     }
 }
 
-public enum CanvasPaperTemplateGeometry {
+public nonisolated enum CanvasPaperTemplateGeometry {
     private static let maximumAuthoredPositions = 100_000
     public static let cornellHeaderY: CGFloat = 112
     public static let cornellCueX: CGFloat = 168
@@ -1156,31 +1155,13 @@ public struct CanvasTable: Codable, Equatable, Identifiable, Sendable {
         return pageBounds.contains(frame)
     }
 }
-    /// Transient drawing aids that sit above the focused PaperKit page. Only the
-    /// ruler is supplied by PaperKit; Notate owns the protractor and compass
-    /// presentations. Their state is intentionally excluded from checkpoints and
-    /// preferences, just like the existing ruler state.
-
+/// PaperKit's native ruler is the only geometry aid exposed by the canvas.
 public enum CanvasGeometryTool: String, CaseIterable, Sendable {
     case ruler
-    case protractor
-    case compass
 
-    public var title: String {
-        switch self {
-        case .ruler: "Ruler"
-        case .protractor: "Protractor"
-        case .compass: "Compass"
-        }
-    }
+    public var title: String { "Ruler" }
 
-    public var systemImage: String {
-        switch self {
-        case .ruler: "ruler"
-        case .protractor: "angle"
-        case .compass: "compass.drawing"
-        }
-    }
+    public var systemImage: String { "ruler" }
 }
 
 public enum CanvasToolbarIntent: Sendable {
@@ -1606,8 +1587,8 @@ public enum CanvasZoom {
 
 
 public struct CanvasPreferences: Codable, Equatable, Sendable {
-    public static let currentVersion = 5
-    private static let readableLegacyVersions: Set<Int> = [1, 2, 3, 4]
+    public static let currentVersion = 6
+    private static let readableLegacyVersions: Set<Int> = [1, 2, 3, 4, 5]
     public var formatVersion: Int
     public var configurations: [CanvasTool: CanvasToolConfiguration]
     public var eraserMode: CanvasEraserMode
@@ -1618,6 +1599,9 @@ public struct CanvasPreferences: Codable, Equatable, Sendable {
     public var viewport: CanvasViewportState
     public var pageLayout: CanvasPageLayoutPreferences
     public var readerPreferences: CanvasReaderPreferences
+    /// The last notebook page visited. Stored with preferences so scrolling
+    /// through a notebook does not checkpoint every page's PaperKit markup.
+    public var currentPageID: UUID?
 
     public init(
         formatVersion: Int = Self.currentVersion,
@@ -1629,7 +1613,8 @@ public struct CanvasPreferences: Codable, Equatable, Sendable {
         inputMode: CanvasInputMode = .pencilOnly,
         viewport: CanvasViewportState = CanvasViewportState(),
         pageLayout: CanvasPageLayoutPreferences = .default,
-        readerPreferences: CanvasReaderPreferences = .default
+        readerPreferences: CanvasReaderPreferences = .default,
+        currentPageID: UUID? = nil
     ) {
         self.formatVersion = formatVersion
         self.configurations = configurations
@@ -1649,6 +1634,7 @@ public struct CanvasPreferences: Codable, Equatable, Sendable {
         self.viewport = viewport
         self.pageLayout = pageLayout.singlePageOnly
         self.readerPreferences = readerPreferences
+        self.currentPageID = currentPageID
     }
 
     public init(
@@ -1656,7 +1642,8 @@ public struct CanvasPreferences: Codable, Equatable, Sendable {
         inputMode: CanvasInputMode,
         viewport: CanvasViewportState,
         pageLayout: CanvasPageLayoutPreferences = .default,
-        readerPreferences: CanvasReaderPreferences = .default
+        readerPreferences: CanvasReaderPreferences = .default,
+        currentPageID: UUID? = nil
     ) {
         self.init(
             configurations: toolState.configurations,
@@ -1667,7 +1654,8 @@ public struct CanvasPreferences: Codable, Equatable, Sendable {
             inputMode: inputMode,
             viewport: viewport,
             pageLayout: pageLayout,
-            readerPreferences: readerPreferences
+            readerPreferences: readerPreferences,
+            currentPageID: currentPageID
         )
     }
 
@@ -1724,6 +1712,7 @@ public struct CanvasPreferences: Codable, Equatable, Sendable {
         case viewport
         case pageLayout
         case readerPreferences
+        case currentPageID
     }
 
     public init(from decoder: any Decoder) throws {
@@ -1776,6 +1765,7 @@ public struct CanvasPreferences: Codable, Equatable, Sendable {
             CanvasReaderPreferences.self,
             forKey: .readerPreferences
         )) ?? .default
+        currentPageID = try container.decodeIfPresent(UUID.self, forKey: .currentPageID)
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -1790,6 +1780,7 @@ public struct CanvasPreferences: Codable, Equatable, Sendable {
         try container.encode(viewport, forKey: .viewport)
         try container.encode(pageLayout, forKey: .pageLayout)
         try container.encode(readerPreferences, forKey: .readerPreferences)
+        try container.encodeIfPresent(currentPageID, forKey: .currentPageID)
     }
 }
 
@@ -2240,7 +2231,7 @@ public extension PaperCanvasCommanding {
 }
 
 public enum CanvasConstants {
-    public static let a4PortraitSize = CGSize(width: 595, height: 842)
+    public nonisolated static let a4PortraitSize = CGSize(width: 595, height: 842)
     public static let a4LandscapeSize = CGSize(
         width: a4PortraitSize.height,
         height: a4PortraitSize.width
@@ -2265,6 +2256,11 @@ public enum CanvasConstants {
     public static let firstPageToolbarGap: CGFloat = 24
     public static let defaultZoomScale: CGFloat = 1
     public static let absoluteZoomRange: ClosedRange<CGFloat> = 0.5...10
+    /// PaperKit's live viewport follows UIKit's transient zoom-bounce scale.
+    /// Keep a wider, stable renderer range than the persisted/user-facing
+    /// range so paper and ink remain in the same projection below 50% and
+    /// above 1000% while the outer notebook scroll view springs to its limit.
+    public static let nativeViewportRenderingZoomRange: ClosedRange<CGFloat> = 0.25...12
     /// A pull starts only when a new drag begins this close to a settled edge.
     public static let boundaryPullStartSlop: CGFloat = 10
     /// The 42-point affordance is not shown until it has 12 points of clear

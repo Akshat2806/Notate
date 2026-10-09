@@ -1,0 +1,81 @@
+{
+  "error" : {
+    "code" : 3002,
+    "domain" : "com.apple.dt.CoreDeviceError",
+    "userInfo" : {
+      "NSLocalizedDescription" : {
+        "string" : "Failed to install the app on the device."
+      },
+      "NSURL" : {
+        "url" : "file:///tmp/NotateNativeViewportProduction/Build/Products/Release-iphoneos/Notate.app/"
+      },
+      "NSUnderlyingError" : {
+        "error" : {
+          "code" : 7,
+          "domain" : "IXRemoteErrorDomain",
+          "userInfo" : {
+            "FunctionName" : {
+              "string" : "+[IXSRemoteInstaller _cancelAppAssetPromise:withUnderlyingError:]"
+            },
+            "NSLocalizedDescription" : {
+              "string" : "Failed to stream the app asset from remote device"
+            },
+            "NSLocalizedFailureReason" : {
+              "string" : "Unhandled error domain IXRemoteErrorDomain, code 7"
+            },
+            "NSUnderlyingError" : {
+              "error" : {
+                "code" : 11,
+                "domain" : "IXUserPresentableErrorDomain",
+                "userInfo" : {
+                  "AdditionalDiskSpaceRequired" : {
+                    "int" : 32416341
+                  },
+                  "FunctionName" : {
+                    "string" : "IXPreflightWithCacheDelete"
+                  },
+                  "NSLocalizedDescription" : {
+                    "string" : "Not enough space for /private/var/containers/Shared/SystemGroup/systemgroup.com.apple.installcoordinationd/Library/InstallCoordination/PromiseStaging/031AC147-7DAC-49A4-892F-D6AE8743EA01 : 42044253 bytes needed, 9627912 bytes available (8912896 free, 715016 purgable)."
+                  },
+                  "NSLocalizedFailureReason" : {
+                    "string" : "Insufficient storage."
+                  },
+                  "SourceFileLine" : {
+                    "int" : 85
+                  },
+                  "TotalDiskSpaceRequired" : {
+                    "int" : 42044253
+                  }
+                }
+              }
+            },
+            "SourceFileLine" : {
+              "int" : 558
+            }
+          }
+        }
+      }
+    }
+  },
+  "errorSignature" : "(com.apple.dt.CoreDeviceError 3002 (IXRemoteErrorDomain 7 (IXUserPresentableErrorDomain 11)))",
+  "info" : {
+    "arguments" : [
+      "devicectl",
+      "device",
+      "install",
+      "app",
+      "--device",
+      "00008103-000C793101E8A01E",
+      "/tmp/NotateNativeViewportProduction/Build/Products/Release-iphoneos/Notate.app",
+      "--json-output",
+      "/tmp/notate-fixed-scroll-production-install-retry.json"
+    ],
+    "commandType" : "devicectl.device.install.app",
+    "environment" : {
+      "TERM" : "dumb"
+    },
+    "jsonVersion" : 5,
+    "outcome" : "failed",
+    "version" : "651.13.4"
+  }
+}

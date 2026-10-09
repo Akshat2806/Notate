@@ -1,0 +1,91 @@
+{
+  "buildConfiguration" : "Release (profiling enabled)",
+  "cycles" : 120,
+  "operatingSystem" : "27.0",
+  "pageCount" : 1000,
+  "renderer" : "saved-notebook",
+  "samples" : [
+    {
+      "completedCycles" : 0,
+      "idleNativeEditors" : 2,
+      "mountedPageHosts" : 2,
+      "physicalFootprintBytes" : 476611952
+    },
+    {
+      "completedCycles" : 10,
+      "idleNativeEditors" : 2,
+      "mountedPageHosts" : 2,
+      "physicalFootprintBytes" : 370869712
+    },
+    {
+      "completedCycles" : 20,
+      "idleNativeEditors" : 2,
+      "mountedPageHosts" : 2,
+      "physicalFootprintBytes" : 409224656
+    },
+    {
+      "completedCycles" : 30,
+      "idleNativeEditors" : 2,
+      "mountedPageHosts" : 2,
+      "physicalFootprintBytes" : 625296968
+    },
+    {
+      "completedCycles" : 40,
+      "idleNativeEditors" : 2,
+      "mountedPageHosts" : 2,
+      "physicalFootprintBytes" : 586221056
+    },
+    {
+      "completedCycles" : 50,
+      "idleNativeEditors" : 2,
+      "mountedPageHosts" : 2,
+      "physicalFootprintBytes" : 547522096
+    },
+    {
+      "completedCycles" : 60,
+      "idleNativeEditors" : 2,
+      "mountedPageHosts" : 2,
+      "physicalFootprintBytes" : 646071880
+    },
+    {
+      "completedCycles" : 70,
+      "idleNativeEditors" : 2,
+      "mountedPageHosts" : 2,
+      "physicalFootprintBytes" : 447645232
+    },
+    {
+      "completedCycles" : 80,
+      "idleNativeEditors" : 2,
+      "mountedPageHosts" : 2,
+      "physicalFootprintBytes" : 546555368
+    },
+    {
+      "completedCycles" : 90,
+      "idleNativeEditors" : 2,
+      "mountedPageHosts" : 2,
+      "physicalFootprintBytes" : 645924448
+    },
+    {
+      "completedCycles" : 100,
+      "idleNativeEditors" : 2,
+      "mountedPageHosts" : 2,
+      "physicalFootprintBytes" : 608224840
+    },
+    {
+      "completedCycles" : 110,
+      "idleNativeEditors" : 2,
+      "mountedPageHosts" : 2,
+      "physicalFootprintBytes" : 575587888
+    },
+    {
+      "completedCycles" : 120,
+      "idleNativeEditors" : 2,
+      "mountedPageHosts" : 2,
+      "physicalFootprintBytes" : 453576240
+    }
+  ],
+  "updateMedianMilliseconds" : 3.662124974653125,
+  "updateP95Milliseconds" : 21.85725001618266,
+  "viewportHeight" : 820,
+  "viewportWidth" : 1180
+}

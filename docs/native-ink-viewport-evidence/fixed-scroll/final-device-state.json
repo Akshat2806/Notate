@@ -1,0 +1,16 @@
+{
+  "installedBuild": "Tested optimized Release, profiling entry points compiled but inactive",
+  "normalReleaseBuild": "/tmp/NotateNativeViewportProduction/Build/Products/Release-iphoneos/Notate.app",
+  "normalReleaseInstall": "blocked by iPad insufficient storage; temporary test runner removed; no notebook or other app removed",
+  "normalLaunchArguments": [],
+  "normalLaunchEnvironment": {
+    "TERM": "dumb"
+  },
+  "liveProcesses": [
+    {
+      "executable": "file:///private/var/containers/Bundle/Application/BA11C7F2-57AC-4375-9777-3CEF554889E2/Notate.app/Notate",
+      "processIdentifier": 7005
+    }
+  ],
+  "normalReleaseBinarySHA256": "3113c794799806722909d4333330df255719168efa790f262744089ed10aa6c6"
+}

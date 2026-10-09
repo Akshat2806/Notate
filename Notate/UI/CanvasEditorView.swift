@@ -290,8 +290,6 @@ struct CanvasEditorView: View {
             // Editing controls wait for a ready canvas, but Back must always
             // work or a failed recovery would trap the person in the note.
             topChrome(availableWidth: availableSize.width)
-            .disabled(model.isReaderModeTransitioning)
-            .allowsHitTesting(model.isReaderModeTransitioning == false)
         }
         .overlay(alignment: .bottomTrailing) {
             if model.supportsPageStack,
@@ -392,7 +390,7 @@ struct CanvasEditorView: View {
             panelContainerWidth: availableWidth,
             onIntent: handleToolbarIntent
         )
-        .disabled(model.launchState != .ready)
+        .disabled(model.launchState != .ready || model.isReaderModeTransitioning)
     }
 
     private func editorIdentityAndActions(availableWidth: CGFloat) -> some View {
@@ -415,6 +413,7 @@ struct CanvasEditorView: View {
                 if model.supportsPageStack {
                     if model.isReaderMode == false {
                         CanvasPageOverviewButton(model: model)
+                            .disabled(model.isReaderModeTransitioning)
                     }
                 }
                 Spacer(minLength: NotateDesign.Spacing.compact)
@@ -430,6 +429,7 @@ struct CanvasEditorView: View {
                     item: item,
                     onRename: onRename
                 )
+                .disabled(model.isReaderModeTransitioning)
             }
         }
     }

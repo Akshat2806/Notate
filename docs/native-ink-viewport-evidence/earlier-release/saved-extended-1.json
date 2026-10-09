@@ -1,0 +1,78 @@
+{
+  "buildConfiguration" : "Release (profiling enabled)",
+  "cycles" : 120,
+  "operatingSystem" : "27.0",
+  "pageCount" : 1000,
+  "renderer" : "saved-notebook",
+  "samples" : [
+    {
+      "completedCycles" : 0,
+      "mountedPageHosts" : 2,
+      "physicalFootprintBytes" : 475432304
+    },
+    {
+      "completedCycles" : 10,
+      "mountedPageHosts" : 2,
+      "physicalFootprintBytes" : 332088640
+    },
+    {
+      "completedCycles" : 20,
+      "mountedPageHosts" : 2,
+      "physicalFootprintBytes" : 367805784
+    },
+    {
+      "completedCycles" : 30,
+      "mountedPageHosts" : 2,
+      "physicalFootprintBytes" : 550798824
+    },
+    {
+      "completedCycles" : 40,
+      "mountedPageHosts" : 2,
+      "physicalFootprintBytes" : 410584504
+    },
+    {
+      "completedCycles" : 50,
+      "mountedPageHosts" : 2,
+      "physicalFootprintBytes" : 497370576
+    },
+    {
+      "completedCycles" : 60,
+      "mountedPageHosts" : 2,
+      "physicalFootprintBytes" : 658753072
+    },
+    {
+      "completedCycles" : 70,
+      "mountedPageHosts" : 2,
+      "physicalFootprintBytes" : 510232040
+    },
+    {
+      "completedCycles" : 80,
+      "mountedPageHosts" : 2,
+      "physicalFootprintBytes" : 352798112
+    },
+    {
+      "completedCycles" : 90,
+      "mountedPageHosts" : 2,
+      "physicalFootprintBytes" : 487523864
+    },
+    {
+      "completedCycles" : 100,
+      "mountedPageHosts" : 2,
+      "physicalFootprintBytes" : 536462896
+    },
+    {
+      "completedCycles" : 110,
+      "mountedPageHosts" : 2,
+      "physicalFootprintBytes" : 532071936
+    },
+    {
+      "completedCycles" : 120,
+      "mountedPageHosts" : 2,
+      "physicalFootprintBytes" : 410928568
+    }
+  ],
+  "updateMedianMilliseconds" : 3.610124986153096,
+  "updateP95Milliseconds" : 17.207874974701554,
+  "viewportHeight" : 820,
+  "viewportWidth" : 1180
+}

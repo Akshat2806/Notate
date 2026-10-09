@@ -1,0 +1,11 @@
+{
+  "Notate/Canvas/PaperCanvasViewController.swift": "30f3c197c50a9f115d407338b4f266b7c5042c39e3c70d042ebc4473247da3b6",
+  "Notate/Canvas/CanvasEditorModel.swift": "2e1aec827128c80b9fd4123ca29dcd243160d93eeacc8f8945bc74cfb70b4596",
+  "Notate/Canvas/CanvasNativeViewport.swift": "e99786ee7fd89470f83fa353b3e0368135e14b6a0f00e596f309b9afb8ae9b2e",
+  "Notate/Canvas/CanvasInkViewportProfile.swift": "7f18836f63445f95d6a6cd3218bc06d565725c95a924095cdf816648e120ebcc",
+  "Notate/UI/CanvasEditorView.swift": "5929cbdeb6e9959568609ec2cb0bfa3458b4f2dcfd95ebfbe1b393850b81a7ae",
+  "Notate/Canvas/CanvasPaperTemplateArtwork.swift": "c4407bfb21c06febe84bde8cdd21717b2f549a386371d3b554a0780af1bf4b84",
+  "NotateTests/CanvasNativeViewportTests.swift": "e13d6908b68ff0b9c022802a4b5a270de4990ac81626d4651105714a8de09951",
+  "NotateTests/CanvasCheckpointConcurrencyTests.swift": "4e1d94f09f46843ceed1f8b8650e889f343ecc1ba3d651f532a667fc7bdeded6",
+  "NotateUITests/NativeViewportNavigationUITests.swift": "f2a565eb4dfae58d0adfd1f5d712cc8db6dbc8a5ce6166e2b269a823457a3db2"
+}

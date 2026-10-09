@@ -1,0 +1,11 @@
+{
+  "description": "Fixed zoom stable native render window; Release profiling and normal Release builds on 2026-10-08",
+  "sha256": {
+    "Notate/Canvas/CanvasNativeViewport.swift": "aad7874c844a1b56b5f3a57158a5db6997d27243bd06898361e313a7ba8245d6",
+    "Notate/Canvas/PaperCanvasViewController.swift": "40ae29736887ad4e0d9ebae28142f3b509d7451f62893ef55ab99fdb831842b3",
+    "Notate/Canvas/CanvasInkViewportProfile.swift": "1ad99c7065e1f1d3ba3c6b9e32e566fa73d6589324270cada7ec84dee0631f8e",
+    "Notate/App/NotateApplicationCoordinator.swift": "7e0fb5ccea102216a6e9126a6b760b5d3e1dea4e1fe128785b9ff762646805a2",
+    "NotateTests/CanvasNativeViewportTests.swift": "3b870c749365fbb64b7501563ca7bb41464f5fdc3ce83a9ca936683941aa7aab",
+    "NotateUITests/NativeViewportNavigationUITests.swift": "ea1f9722fa6454594bb5e5ed345944a06c14ee23140cfc090cb7864450a3583a"
+  }
+}

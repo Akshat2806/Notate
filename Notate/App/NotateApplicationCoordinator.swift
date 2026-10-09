@@ -744,6 +744,11 @@ final class NotateApplicationCoordinator {
         )
         didRecordEditReadiness = true
         guard isCatalogWritable else { return }
+        #if NOTATE_INK_PROFILING
+        if ProcessInfo.processInfo.arguments.contains("--ink-viewport-notebook") {
+            await openInkProfilingNotebook()
+        }
+        #endif
         await NotateLaunchInstrumentation.measureAsync("Legacy Canvas Maintenance") {
             await migrateLegacyCanvasIfNeeded()
             await removeLegacyCanvasItems()
@@ -1290,6 +1295,56 @@ final class NotateApplicationCoordinator {
             }
         }
     }
+
+    #if NOTATE_INK_PROFILING
+    /// Explicit local benchmark entry point. Uses the normal catalog, verified
+    /// checkpoint, previews, editor model, and tool picker. No existing notebook
+    /// is selected or modified; subsequent runs reopen only our recorded ID.
+    private func openInkProfilingNotebook() async {
+        let key = "notate.inkProfiling.notebookID"
+        if let value = UserDefaults.standard.string(forKey: key),
+           let id = UUID(uuidString: value), let item = repository.item(id: id),
+           !item.isTrashed, item.payloadState == .ready {
+            open(item)
+            await prepareInkScrollCheck()
+            return
+        }
+        let name = "Viewport Performance · 1,000 pages"
+        await createEditableItem(kind: .notebook, name: name, parentID: nil,
+                                 cover: .preset(.softLinen)) { itemID in
+            let pages = try await CanvasInkViewportFixture.notebookPages()
+            let snapshot = CanvasCoreSnapshot(generation: 1, pages: pages,
+                                              currentPageID: pages[0].id)
+            let store = CanvasCoreStore(rootURL: self.assetStore.directories(for: itemID).canvas)
+            try await store.checkpoint(snapshot)
+            return snapshot
+        }
+        if let id = activeEditor?.itemID, repository.item(id: id)?.name == name {
+            UserDefaults.standard.set(id.uuidString, forKey: key)
+            print("INK_VIEWPORT_NOTEBOOK_CREATED \(id)")
+            await prepareInkScrollCheck()
+        }
+    }
+
+    /// Changes only the explicitly created local fixture through the normal
+    /// editor model. Production builds contain no automation entry point.
+    private func prepareInkScrollCheck() async {
+        let environment = ProcessInfo.processInfo.environment
+        guard let value = environment["NOTATE_INK_SCROLL_ZOOM"],
+              let zoom = Double(value), zoom.isFinite, zoom >= 0.5, zoom <= 10 else { return }
+        for _ in 0..<600 {
+            guard let editor = activeEditor else { return }
+            if editor.model.launchState == .ready {
+                let direction: CanvasScrollDirection = environment["NOTATE_INK_SCROLL_DIRECTION"] == "horizontal"
+                    ? .horizontal : .vertical
+                editor.model.setPageLayout(CanvasPageLayoutPreferences(scrollDirection: direction))
+                editor.model.setZoomScale(CGFloat(zoom))
+                return
+            }
+            do { try await Task.sleep(for: .milliseconds(50)) } catch { return }
+        }
+    }
+    #endif
 
     private func createEditableItem(
         kind: LibraryItemKind,

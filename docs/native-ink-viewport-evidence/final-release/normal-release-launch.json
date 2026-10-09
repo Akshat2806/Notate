@@ -1,0 +1,57 @@
+{
+  "info" : {
+    "arguments" : [
+      "devicectl",
+      "device",
+      "process",
+      "launch",
+      "--device",
+      "00008103-000C793101E8A01E",
+      "--terminate-existing",
+      "--json-output",
+      "/tmp/notate-final-profiles/normal-release-launch.json",
+      "com.akshatsrivastava.notate.Notate"
+    ],
+    "commandType" : "devicectl.device.process.launch",
+    "environment" : {
+      "TERM" : "dumb"
+    },
+    "jsonVersion" : 5,
+    "outcome" : "success",
+    "version" : "651.13.4"
+  },
+  "result" : {
+    "deviceIdentifier" : "8ACBDA88-4052-522E-82AD-C200238A9E61",
+    "launchOptions" : {
+      "activatedWhenStarted" : true,
+      "arguments" : [
+
+      ],
+      "environmentVariables" : {
+        "TERM" : "dumb"
+      },
+      "platformSpecificOptions" : {
+
+      },
+      "startStopped" : false,
+      "terminateExistingInstances" : true,
+      "user" : {
+        "active" : true
+      }
+    },
+    "process" : {
+      "auditToken" : [
+        4294967295,
+        501,
+        501,
+        501,
+        501,
+        6845,
+        0,
+        17859
+      ],
+      "executable" : "file:///private/var/containers/Bundle/Application/F88B13CE-30ED-41CF-AB07-8D03143B88E3/Notate.app/Notate",
+      "processIdentifier" : 6845
+    }
+  }
+}
