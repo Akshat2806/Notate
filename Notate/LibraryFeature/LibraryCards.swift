@@ -1394,7 +1394,7 @@ actor LibraryAutomaticThumbnailStore {
     )
 
     private static let defaultMaximumCachedItemCount = 96
-    private static let defaultMaximumCachedByteCount = 32 * 1_024 * 1_024
+    private static let defaultMaximumCachedByteCount = 16 * 1_024 * 1_024
 
     private var cache: [UUID: CacheEntry] = [:]
     private var cacheRecency: [UUID] = []
@@ -1762,7 +1762,7 @@ private final class LibraryDecodedCoverImageCache: @unchecked Sendable {
 
     private init() {
         images.countLimit = 24
-        images.totalCostLimit = 48 * 1_024 * 1_024
+        images.totalCostLimit = 32 * 1_024 * 1_024
     }
 
     func image(for data: Data, cacheKey: NSString) -> UIImage? {

@@ -1,0 +1,33 @@
+{
+  "buildConfiguration" : "Release (profiling enabled)",
+  "cycles" : 30,
+  "operatingSystem" : "27.0",
+  "pageCount" : 1000,
+  "renderer" : "notebook",
+  "samples" : [
+    {
+      "completedCycles" : 0,
+      "mountedPageHosts" : 2,
+      "physicalFootprintBytes" : 100680592
+    },
+    {
+      "completedCycles" : 10,
+      "mountedPageHosts" : 3,
+      "physicalFootprintBytes" : 151454608
+    },
+    {
+      "completedCycles" : 20,
+      "mountedPageHosts" : 3,
+      "physicalFootprintBytes" : 160154512
+    },
+    {
+      "completedCycles" : 30,
+      "mountedPageHosts" : 3,
+      "physicalFootprintBytes" : 130712464
+    }
+  ],
+  "updateMedianMilliseconds" : 6.857000000309199,
+  "updateP95Milliseconds" : 26.385333330836147,
+  "viewportHeight" : 571.5,
+  "viewportWidth" : 1180
+}

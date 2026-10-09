@@ -1,0 +1,49 @@
+{
+  "devicesAndConfigurations" : [
+    {
+      "device" : {
+        "architecture" : "arm64e",
+        "deviceId" : "00008103-000C793101E8A01E",
+        "deviceName" : "Akshat's ipad",
+        "modelName" : "iPad Air (5th generation)",
+        "osBuildNumber" : "24A437",
+        "osVersion" : "27.0",
+        "platform" : "iOS"
+      },
+      "expectedFailures" : 0,
+      "failedTests" : 0,
+      "passedTests" : 54,
+      "skippedTests" : 0,
+      "testPlanConfiguration" : {
+        "configurationId" : "1",
+        "configurationName" : "Test Scheme Action"
+      }
+    }
+  ],
+  "environmentDescription" : "Notate · Built with macOS 27.0.1",
+  "expectedFailures" : 0,
+  "failedTests" : 0,
+  "finishTime" : 1791476860.549,
+  "passedTests" : 54,
+  "result" : "Passed",
+  "runtimeWarnings" : [
+
+  ],
+  "skippedTests" : 0,
+  "startTime" : 1791476815.943,
+  "statistics" : [
+
+  ],
+  "testFailures" : [
+
+  ],
+  "title" : "Test - Notate",
+  "topInsights" : [
+    {
+      "category" : "Longest Test Runs",
+      "impact" : "67% of duration",
+      "text" : "1 longest test run with outlier durations exceeding 12.46s (three standard deviations)"
+    }
+  ],
+  "totalTestCount" : 54
+}

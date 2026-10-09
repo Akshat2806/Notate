@@ -502,9 +502,14 @@ final class NotateTests: XCTestCase {
             CanvasToolPicker.anchorKey(for: .toolOptions(.calligraphy), activeTool: .calligraphy),
             "bar"
         )
-        XCTAssertEqual(CanvasToolPicker.anchorKey(for: .geometryTools, activeTool: .pen), "bar")
         XCTAssertEqual(CanvasToolPicker.anchorKey(for: .insert, activeTool: .pen), "bar")
         XCTAssertNil(CanvasToolPicker.anchorKey(for: .none, activeTool: .pen))
+    }
+
+    func testCanvasExposesOnlyTheNativeRulerAsAGeometryTool() {
+        XCTAssertEqual(CanvasGeometryTool.allCases, [.ruler])
+        XCTAssertEqual(CanvasGeometryTool.ruler.title, "Ruler")
+        XCTAssertEqual(CanvasGeometryTool.ruler.systemImage, "ruler")
     }
 
 

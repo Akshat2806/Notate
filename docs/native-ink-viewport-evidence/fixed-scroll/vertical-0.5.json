@@ -1,0 +1,123 @@
+{
+  "buildConfiguration" : "Release (profiling enabled)",
+  "direction" : "vertical",
+  "logicalZoom" : 0.5,
+  "maximumIdleNativeEditors" : 2,
+  "maximumMountedPageHosts" : 3,
+  "pageCount" : 1000,
+  "samples" : [
+    {
+      "completedCycles" : 0,
+      "idleNativeEditors" : 1,
+      "mountedPageHosts" : 3,
+      "physicalFootprintBytes" : 367674592
+    },
+    {
+      "completedCycles" : 128,
+      "idleNativeEditors" : 1,
+      "mountedPageHosts" : 3,
+      "physicalFootprintBytes" : 462193912
+    },
+    {
+      "completedCycles" : 256,
+      "idleNativeEditors" : 1,
+      "mountedPageHosts" : 3,
+      "physicalFootprintBytes" : 455279888
+    },
+    {
+      "completedCycles" : 384,
+      "idleNativeEditors" : 1,
+      "mountedPageHosts" : 3,
+      "physicalFootprintBytes" : 452183312
+    },
+    {
+      "completedCycles" : 512,
+      "idleNativeEditors" : 1,
+      "mountedPageHosts" : 3,
+      "physicalFootprintBytes" : 455935320
+    },
+    {
+      "completedCycles" : 640,
+      "idleNativeEditors" : 1,
+      "mountedPageHosts" : 3,
+      "physicalFootprintBytes" : 472663336
+    },
+    {
+      "completedCycles" : 768,
+      "idleNativeEditors" : 1,
+      "mountedPageHosts" : 3,
+      "physicalFootprintBytes" : 538461528
+    },
+    {
+      "completedCycles" : 896,
+      "idleNativeEditors" : 1,
+      "mountedPageHosts" : 3,
+      "physicalFootprintBytes" : 397280504
+    },
+    {
+      "completedCycles" : 1024,
+      "idleNativeEditors" : 1,
+      "mountedPageHosts" : 3,
+      "physicalFootprintBytes" : 536593752
+    },
+    {
+      "completedCycles" : 1152,
+      "idleNativeEditors" : 1,
+      "mountedPageHosts" : 3,
+      "physicalFootprintBytes" : 416498960
+    },
+    {
+      "completedCycles" : 1280,
+      "idleNativeEditors" : 1,
+      "mountedPageHosts" : 3,
+      "physicalFootprintBytes" : 488391976
+    },
+    {
+      "completedCycles" : 1408,
+      "idleNativeEditors" : 1,
+      "mountedPageHosts" : 3,
+      "physicalFootprintBytes" : 471041344
+    },
+    {
+      "completedCycles" : 1536,
+      "idleNativeEditors" : 1,
+      "mountedPageHosts" : 3,
+      "physicalFootprintBytes" : 506971408
+    },
+    {
+      "completedCycles" : 1664,
+      "idleNativeEditors" : 1,
+      "mountedPageHosts" : 3,
+      "physicalFootprintBytes" : 417498408
+    },
+    {
+      "completedCycles" : 1792,
+      "idleNativeEditors" : 1,
+      "mountedPageHosts" : 3,
+      "physicalFootprintBytes" : 453182760
+    },
+    {
+      "completedCycles" : 1920,
+      "idleNativeEditors" : 1,
+      "mountedPageHosts" : 3,
+      "physicalFootprintBytes" : 446743872
+    },
+    {
+      "completedCycles" : 2048,
+      "idleNativeEditors" : 1,
+      "mountedPageHosts" : 3,
+      "physicalFootprintBytes" : 479266088
+    },
+    {
+      "completedCycles" : 2048,
+      "idleNativeEditors" : 1,
+      "mountedPageHosts" : 3,
+      "physicalFootprintBytes" : 349619448
+    }
+  ],
+  "updateMedianMilliseconds" : 0.37320831324905157,
+  "updateP95Milliseconds" : 9.020291676279157,
+  "updates" : 2049,
+  "viewportViolationCount" : 0,
+  "workload" : "fixed-zoom-two-round-trips"
+}

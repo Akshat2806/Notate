@@ -117,12 +117,17 @@ enum CanvasStackLayout {
 
     /// One immutable resolution of the complete notebook geometry. Callers
     ///  that perform more than one lookup should retain this value: every page
-    ///  frame is then O(1), and focus/visibility scans remain O(N) instead of
-    ///  rebuilding the complete geometry once for every page they inspect.
+    ///  frame is then O(1). A primary-axis index bounds visibility searches to
+    ///  nearby pages without rebuilding geometry on each navigation frame.
     struct LayoutPlan {
         let pageLayout: CanvasPageLayoutPreferences
         let pageFrames: [CGRect]
         let contentSize: CGSize
+        // Prefix/suffix bounds stay sorted even for unequal-height two-page
+        // spreads. Binary searches include boundary candidates; CGRect decides
+        // the final intersection, preserving the original edge semantics.
+        private let prefixMaximum: [CGFloat]
+        private let suffixMinimum: [CGFloat]
 
         /// A structural operation count used by the 1,000-page regression
         ///  test. A plan resolves exactly one frame per page and subsequent
@@ -138,6 +143,17 @@ enum CanvasStackLayout {
             self.pageFrames = pageFrames
             self.contentSize = contentSize
             geometryResolutionOperationCount = pageFrames.count
+            let vertical = pageLayout.scrollDirection == .vertical
+            var maximum = -CGFloat.infinity
+            prefixMaximum = pageFrames.map { frame in
+                maximum = max(maximum, vertical ? frame.maxY : frame.maxX)
+                return maximum
+            }
+            var minimum = CGFloat.infinity
+            suffixMinimum = pageFrames.reversed().map { frame in
+                minimum = min(minimum, vertical ? frame.minY : frame.minX)
+                return minimum
+            }.reversed()
         }
 
         var pageCount: Int { pageFrames.count }
@@ -168,7 +184,13 @@ enum CanvasStackLayout {
             var bestIndex = 0
             var bestArea: CGFloat = -1
             var bestCenterDistance = CGFloat.greatestFiniteMagnitude
-            for (index, page) in pageFrames.enumerated() {
+            let visible = visiblePageIndices(visibleDocumentRect: visibleDocumentRect)
+            // Preserve the nearest-page behavior when the viewport is entirely
+            // in a gutter or outside all sheets. In normal navigation only the
+            // intersecting pages can win the greatest-area comparison.
+            let candidates = visible.isEmpty ? Array(pageFrames.indices) : visible
+            for index in candidates {
+                let page = pageFrames[index]
                 let intersection = page.intersection(visibleDocumentRect)
                 let area = intersection.isNull || intersection.isEmpty
                     ? 0
@@ -213,7 +235,28 @@ enum CanvasStackLayout {
                     dy: 0
                 )
             }
-            return pageFrames.indices.filter { pageFrames[$0].intersects(expanded) }
+            return candidatePageIndices(intersecting: expanded)
+                .filter { pageFrames[$0].intersects(expanded) }
+        }
+
+        func candidatePageIndices(intersecting rect: CGRect) -> Range<Int> {
+            guard !rect.isNull, !rect.isEmpty, !rect.isInfinite else { return 0..<0 }
+            let vertical = pageLayout.scrollDirection == .vertical
+            let minimum = vertical ? rect.minY : rect.minX
+            let maximum = vertical ? rect.maxY : rect.maxX
+            func firstIndex(in values: [CGFloat], satisfying predicate: (CGFloat) -> Bool) -> Int {
+                var low = 0
+                var high = values.count
+                while low < high {
+                    let middle = low + (high - low) / 2
+                    if predicate(values[middle]) { high = middle }
+                    else { low = middle + 1 }
+                }
+                return low
+            }
+            let start = firstIndex(in: prefixMaximum) { $0 >= minimum }
+            let end = firstIndex(in: suffixMinimum) { $0 > maximum }
+            return start..<max(start, end)
         }
     }
 

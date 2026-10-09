@@ -95,6 +95,9 @@ private struct NotateAppRoot: View {
                 #if DEBUG
                 if ProcessInfo.processInfo.arguments.contains("--folder-reference-preview") { return }
                 #endif
+                #if DEBUG || NOTATE_INK_PROFILING
+                if ProcessInfo.processInfo.arguments.contains("--ink-viewport-experiment") { return }
+                #endif
                 // Let SwiftUI commit the lightweight opening screen before
                 // synchronous SwiftData container and repository setup. That
                 // work can otherwise consume the scene-creation watchdog's
@@ -111,11 +114,21 @@ private struct NotateAppRoot: View {
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("--folder-reference-preview") {
             LibraryFolderDebugPreview()
+        } else if ProcessInfo.processInfo.arguments.contains("--ink-viewport-experiment") {
+            CanvasInkViewportExperiment()
+        } else {
+            applicationRoot
+        }
+        #else
+        #if NOTATE_INK_PROFILING
+        if ProcessInfo.processInfo.arguments.contains("--ink-viewport-experiment") {
+            CanvasInkViewportExperiment()
         } else {
             applicationRoot
         }
         #else
         applicationRoot
+        #endif
         #endif
     }
 

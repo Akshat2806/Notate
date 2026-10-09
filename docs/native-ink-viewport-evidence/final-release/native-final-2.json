@@ -1,0 +1,48 @@
+{
+  "buildConfiguration" : "Release (profiling enabled)",
+  "cycles" : 30,
+  "maximumIdleNativeEditors" : 0,
+  "maximumMountedPageHosts" : 1,
+  "operatingSystem" : "27.0",
+  "pageCount" : 1,
+  "renderer" : "native",
+  "samples" : [
+    {
+      "completedCycles" : 0,
+      "idleNativeEditors" : 0,
+      "mountedPageHosts" : 1,
+      "physicalFootprintBytes" : 73401160
+    },
+    {
+      "completedCycles" : 10,
+      "idleNativeEditors" : 0,
+      "mountedPageHosts" : 1,
+      "physicalFootprintBytes" : 73270088
+    },
+    {
+      "completedCycles" : 20,
+      "idleNativeEditors" : 0,
+      "mountedPageHosts" : 1,
+      "physicalFootprintBytes" : 75662152
+    },
+    {
+      "completedCycles" : 30,
+      "idleNativeEditors" : 0,
+      "mountedPageHosts" : 1,
+      "physicalFootprintBytes" : 68174664
+    }
+  ],
+  "updateMedianMilliseconds" : 1.6250416520051658,
+  "updateP95Milliseconds" : 24.22633330570534,
+  "viewportHeight" : 571.5,
+  "viewportViolationCount" : 0,
+  "viewportWidth" : 1180,
+  "zoomSteps" : [
+    1,
+    6,
+    8,
+    10,
+    6,
+    1
+  ]
+}

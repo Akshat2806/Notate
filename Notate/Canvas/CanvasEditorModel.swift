@@ -186,7 +186,10 @@ public final class CanvasEditorModel {
 
     @ObservationIgnored private weak var canvasController: (any PaperCanvasCommanding)?
     @ObservationIgnored private var pages: [CanvasPageSnapshot]
+    @ObservationIgnored private var cachedPageIndices: [UUID: Int]?
     @ObservationIgnored private var currentPageID: UUID
+    @ObservationIgnored private var isInkContactActive = false
+    @ObservationIgnored private var hasDeferredInkCheckpoint = false
     @ObservationIgnored private var pendingProgrammaticFocusPageID: UUID?
     @ObservationIgnored private var isApplyingPageOverviewMutation = false
     @ObservationIgnored private var isApplyingPageLayout = false
@@ -315,8 +318,8 @@ public final class CanvasEditorModel {
         pages = [page]
         currentPageID = pageID
         lastVerifiedIndexPages = [page]
-        readerPages = [page]
-        readerCurrentPageID = pageID
+        readerPages = []
+        readerCurrentPageID = nil
     }
 
     public var canGoToPreviousPage: Bool {
@@ -420,6 +423,8 @@ public final class CanvasEditorModel {
         // cannot expose the editor until this main-actor method returns and the
         // controller is unlocked below.
         isReaderMode = false
+        readerPages.removeAll(keepingCapacity: false)
+        readerCurrentPageID = nil
         pendingProgrammaticFocusPageID = nil
         if pages.contains(where: { $0.id == targetPageID }) {
             pendingProgrammaticFocusPageID = targetPageID
@@ -714,16 +719,7 @@ public final class CanvasEditorModel {
                 : .insert
 
         case .tapGeometryToolSlot:
-            // First tap turns the preferred instrument on (no panel); tapping
-            // again opens the Ruler / Protractor / Compass panel. Turning an
-            // instrument off is done from that panel.
-            if activeGeometryTool == nil {
-                activeGeometryTool = preferredGeometryTool
-                overlay = .none
-                canvasController?.setGeometryTool(activeGeometryTool)
-            } else {
-                overlay = overlay == .geometryTools ? .none : .geometryTools
-            }
+            toggleGeometryTool(.ruler)
 
         case let .toggleGeometryTool(tool):
             toggleGeometryTool(tool)
@@ -1076,10 +1072,8 @@ public final class CanvasEditorModel {
     }
 
     private func toggleGeometryTool(_ tool: CanvasGeometryTool) {
-        let keepsGeometryStripPresented = overlay == .geometryTools
-        preferredGeometryTool = tool
         activeGeometryTool = activeGeometryTool == tool ? nil : tool
-        overlay = keepsGeometryStripPresented ? .geometryTools : .none
+        overlay = .none
         canvasController?.setGeometryTool(activeGeometryTool)
     }
 
@@ -1254,6 +1248,7 @@ public final class CanvasEditorModel {
         let page = importedPage.replacing(viewport: viewport)
         let insertionIndex = pages.endIndex
         pages.append(page)
+        cachedPageIndices = nil
         initialPages = pages
         setFocusedPage(page.id, documentDidChange: false)
 
@@ -1318,6 +1313,7 @@ public final class CanvasEditorModel {
             paperTemplate: inheritedPaperTemplate
         )
         pages.insert(page, at: insertionIndex)
+        cachedPageIndices = nil
         initialPages = pages
         setFocusedPage(page.id, documentDidChange: false)
 
@@ -1423,6 +1419,7 @@ public final class CanvasEditorModel {
         )
         let insertionIndex = sourceIndex + 1
         pages.insert(duplicate, at: insertionIndex)
+        cachedPageIndices = nil
         initialPages = pages
         setFocusedPage(duplicate.id, documentDidChange: false)
 
@@ -1526,6 +1523,7 @@ public final class CanvasEditorModel {
         }
 
         pages = reorderedPages
+        cachedPageIndices = nil
         initialPages = pages
         if let currentIndex = indexOfCurrentPage {
             updateLegacyInitialPage(to: pages[currentIndex])
@@ -1567,6 +1565,7 @@ public final class CanvasEditorModel {
         }
 
         pages.remove(at: removalIndex)
+        cachedPageIndices = nil
         initialPages = pages
         if currentPageID == id {
             setFocusedPage(replacementID, documentDidChange: false)
@@ -1664,6 +1663,7 @@ public final class CanvasEditorModel {
         guard pages.contains(where: { $0.id == page.id }) == false else { return }
         let insertionIndex = min(max(requestedIndex, 0), pages.endIndex)
         pages.insert(page, at: insertionIndex)
+        cachedPageIndices = nil
         initialPages = pages
         isApplyingPageOverviewMutation = true
         canvasController?.insertPage(
@@ -1864,6 +1864,7 @@ public final class CanvasEditorModel {
                 paperTemplate: NotatePreferences.defaultPaperTemplate
             )
             pages = [page]
+            cachedPageIndices = nil
             currentPageID = page.id
             initialPages = pages
             initialPageID = page.id
@@ -1884,8 +1885,8 @@ public final class CanvasEditorModel {
                 pages: pages,
                 currentPageID: currentPageID
             )
-            readerPages = pages
-            readerCurrentPageID = currentPageID
+            readerPages = []
+            readerCurrentPageID = nil
             launchState = .ready
 
         case let .restored(snapshot):
@@ -1899,6 +1900,7 @@ public final class CanvasEditorModel {
             if documentMode == .freeform {
                 let board = snapshot.pages[restoredIndex]
                 pages = [board]
+                cachedPageIndices = nil
                 currentPageID = board.id
                 let restoredViewport = board.viewport.usesFitPage
                     ? Self.initialViewport(for: documentKind)
@@ -1906,9 +1908,12 @@ public final class CanvasEditorModel {
                 viewport = Self.topAlignedViewport(restoredViewport)
             } else {
                 pages = snapshot.pages
-                currentPageID = snapshot.currentPageID
+                currentPageID = preferences.currentPageID.flatMap { savedID in
+                    snapshot.pages.first(where: { $0.id == savedID })?.id
+                } ?? snapshot.currentPageID
                 viewport = Self.topAlignedViewport(preferences.viewport)
             }
+            cachedPageIndices = nil
             updateZoomReadout(for: viewport.stackZoomScale)
             updatePage(currentPageID, viewport: viewport)
             initialPages = pages
@@ -1922,8 +1927,8 @@ public final class CanvasEditorModel {
             latestVerifiedIndexDelta = nil
             verifiedCheckpointGeneration = snapshot.generation
             latestVerifiedIndexSnapshot = snapshot
-            readerPages = pages
-            readerCurrentPageID = currentPageID
+            readerPages = []
+            readerCurrentPageID = nil
             launchState = .ready
 
         case let .failed(error):
@@ -1963,6 +1968,7 @@ public final class CanvasEditorModel {
 
     private func drawingInteractionDidBegin(on pageID: UUID) {
         guard isReaderMode == false, isReaderModeTransitioning == false else { return }
+        isInkContactActive = true
         // PaperKit calls this after it has accepted Pencil-down. Dismissing the
         // overlay here cannot steal or shorten the first stroke.
         overlay = .none
@@ -1971,7 +1977,7 @@ public final class CanvasEditorModel {
         pendingBoundaryInsertion = nil
         hideAddPageAffordance()
         pendingProgrammaticFocusPageID = nil
-        setFocusedPage(pageID, documentDidChange: true)
+        setFocusedPage(pageID, documentDidChange: false)
     }
 
     private func presentationInteractionDidBegin() {
@@ -1980,13 +1986,22 @@ public final class CanvasEditorModel {
     }
 
     private var indexOfCurrentPage: Int? {
-        pages.firstIndex { $0.id == currentPageID }
+        pageIndex(for: currentPageID)
+    }
+
+    private func pageIndex(for id: UUID) -> Int? {
+        if cachedPageIndices == nil {
+            cachedPageIndices = Dictionary(
+                uniqueKeysWithValues: pages.enumerated().map { ($0.element.id, $0.offset) }
+            )
+        }
+        return cachedPageIndices?[id]
     }
 
     private func revealPage(at index: Int) {
         guard pages.indices.contains(index) else { return }
         let page = pages[index]
-        setFocusedPage(page.id, documentDidChange: isReaderMode == false)
+        setFocusedPage(page.id, documentDidChange: false)
         if isReaderMode {
             readerCurrentPageID = page.id
             return
@@ -2001,7 +2016,7 @@ public final class CanvasEditorModel {
     }
 
     private func setFocusedPage(_ pageID: UUID, documentDidChange: Bool) {
-        guard let index = pages.firstIndex(where: { $0.id == pageID }),
+        guard let index = pageIndex(for: pageID),
             currentPageID != pageID else { return }
         currentPageID = pageID
         updateLegacyInitialPage(to: pages[index])
@@ -2011,6 +2026,8 @@ public final class CanvasEditorModel {
         updatePagePositionState()
         if documentDidChange {
             markDocumentChanged()
+        } else if documentMode == .paged {
+            persistPreferencesSoon()
         }
     }
 
@@ -2020,10 +2037,9 @@ public final class CanvasEditorModel {
     }
 
     private func updatePage(_ id: UUID, viewport: CanvasViewportState) {
-        guard let index = pages.firstIndex(where: { $0.id == id }) else { return }
+        guard let index = pageIndex(for: id) else { return }
         let page = pages[index]
         pages[index] = page.replacing(viewport: viewport)
-        initialPages = pages
         if id == currentPageID {
             currentPaperTemplate = pages[index].paperTemplate
             updateLegacyInitialPage(to: pages[index])
@@ -2031,6 +2047,7 @@ public final class CanvasEditorModel {
     }
 
     private func updatePagePositionState() {
+        cachedPageIndices = nil
         pageCount = max(pages.count, 1)
         currentPageNumber = indexOfCurrentPage.map { $0 + 1 } ?? 1
         currentPaperTemplate = indexOfCurrentPage.map { pages[$0].paperTemplate } ?? .default
@@ -2046,13 +2063,24 @@ public final class CanvasEditorModel {
 
     private func markDocumentChanged() {
         generation += 1
-        saveState = .saving
+        if saveState != .saving { saveState = .saving }
+        if isInkContactActive {
+            hasDeferredInkCheckpoint = true
+            return
+        }
         scheduleTrailingSave()
         ensureForcedSave()
     }
 
     private func snapshotContactDidEnd() {
+        isInkContactActive = false
         applyPendingBoundaryInsertion()
+        if hasDeferredInkCheckpoint {
+            hasDeferredInkCheckpoint = false
+            scheduleTrailingSave(after: .zero)
+            ensureForcedSave()
+            return
+        }
         guard requiresDeferredCheckpointRetry || generation > committedGeneration else {
             return
         }
@@ -2101,11 +2129,9 @@ public final class CanvasEditorModel {
     private func paperMarkupDidChange(_ markup: PaperMarkup, on pageID: UUID) {
         guard isReaderMode == false,
             isReaderModeTransitioning == false,
-            let index = pages.firstIndex(where: { $0.id == pageID }),
-            pages[index].markup != markup else { return }
+            let index = pageIndex(for: pageID) else { return }
         let page = pages[index]
         pages[index] = page.replacing(markup: markup)
-        initialPages = pages
         if pageID == currentPageID {
             updateLegacyInitialPage(to: pages[index])
         }
@@ -2180,12 +2206,7 @@ public final class CanvasEditorModel {
             guard pageID == pendingProgrammaticFocusPageID else { return }
             self.pendingProgrammaticFocusPageID = nil
         }
-        setFocusedPage(
-            pageID,
-            documentDidChange: isApplyingPageOverviewMutation == false
-                && isApplyingPageLayout == false
-                && isReaderMode == false
-        )
+        setFocusedPage(pageID, documentDidChange: false)
     }
 
     private func viewportDidChange(_ newViewport: CanvasViewportState, on pageID: UUID) {
@@ -2198,10 +2219,7 @@ public final class CanvasEditorModel {
             self.pendingProgrammaticFocusPageID = nil
         }
 
-        setFocusedPage(
-            pageID,
-            documentDidChange: isApplyingPageLayout == false && isReaderMode == false
-        )
+        setFocusedPage(pageID, documentDidChange: false)
         let viewportChanged = viewport != newViewport
         viewport = newViewport
         updateZoomReadout(for: newViewport.stackZoomScale)
@@ -2675,9 +2693,12 @@ public final class CanvasEditorModel {
             return latestVerifiedIndexSnapshot
         }
 
-        let snapshotGeneration = generation
-        if inFlightGenerations.contains(snapshotGeneration) {
-            await waitForCheckpointCompletion(of: snapshotGeneration)
+        // One complete checkpoint owns the editor's serialization/verification
+        // working set. A newer generation waits without capturing another
+        // full notebook, then captures the latest state after publication.
+        // This also coalesces timer, explicit-save and lifecycle requests.
+        if let inFlightGeneration = inFlightGenerations.min() {
+            await waitForCheckpointCompletion(of: inFlightGeneration)
             guard generation > committedGeneration else {
                 return latestVerifiedIndexSnapshot
             }
@@ -2689,6 +2710,7 @@ public final class CanvasEditorModel {
             }
             return nil
         }
+        let snapshotGeneration = generation
         let snapshot = CanvasCoreSnapshot(
             generation: snapshotGeneration,
             pages: pages,
@@ -2901,7 +2923,8 @@ public final class CanvasEditorModel {
             inputMode: inputMode,
             viewport: viewport,
             pageLayout: pageLayout,
-            readerPreferences: readerPreferences
+            readerPreferences: readerPreferences,
+            currentPageID: currentPageID
         )
         do {
             try await preferencesStore.save(preferences)
