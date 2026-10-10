@@ -39,10 +39,42 @@ private final class PausedCanvasCheckpointStore: CanvasCoreCheckpointing {
 
 @MainActor
 final class CanvasCheckpointConcurrencyTests: XCTestCase {
-    func testPageNavigationPersistsFocusWithoutCheckpointingMarkup() async throws {
+    func testVerifiedIndexHandoffRetainsPageCountMetadataAcrossCheckpoints() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let pages = (0..<3).map { _ in CanvasPageSnapshot(markup: PaperMarkup(
+            bounds: CGRect(origin: .zero, size: CanvasConstants.a4PortraitSize))) }
+        let store = PausedCanvasCheckpointStore(snapshot: CanvasCoreSnapshot(
+            generation: 1, pages: pages, currentPageID: pages[0].id))
+        let model = CanvasEditorModel(
+            checkpointStore: store,
+            preferencesStore: CanvasPreferencesStore(rootURL: root),
+            autosaveTiming: CanvasAutosaveTiming(
+                trailingDelay: .seconds(30),
+                forcedDelay: .seconds(30),
+                preferencesDelay: .seconds(30)
+            )
+        )
+
+        await model.start()
+        XCTAssertEqual(model.latestVerifiedIndexPageCount, pages.count)
+        model.callbacks.markupChanged(pages[1].id, markup(revision: 1, from: pages[1].markup))
+        let save = Task { await model.retrySave() }
+        await store.waitForFirstCheckpoint()
+        store.releaseFirstCheckpoint()
+        await save.value
+
+        XCTAssertEqual(model.latestVerifiedIndexPageCount, pages.count)
+        XCTAssertEqual(model.verifiedCheckpointGeneration, 2)
+    }
+
+    func testPageNavigationPersistsFocusWithoutCheckpointingMarkup() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        // Exercise cached page lookup at the supported notebook maximum. Focus
+        // and viewport callbacks arrive during scrolling and must not linearly
+        // scan the complete page array on every frame.
+        let pages = (0..<1_000).map { _ in CanvasPageSnapshot(markup: PaperMarkup(
             bounds: CGRect(origin: .zero, size: CanvasConstants.a4PortraitSize))) }
         let store = PausedCanvasCheckpointStore(snapshot: CanvasCoreSnapshot(
             generation: 1, pages: pages, currentPageID: pages[0].id))
@@ -52,12 +84,14 @@ final class CanvasCheckpointConcurrencyTests: XCTestCase {
             autosaveTiming: CanvasAutosaveTiming(trailingDelay: .seconds(30),
                 forcedDelay: .seconds(30), preferencesDelay: .milliseconds(1)))
         await model.start()
-        model.callbacks.focusedPageChanged(pages[2].id)
+        model.callbacks.focusedPageChanged(pages[pages.count - 1].id)
+        model.callbacks.viewportChanged(pages[pages.count - 1].id, pages[pages.count - 1].viewport)
+        XCTAssertEqual(model.currentPageNumber, pages.count)
         await model.retrySave()
         try await Task.sleep(for: .milliseconds(25))
         XCTAssertTrue(store.startedGenerations.isEmpty)
         let restoredPreferences = await preferences.load()
-        XCTAssertEqual(restoredPreferences.currentPageID, pages[2].id)
+        XCTAssertEqual(restoredPreferences.currentPageID, pages[pages.count - 1].id)
     }
 
     func testRulerToolbarSlotTogglesPaperKitRulerWithoutOpeningAnInstrumentPanel() async throws {

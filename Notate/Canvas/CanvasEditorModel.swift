@@ -161,11 +161,9 @@ public final class CanvasEditorModel {
     /// `verifiedCheckpointGeneration`, immediately before the generation
     /// advances. Consumers should match `generation` to the snapshot they load.
     public private(set) var latestVerifiedIndexDelta: CanvasVerifiedIndexDelta?
-    /// The immutable snapshot at `verifiedCheckpointGeneration`. A pristine
-    /// generation-zero document is a valid baseline even though it has no
-    /// delta. Keeping this handoff in memory lets verified-index consumers update as
-    /// soon as the note opens or autosave verifies, without reopening storage.
-    @ObservationIgnored public private(set) var latestVerifiedIndexSnapshot: CanvasCoreSnapshot?
+    /// Metadata for the verified generation. Keep markup in the live editor or
+    /// durable store instead of retaining a second decoded notebook snapshot.
+    public private(set) var latestVerifiedIndexPageCount = 0
     public let documentKind: LibraryItemKind
 
     @ObservationIgnored public private(set) var initialPages: [CanvasPageSnapshot]
@@ -185,9 +183,16 @@ public final class CanvasEditorModel {
     )?
 
     @ObservationIgnored private weak var canvasController: (any PaperCanvasCommanding)?
+#if DEBUG || NOTATE_INK_PROFILING
+    var nativePinchDiagnosticForTesting: String {
+        (canvasController as? PaperCanvasViewController)?.nativePinchDiagnosticForTesting
+            ?? "canvas controller unavailable"
+    }
+#endif
     @ObservationIgnored private var pages: [CanvasPageSnapshot]
     @ObservationIgnored private var cachedPageIndices: [UUID: Int]?
     @ObservationIgnored private var currentPageID: UUID
+    @ObservationIgnored private var pageContentRevisions: [UUID: UInt64] = [:]
     @ObservationIgnored private var isInkContactActive = false
     @ObservationIgnored private var hasDeferredInkCheckpoint = false
     @ObservationIgnored private var pendingProgrammaticFocusPageID: UUID?
@@ -197,7 +202,8 @@ public final class CanvasEditorModel {
     @ObservationIgnored private var authorizedPageTrashRemovalID: UUID?
     @ObservationIgnored private var generation: Int64 = 0
     @ObservationIgnored private var committedGeneration: Int64 = 0
-    @ObservationIgnored private var lastVerifiedIndexPages: [CanvasPageSnapshot]
+    @ObservationIgnored private var lastVerifiedIndexPageIDs: [UUID] = []
+    @ObservationIgnored private var lastVerifiedIndexContentRevisions: [UUID: UInt64] = [:]
     @ObservationIgnored private var lastVerifiedIndexGeneration: Int64 = 0
     @ObservationIgnored private var hasStarted = false
     @ObservationIgnored private var activeLoadAttemptID: UUID?
@@ -317,7 +323,9 @@ public final class CanvasEditorModel {
         initialMarkup = markup
         pages = [page]
         currentPageID = pageID
-        lastVerifiedIndexPages = [page]
+        pageContentRevisions[page.id] = 0
+        lastVerifiedIndexPageIDs = [page.id]
+        lastVerifiedIndexContentRevisions[page.id] = 0
         readerPages = []
         readerCurrentPageID = nil
     }
@@ -466,7 +474,7 @@ public final class CanvasEditorModel {
     /// aligns that controller once, preserving its undo stack and page viewport.
     public func readerDidNavigate(to pageID: UUID) {
         guard isReaderMode,
-              pages.contains(where: { $0.id == pageID }) else { return }
+              pageIndex(for: pageID) != nil else { return }
         readerCurrentPageID = pageID
         setFocusedPage(pageID, documentDidChange: false)
     }
@@ -481,6 +489,18 @@ public final class CanvasEditorModel {
             return CanvasConstants.a4PortraitSize
         }
         return pages[index].displaySize
+    }
+
+    /// Returns only the densest current page for the opt-in profiling fixture.
+    /// Avoids retaining or copying a second full notebook snapshot just to
+    /// select one handwritten source page.
+    @available(iOS 27.0, *)
+    func mostHandwrittenPageForDeveloperStress() -> (page: CanvasPageSnapshot, pageNumber: Int)? {
+        guard let entry = pages.enumerated().max(by: {
+            $0.element.markup.subelements.strokes.count
+                < $1.element.markup.subelements.strokes.count
+        }) else { return nil }
+        return (entry.element, entry.offset + 1)
     }
 
     public var callbacks: PaperCanvasCallbacks {
@@ -928,14 +948,15 @@ public final class CanvasEditorModel {
                 ) else {
                     throw CanvasDurableInsertionError.captureFailed
                 }
+            let insertionContentRevision = pageContentRevisions[pageID] ?? 0
             guard generation > generationBeforeInsertion else {
                 throw CanvasDurableInsertionError.generationDidNotAdvance
             }
             let insertionGeneration = generation
-            var verifiedSnapshot: CanvasCoreSnapshot?
-            while verifiedSnapshot == nil {
-                verifiedSnapshot = await checkpointLatest()
-                guard verifiedSnapshot == nil else { break }
+            var verifiedGeneration: Int64?
+            while verifiedGeneration == nil {
+                verifiedGeneration = await checkpointLatest()
+                guard verifiedGeneration == nil else { break }
                 if case .retrying = saveState {
                     do {
                         try await Task.sleep(for: checkpointRetryDelay)
@@ -953,25 +974,22 @@ public final class CanvasEditorModel {
                     "Canvas Core did not return a verified checkpoint."
                 )
             }
-            guard let verifiedSnapshot else {
+            guard let verifiedGeneration else {
                 throw CanvasDurableInsertionError.checkpointFailed(
                     "Canvas Core did not return a verified checkpoint."
                 )
             }
-            guard verifiedSnapshot.generation >= insertionGeneration,
-                  let verifiedPage = verifiedSnapshot.pages.first(where: {
-                    $0.id == pageID
-                }),
-                Self.hasEquivalentAuthoredContent(
-                    verifiedPage,
-                    controllerReceipt.page
-                ) else {
-                    throw CanvasDurableInsertionError.verificationMismatch
-                }
+            // The live capture was compared with the controller receipt before
+            // saving. A verified generation at or after that capture makes the
+            // accepted insertion durable without retaining a decoded notebook.
+            guard verifiedGeneration >= insertionGeneration,
+                  (lastVerifiedIndexContentRevisions[pageID] ?? 0) >= insertionContentRevision else {
+                throw CanvasDurableInsertionError.verificationMismatch
+            }
             return CanvasVerifiedInsertionReceipt(
                 pageID: pageID,
                 controllerAcceptanceSequence: controllerReceipt.acceptanceSequence,
-                verifiedGeneration: verifiedSnapshot.generation
+                verifiedGeneration: verifiedGeneration
             )
         } catch let error as CanvasDurableInsertionError {
             if case .failed = saveState {
@@ -1157,7 +1175,7 @@ public final class CanvasEditorModel {
         currentPaperTemplate = template
         initialPages = pages
         canvasController?.setPaperTemplate(template, for: page.id)
-        markDocumentChanged()
+        markDocumentChanged(changingPageIDs: [page.id])
     }
 
     public func setPaperTemplateForAllPages(_ template: CanvasPaperTemplate) {
@@ -1184,7 +1202,7 @@ public final class CanvasEditorModel {
         }
 
         canvasController?.setPaperTemplate(template, forPageIDs: pageIDs)
-        markDocumentChanged()
+        markDocumentChanged(changingPageIDs: pageIDs)
     }
 
     static func paperTemplateTargetPageIDs(
@@ -1264,7 +1282,7 @@ public final class CanvasEditorModel {
             updateLegacyInitialPage(to: page)
         }
         updatePagePositionState()
-        markDocumentChanged()
+        markDocumentChanged(changingPageIDs: [page.id])
         return currentPageOverviewSnapshot()
     }
 
@@ -1328,7 +1346,7 @@ public final class CanvasEditorModel {
         } else {
             updateLegacyInitialPage(to: page)
         }
-        markDocumentChanged()
+        markDocumentChanged(changingPageIDs: [page.id])
     }
 
     public func goToPreviousPage() {
@@ -1435,7 +1453,7 @@ public final class CanvasEditorModel {
             updateLegacyInitialPage(to: duplicate)
         }
         updatePagePositionState()
-        markDocumentChanged()
+        markDocumentChanged(changingPageIDs: [duplicate.id])
         return currentPageOverviewSnapshot()
     }
 
@@ -1481,7 +1499,7 @@ public final class CanvasEditorModel {
         }
         canvasController?.replacePage(rotated)
         updatePagePositionState()
-        markDocumentChanged()
+        markDocumentChanged(changingPageIDs: [id])
         return currentPageOverviewSnapshot()
     }
 
@@ -1529,7 +1547,7 @@ public final class CanvasEditorModel {
             updateLegacyInitialPage(to: pages[currentIndex])
         }
         updatePagePositionState()
-        markDocumentChanged()
+        markDocumentChanged(changingPageIDs: [])
         return currentPageOverviewSnapshot()
     }
 
@@ -1565,6 +1583,7 @@ public final class CanvasEditorModel {
         }
 
         pages.remove(at: removalIndex)
+        pageContentRevisions[id] = nil
         cachedPageIndices = nil
         initialPages = pages
         if currentPageID == id {
@@ -1576,7 +1595,7 @@ public final class CanvasEditorModel {
             updateLegacyInitialPage(to: pages[index])
         }
         pendingProgrammaticFocusPageID = nil
-        markDocumentChanged()
+        markDocumentChanged(changingPageIDs: [])
         return currentPageOverviewSnapshot()
     }
 
@@ -1619,7 +1638,7 @@ public final class CanvasEditorModel {
         if hasVerifiedCheckpoint(atOrAfter: deletionGeneration) {
             // Publish the page-free document once more so both recovery slots
             // no longer contain a pre-deletion copy of the page.
-            markDocumentChanged()
+            markDocumentChanged(changingPageIDs: [])
             let recoveryGeneration = generation
             await checkpointLatest()
             await waitForCheckpoints(atOrAfter: recoveryGeneration)
@@ -1681,7 +1700,7 @@ public final class CanvasEditorModel {
             updateLegacyInitialPage(to: pages[currentIndex])
         }
         pendingProgrammaticFocusPageID = nil
-        markDocumentChanged()
+        markDocumentChanged(changingPageIDs: [page.id])
     }
 
     /// Captures every live PaperKit host before presenting page previews so
@@ -1876,15 +1895,15 @@ public final class CanvasEditorModel {
             updatePagePositionState()
             generation = 0
             committedGeneration = 0
-            lastVerifiedIndexPages = pages
+            pageContentRevisions = Dictionary(
+                uniqueKeysWithValues: pages.map { ($0.id, 0) }
+            )
+            lastVerifiedIndexPageIDs = pages.map(\.id)
+            lastVerifiedIndexContentRevisions = pageContentRevisions
             lastVerifiedIndexGeneration = 0
             latestVerifiedIndexDelta = nil
             verifiedCheckpointGeneration = 0
-            latestVerifiedIndexSnapshot = CanvasCoreSnapshot(
-                generation: 0,
-                pages: pages,
-                currentPageID: currentPageID
-            )
+            latestVerifiedIndexPageCount = pages.count
             readerPages = []
             readerCurrentPageID = nil
             launchState = .ready
@@ -1922,11 +1941,17 @@ public final class CanvasEditorModel {
             updatePagePositionState()
             generation = snapshot.generation
             committedGeneration = snapshot.generation
-            lastVerifiedIndexPages = snapshot.pages
+            pageContentRevisions = Dictionary(
+                uniqueKeysWithValues: pages.map { ($0.id, 0) }
+            )
+            lastVerifiedIndexPageIDs = snapshot.pages.map(\.id)
+            lastVerifiedIndexContentRevisions = Dictionary(
+                uniqueKeysWithValues: snapshot.pages.map { ($0.id, 0) }
+            )
             lastVerifiedIndexGeneration = snapshot.generation
             latestVerifiedIndexDelta = nil
             verifiedCheckpointGeneration = snapshot.generation
-            latestVerifiedIndexSnapshot = snapshot
+            latestVerifiedIndexPageCount = snapshot.pages.count
             readerPages = []
             readerCurrentPageID = nil
             launchState = .ready
@@ -2025,7 +2050,7 @@ public final class CanvasEditorModel {
         canRedo = false
         updatePagePositionState()
         if documentDidChange {
-            markDocumentChanged()
+            markDocumentChanged(changingPageIDs: [])
         } else if documentMode == .paged {
             persistPreferencesSoon()
         }
@@ -2061,8 +2086,11 @@ public final class CanvasEditorModel {
         )
     }
 
-    private func markDocumentChanged() {
+    private func markDocumentChanged(changingPageIDs: [UUID]? = nil) {
         generation += 1
+        for pageID in changingPageIDs ?? pages.map(\.id) {
+            pageContentRevisions[pageID, default: 0] &+= 1
+        }
         if saveState != .saving { saveState = .saving }
         if isInkContactActive {
             hasDeferredInkCheckpoint = true
@@ -2135,7 +2163,7 @@ public final class CanvasEditorModel {
         if pageID == currentPageID {
             updateLegacyInitialPage(to: pages[index])
         }
-        markDocumentChanged()
+        markDocumentChanged(changingPageIDs: [pageID])
     }
 
     /// Full-page replacements are used by rotation history because geometry,
@@ -2153,7 +2181,7 @@ public final class CanvasEditorModel {
             updateLegacyInitialPage(to: replacement)
         }
         updatePagePositionState()
-        markDocumentChanged()
+        markDocumentChanged(changingPageIDs: [replacement.id])
     }
 
     private func paperTemplateDidChange(
@@ -2171,7 +2199,7 @@ public final class CanvasEditorModel {
             currentPaperTemplate = template
             updateLegacyInitialPage(to: pages[index])
         }
-        markDocumentChanged()
+        markDocumentChanged(changingPageIDs: [pageID])
     }
 
     private func paperTemplatesDidChange(
@@ -2195,13 +2223,13 @@ public final class CanvasEditorModel {
             currentPaperTemplate = pages[index].paperTemplate
             updateLegacyInitialPage(to: pages[index])
         }
-        markDocumentChanged()
+        markDocumentChanged(changingPageIDs: Array(changedPageIDs))
     }
 
     private func focusedPageDidChange(_ pageID: UUID) {
         guard isReaderMode == false,
             isReaderModeTransitioning == false,
-            pages.contains(where: { $0.id == pageID }) else { return }
+            pageIndex(for: pageID) != nil else { return }
         if let pendingProgrammaticFocusPageID {
             guard pageID == pendingProgrammaticFocusPageID else { return }
             self.pendingProgrammaticFocusPageID = nil
@@ -2213,7 +2241,7 @@ public final class CanvasEditorModel {
         guard isReaderMode == false,
               isReaderModeTransitioning == false,
               newViewport.isValid,
-              pages.contains(where: { $0.id == pageID }) else { return }
+              pageIndex(for: pageID) != nil else { return }
         if let pendingProgrammaticFocusPageID {
             guard pageID == pendingProgrammaticFocusPageID else { return }
             self.pendingProgrammaticFocusPageID = nil
@@ -2472,8 +2500,8 @@ public final class CanvasEditorModel {
         return currentController.hasActiveSnapshotContact == false
     }
 
-    /// Pulls every hosted PaperKit value into the canonical model before the
-    /// model changes page topology or creates an immutable save snapshot.
+    /// Reconciles only controller state that has not reached the model through
+    /// its page-revision callbacks before creating an immutable save snapshot.
     /// Controller order is never trusted to replace the persisted page order.
     @discardableResult
     private func captureLatestControllerDocumentIfNeeded() -> Bool {
@@ -2489,6 +2517,12 @@ public final class CanvasEditorModel {
         guard canvasController.hasPendingProgrammaticInsertions == false else {
             return false
         }
+        // PaperKit publishes every accepted content mutation through its
+        // delegate before the safe snapshot boundary. Once those page
+        // revisions are delivered, the model already owns the authoritative
+        // content; asking each mounted editor for a whole-document snapshot
+        // after every stroke lift makes dense markup walk the main actor again.
+        guard canvasController.hasPendingSnapshotReconciliation else { return true }
 
         if let snapshot = canvasController.snapshotDocument() {
             return mergeControllerDocument(snapshot)
@@ -2523,7 +2557,7 @@ public final class CanvasEditorModel {
             }
         }
         if pageContentChanged {
-            markDocumentChanged()
+            markDocumentChanged(changingPageIDs: [snapshot.id])
         } else if viewportChanged, documentMode == .freeform {
             markFreeformViewportChanged()
         }
@@ -2535,7 +2569,7 @@ public final class CanvasEditorModel {
         preservingCurrentPresentation: Bool = false
     ) -> Bool {
         guard snapshot.viewport.isValid,
-              pages.contains(where: { $0.id == snapshot.currentPageID }),
+              pageIndex(for: snapshot.currentPageID) != nil,
               snapshot.pages.isEmpty == false else {
             saveState = .failed("The live canvas returned an invalid document snapshot.")
             return false
@@ -2544,15 +2578,15 @@ public final class CanvasEditorModel {
         let snapshotIDs = snapshot.pages.map(\.id)
         guard Set(snapshotIDs).count == snapshotIDs.count,
               snapshotIDs.contains(snapshot.currentPageID),
-              snapshotIDs.allSatisfy({ id in pages.contains(where: { $0.id == id }) }),
+              snapshotIDs.allSatisfy({ pageIndex(for: $0) != nil }),
               snapshot.pages.allSatisfy({ $0.viewport.isValid }) else {
             saveState = .failed("The live canvas returned inconsistent page identities.")
             return false
         }
 
-        var pageContentChanged = false
+        var changedPageIDs: [UUID] = []
         for livePage in snapshot.pages {
-            guard let index = pages.firstIndex(where: { $0.id == livePage.id }) else {
+            guard let index = pageIndex(for: livePage.id) else {
                 continue
             }
             let storedPage = pages[index]
@@ -2561,7 +2595,7 @@ public final class CanvasEditorModel {
                 || storedPage.paperTemplate != livePage.paperTemplate
                 || storedPage.geometry != livePage.geometry
                 || storedPage.background != livePage.background {
-                pageContentChanged = true
+                changedPageIDs.append(livePage.id)
                 pages[index] = storedPage.replacing(
                     markup: livePage.markup,
                     tables: livePage.tables,
@@ -2598,8 +2632,8 @@ public final class CanvasEditorModel {
             }
         }
 
-        if pageContentChanged || focusChanged {
-            markDocumentChanged()
+        if changedPageIDs.isEmpty == false || focusChanged {
+            markDocumentChanged(changingPageIDs: changedPageIDs)
         } else if viewportChanged, documentMode == .freeform {
             markFreeformViewportChanged()
         }
@@ -2669,7 +2703,7 @@ public final class CanvasEditorModel {
     }
 
     @discardableResult
-    private func checkpointLatest() async -> CanvasCoreSnapshot? {
+    private func checkpointLatest() async -> Int64? {
         guard isReaderModeTransitioning == false else {
             retainDeferredCheckpointRetry()
             return nil
@@ -2685,12 +2719,11 @@ public final class CanvasEditorModel {
             }
         }
         requiresDeferredCheckpointRetry = false
-        guard let checkpointStore, generation > committedGeneration else {
-            if generation <= committedGeneration {
-                saveState = .saved
-                cancelSaveTimers()
-            }
-            return latestVerifiedIndexSnapshot
+        guard let checkpointStore else { return nil }
+        guard generation > committedGeneration else {
+            saveState = .saved
+            cancelSaveTimers()
+            return committedGeneration
         }
 
         // One complete checkpoint owns the editor's serialization/verification
@@ -2700,7 +2733,7 @@ public final class CanvasEditorModel {
         if let inFlightGeneration = inFlightGenerations.min() {
             await waitForCheckpointCompletion(of: inFlightGeneration)
             guard generation > committedGeneration else {
-                return latestVerifiedIndexSnapshot
+                return committedGeneration
             }
             if case .retrying = saveState {
                 return nil
@@ -2711,6 +2744,7 @@ public final class CanvasEditorModel {
             return nil
         }
         let snapshotGeneration = generation
+        let snapshotPageContentRevisions = pageContentRevisions
         let snapshot = CanvasCoreSnapshot(
             generation: snapshotGeneration,
             pages: pages,
@@ -2729,8 +2763,10 @@ public final class CanvasEditorModel {
             isCheckpointRetryPending = false
             canvasController?.setCheckpointRetryPending(false)
             committedGeneration = max(committedGeneration, snapshotGeneration)
-            publishVerifiedIndexDelta(for: verifiedSnapshot)
-            latestVerifiedIndexSnapshot = verifiedSnapshot
+            publishVerifiedIndexDelta(
+                for: verifiedSnapshot,
+                pageContentRevisions: snapshotPageContentRevisions
+            )
             verifiedCheckpointGeneration = max(
                 verifiedCheckpointGeneration,
                 snapshotGeneration
@@ -2743,7 +2779,8 @@ public final class CanvasEditorModel {
                 scheduleTrailingSave()
                 ensureForcedSave()
             }
-            return verifiedSnapshot
+            latestVerifiedIndexPageCount = verifiedSnapshot.pages.count
+            return verifiedSnapshot.generation
         } catch is CancellationError {
             if generation > committedGeneration {
                 retainDeferredCheckpointRetry()
@@ -2792,46 +2829,30 @@ public final class CanvasEditorModel {
     /// Advances the index baseline only for a newly verified snapshot. The
     /// method is deliberately synchronous so actor reentrancy cannot separate
     /// delta publication, baseline replacement, and generation observation.
-    private func publishVerifiedIndexDelta(for snapshot: CanvasCoreSnapshot) {
+    private func publishVerifiedIndexDelta(
+        for snapshot: CanvasCoreSnapshot,
+        pageContentRevisions: [UUID: UInt64]
+    ) {
         guard snapshot.generation > lastVerifiedIndexGeneration else { return }
-
-        let previousPagesByID = Dictionary(
-            lastVerifiedIndexPages.map { ($0.id, $0) },
-            uniquingKeysWith: { current, _ in current }
-        )
         let currentIDs = snapshot.pages.map(\.id)
-        let currentIDSet = Set(currentIDs)
-        let previousIDs = lastVerifiedIndexPages.map(\.id)
-
-        let changedPageIDs = snapshot.pages.compactMap { page -> UUID? in
-            guard let previous = previousPagesByID[page.id] else { return page.id }
-            return Self.hasEquivalentIndexContent(previous, page) ? nil : page.id
-        }
-        let removedPageIDs = previousIDs.filter { currentIDSet.contains($0) == false }
-
-        latestVerifiedIndexDelta = CanvasVerifiedIndexDelta(
+        let currentPageContentRevisions = Dictionary(
+            uniqueKeysWithValues: currentIDs.map { pageID in
+                (pageID, pageContentRevisions[pageID] ?? 0)
+            }
+        )
+        latestVerifiedIndexDelta = CanvasPageRevisionDelta.make(
             baseGeneration: lastVerifiedIndexGeneration,
             generation: snapshot.generation,
-            changedPageIDs: changedPageIDs,
-            removedPageIDs: removedPageIDs,
-            pageOrderChanged: previousIDs != currentIDs
+            previousPageIDs: lastVerifiedIndexPageIDs,
+            previousContentRevisions: lastVerifiedIndexContentRevisions,
+            currentPageIDs: currentIDs,
+            currentContentRevisions: currentPageContentRevisions
         )
 
-        latestVerifiedIndexSnapshot = snapshot
-        lastVerifiedIndexPages = snapshot.pages
+        latestVerifiedIndexPageCount = currentIDs.count
+        lastVerifiedIndexPageIDs = currentIDs
+        lastVerifiedIndexContentRevisions = currentPageContentRevisions
         lastVerifiedIndexGeneration = snapshot.generation
-    }
-
-    /// Matches the inputs currently used to produce a search-index source and
-    /// its locator. Viewport, paper styling, and focus are intentionally not
-    /// included because they do not change searchable content or page bounds.
-    private static func hasEquivalentIndexContent(
-        _ lhs: CanvasPageSnapshot,
-        _ rhs: CanvasPageSnapshot
-    ) -> Bool {
-        lhs.markup == rhs.markup
-            && lhs.background == rhs.background
-            && lhs.geometry == rhs.geometry
     }
 
     private static func hasEquivalentAuthoredContent(

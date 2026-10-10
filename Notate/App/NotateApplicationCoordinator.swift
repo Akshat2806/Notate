@@ -8,6 +8,9 @@ import SwiftData
 import SwiftUI
 import UniformTypeIdentifiers
 import UIKit
+#if NOTATE_INK_PROFILING
+import PencilKit
+#endif
 
 enum NotateAppRoute: Hashable, Sendable {
     case home
@@ -745,7 +748,9 @@ final class NotateApplicationCoordinator {
         didRecordEditReadiness = true
         guard isCatalogWritable else { return }
         #if NOTATE_INK_PROFILING
-        if ProcessInfo.processInfo.arguments.contains("--ink-viewport-notebook") {
+        if ProcessInfo.processInfo.arguments.contains("--ink-handwriting-stress") {
+            await openHandwritingStressNotebook()
+        } else if ProcessInfo.processInfo.arguments.contains("--ink-viewport-notebook") {
             await openInkProfilingNotebook()
         }
         #endif
@@ -1323,6 +1328,214 @@ final class NotateApplicationCoordinator {
             UserDefaults.standard.set(id.uuidString, forKey: key)
             print("INK_VIEWPORT_NOTEBOOK_CREATED \(id)")
             await prepareInkScrollCheck()
+        }
+    }
+
+    /// Builds a stress-only notebook from the user's existing Quick Note Copy.
+    /// The source is opened read-only and never checkpointed or edited. All
+    /// duplication and page generation stay on-device; only counts and byte
+    /// estimates are logged for the profiling report.
+    private func openHandwritingStressNotebook() async {
+        let requestedPageCount = Int(ProcessInfo.processInfo.environment[
+            "NOTATE_INK_HANDWRITING_STRESS_PAGES"
+        ] ?? "") ?? 1_000
+        let stressPageCount = min(1_000, max(1, requestedPageCount))
+        let key = "notate.inkProfiling.handwritingNotebookID"
+        if let value = UserDefaults.standard.string(forKey: key),
+           let id = UUID(uuidString: value), let item = repository.item(id: id),
+           !item.isTrashed, item.payloadState == .ready {
+            open(item)
+            await prepareInkScrollCheck()
+            return
+        }
+
+        guard #available(iOS 27.0, *) else {
+            let message = "Handwriting stress fixture creation needs iPadOS 27's PaperKit stroke collection API."
+            print("INK_HANDWRITING_STRESS_FAILED \(message)")
+            alertMessage = message
+            return
+        }
+
+        do {
+            try repository.loadCompleteItemCatalog()
+        } catch {
+            alertMessage = "Could not load the notebook catalog for the handwriting stress test: \(error.localizedDescription)"
+            return
+        }
+
+        let candidates = repository.items.filter {
+            $0.name == "Quick Note Copy"
+                && $0.kind == .notebook
+                && $0.payloadState == .ready
+                && !$0.isTrashed
+        }
+        guard let sourceItem = candidates.sorted(by: { lhs, rhs in
+            (lhs.lastOpenedAt ?? lhs.modifiedAt) > (rhs.lastOpenedAt ?? rhs.modifiedAt)
+        }).first else {
+            let message = "Could not find a ready notebook named Quick Note Copy. No notebook was changed."
+            print("INK_HANDWRITING_STRESS_FAILED \(message)")
+            alertMessage = message
+            return
+        }
+
+        print("INK_HANDWRITING_STRESS_SOURCE candidates=\(candidates.count) pages=\(sourceItem.pageCount)")
+        open(sourceItem)
+        guard let sourceModel = activeEditor?.model else {
+            alertMessage = "Quick Note Copy could not be opened for the handwriting stress test."
+            return
+        }
+        var sourceReady = false
+        for _ in 0..<600 {
+            if sourceModel.launchState == .ready {
+                sourceReady = true
+                break
+            }
+            if case let .failed(message) = sourceModel.launchState {
+                alertMessage = "Quick Note Copy could not be read: \(message)"
+                print("INK_HANDWRITING_STRESS_SOURCE_FAILED \(message)")
+                return
+            }
+            do { try await Task.sleep(for: .milliseconds(50)) } catch { return }
+        }
+        guard sourceReady,
+              activeEditor?.itemID == sourceItem.id,
+              let denseSourcePage = sourceModel.mostHandwrittenPageForDeveloperStress() else {
+            let message = "Quick Note Copy did not produce a page for the handwriting stress fixture. No notebook was changed."
+            print("INK_HANDWRITING_STRESS_FAILED \(message)")
+            alertMessage = message
+            return
+        }
+
+        let sourcePage = denseSourcePage.page
+        let sourcePageNumber = denseSourcePage.pageNumber
+        let originalStrokes = sourcePage.markup.subelements.strokes
+        guard !originalStrokes.isEmpty else {
+            let message = "Quick Note Copy contains no PaperKit handwriting strokes. No notebook was changed."
+            print("INK_HANDWRITING_STRESS_FAILED \(message)")
+            alertMessage = message
+            return
+        }
+
+        let targetStrokeCount = max(originalStrokes.count, 1_000)
+        var expandedMarkup = sourcePage.markup
+        if originalStrokes.count < targetStrokeCount {
+            var copies: [PKStroke] = []
+            copies.reserveCapacity(targetStrokeCount - originalStrokes.count)
+            for index in 0..<(targetStrokeCount - originalStrokes.count) {
+                let stroke = originalStrokes[index % originalStrokes.count]
+                copies.append(PKStroke(
+                    ink: stroke.ink,
+                    path: stroke.path,
+                    transform: stroke.transform,
+                    mask: stroke.mask
+                ))
+            }
+            expandedMarkup.append(contentsOf: PKDrawing(strokes: copies))
+        }
+        let resultingStrokeCount = expandedMarkup.subelements.strokes.count
+        guard resultingStrokeCount >= 1_000 else {
+            let message = "PaperKit did not retain the requested 1,000-stroke fixture. No notebook was changed."
+            print("INK_HANDWRITING_STRESS_FAILED expectedAtLeast=1000 actual=\(resultingStrokeCount)")
+            alertMessage = message
+            return
+        }
+        let encodedPageBytes: Int
+        do {
+            encodedPageBytes = try await expandedMarkup.dataRepresentation().count
+        } catch {
+            alertMessage = "Could not measure the handwritten stress page: \(error.localizedDescription)"
+            print("INK_HANDWRITING_STRESS_FAILED encodeEstimate=\(error.localizedDescription)")
+            return
+        }
+
+        let estimatedAggregateMarkupBytes = Int64(encodedPageBytes) * Int64(stressPageCount)
+        let maximumAggregateMarkupBytes = Int64(
+            CanvasCoreResourceLimits.production.maximumAggregateMarkupByteCount
+        )
+        guard estimatedAggregateMarkupBytes <= maximumAggregateMarkupBytes else {
+            let estimated = ByteCountFormatter.string(
+                fromByteCount: estimatedAggregateMarkupBytes,
+                countStyle: .file
+            )
+            let maximum = ByteCountFormatter.string(
+                fromByteCount: maximumAggregateMarkupBytes,
+                countStyle: .file
+            )
+            let maximumPageCount = max(1, Int(maximumAggregateMarkupBytes / Int64(encodedPageBytes)))
+            let message = "This \(stressPageCount)-page fixture needs about \(estimated) of PaperKit markup, above Notate’s \(maximum) per-notebook limit. At 1,000 strokes per page, this store supports about \(maximumPageCount) pages. Supporting 500 dense pages requires a streamed, page-based checkpoint format; the limit was not bypassed."
+            print("INK_HANDWRITING_STRESS_SKIPPED reason=aggregateMarkupLimit pageCount=\(stressPageCount) pageStrokeCount=\(resultingStrokeCount) estimatedAggregateMarkupBytes=\(estimatedAggregateMarkupBytes) maximumAggregateMarkupBytes=\(maximumAggregateMarkupBytes) maximumDensePages=\(maximumPageCount)")
+            alertMessage = message
+            return
+        }
+
+        let estimatedCheckpointBytes = Int64(encodedPageBytes + 64 * 1_024) * Int64(stressPageCount)
+        let requiredFreeBytes = estimatedCheckpointBytes * 2 + 256 * 1_024 * 1_024
+        let availableBytes = (try? FileManager.default.attributesOfFileSystem(
+            forPath: NSHomeDirectory()
+        )[.systemFreeSize] as? NSNumber)?.int64Value ?? 0
+        guard availableBytes > 0, requiredFreeBytes < availableBytes * 8 / 10 else {
+            let requiredAvailableBytes = Int64(ceil(Double(requiredFreeBytes) / 0.8))
+            let requiredAvailable = ByteCountFormatter.string(fromByteCount: requiredAvailableBytes, countStyle: .file)
+            let available = ByteCountFormatter.string(fromByteCount: availableBytes, countStyle: .file)
+            let message = "The \(stressPageCount)-page handwritten fixture needs about \(ByteCountFormatter.string(fromByteCount: requiredFreeBytes, countStyle: .file)) for working data and at least \(requiredAvailable) available to preserve the storage reserve. This iPad has about \(available) free; the stress notebook was not created."
+            print("INK_HANDWRITING_STRESS_SKIPPED originalStrokes=\(originalStrokes.count) pageStrokeCount=\(resultingStrokeCount) pageCount=\(stressPageCount) estimatedCheckpointBytes=\(estimatedCheckpointBytes) requiredAvailableBytes=\(requiredAvailableBytes) availableBytes=\(availableBytes)")
+            alertMessage = message
+            return
+        }
+
+        print("INK_HANDWRITING_STRESS_PRECHECK sourcePages=\(sourceModel.pageCount) sourcePageNumber=\(sourcePageNumber) sourcePageStrokeCount=\(originalStrokes.count) stressPageStrokeCount=\(resultingStrokeCount) pageCount=\(stressPageCount) encodedPageBytes=\(encodedPageBytes) estimatedCheckpointBytes=\(estimatedCheckpointBytes) availableBytes=\(availableBytes)")
+        UserDefaults.standard.set(originalStrokes.count,
+                                  forKey: "notate.inkProfiling.handwritingSourceStrokeCount")
+        UserDefaults.standard.set(sourcePageNumber,
+                                  forKey: "notate.inkProfiling.handwritingSourcePageNumber")
+        UserDefaults.standard.set(resultingStrokeCount,
+                                  forKey: "notate.inkProfiling.handwritingStrokesPerPage")
+        UserDefaults.standard.set(estimatedCheckpointBytes,
+                                  forKey: "notate.inkProfiling.handwritingEstimatedCheckpointBytes")
+        let duplicatedTables = sourcePage.tables.map { table in
+            CanvasTable(
+                origin: table.origin,
+                rowCount: table.rowCount,
+                columnCount: table.columnCount,
+                cellSize: table.cellSize,
+                cornerRadius: table.cornerRadius
+            )
+        }
+
+        let name = "Quick Note Ink Stress · \(stressPageCount) pages"
+        await createEditableItem(kind: .notebook, name: name, parentID: nil,
+                                 cover: .preset(.softLinen)) { itemID in
+            var pages: [CanvasPageSnapshot] = []
+            pages.reserveCapacity(stressPageCount)
+            for index in 0..<stressPageCount {
+                try Task.checkCancellation()
+                pages.append(CanvasPageSnapshot(
+                    markup: expandedMarkup,
+                    tables: duplicatedTables,
+                    viewport: sourcePage.viewport,
+                    paperTemplate: sourcePage.paperTemplate,
+                    geometry: sourcePage.geometry,
+                    background: sourcePage.background
+                ))
+                if index.isMultiple(of: 20) { await Task.yield() }
+            }
+            let snapshot = CanvasCoreSnapshot(
+                generation: 1,
+                pages: pages,
+                currentPageID: pages[0].id
+            )
+            let store = CanvasCoreStore(rootURL: self.assetStore.directories(for: itemID).canvas)
+            try await store.checkpoint(snapshot)
+            return snapshot
+        }
+        if let id = activeEditor?.itemID, repository.item(id: id)?.name == name {
+            UserDefaults.standard.set(id.uuidString, forKey: key)
+            UserDefaults.standard.set(sourceItem.id.uuidString,
+                                      forKey: "notate.inkProfiling.handwritingSourceID")
+            print("INK_HANDWRITING_STRESS_CREATED sourcePageNumber=\(sourcePageNumber) sourceStrokeCount=\(originalStrokes.count) strokesPerPage=\(resultingStrokeCount) pages=\(stressPageCount) estimatedCheckpointBytes=\(estimatedCheckpointBytes)")
+            await prepareInkScrollCheck()
+        } else {
+            print("INK_HANDWRITING_STRESS_FAILED fixtureCreationDidNotOpen")
         }
     }
 
@@ -2202,13 +2415,14 @@ final class NotateApplicationCoordinator {
             initialItem.kind == .notebook
             || initialItem.kind == .importedDocument else { return nil }
 
-        let snapshot: CanvasCoreSnapshot
-        if let verified = model.latestVerifiedIndexSnapshot,
-            verified.generation == model.verifiedCheckpointGeneration {
-            snapshot = verified
+        let verifiedGeneration: Int64
+        let verifiedPageCount: Int
+        if model.latestVerifiedIndexPageCount > 0 {
+            verifiedGeneration = model.verifiedCheckpointGeneration
+            verifiedPageCount = model.latestVerifiedIndexPageCount
         } else {
-            // Recovery-only fallback when the in-memory verified snapshot is
-            // unavailable.
+            // Recovery-only fallback when verified generation metadata is
+            // unavailable. Release the decoded snapshot after this check.
             let store = CanvasCoreStore(
                 rootURL: assetStore.directories(for: itemID).canvas
             )
@@ -2216,7 +2430,8 @@ final class NotateApplicationCoordinator {
                 await store.load()
             }.value
             guard case let .restored(restored) = loadResult else { return nil }
-            snapshot = restored
+            verifiedGeneration = restored.generation
+            verifiedPageCount = restored.pages.count
         }
 
         guard !Task.isCancelled,
@@ -2227,12 +2442,12 @@ final class NotateApplicationCoordinator {
             item.kind == .notebook
             || item.kind == .importedDocument else { return nil }
 
-        if item.previewGeneration > snapshot.generation {
+        if item.previewGeneration > verifiedGeneration {
             // Canvas Core has already promoted this recovered checkpoint as
             // the durable head. The higher preview generation remains a
             // durable recovery marker until the replacement thumbnail commits.
             guard model.saveState == .saved,
-                model.verifiedCheckpointGeneration == snapshot.generation,
+                model.verifiedCheckpointGeneration == verifiedGeneration,
                 !Task.isCancelled else { return nil }
 
             // `library.png` has no embedded generation stamp. Its physical
@@ -2257,15 +2472,15 @@ final class NotateApplicationCoordinator {
             do {
                 _ = try repository.reconcileRecoveredPayload(
                     itemID: itemID,
-                    verifiedGeneration: snapshot.generation,
-                    pageCount: snapshot.pages.count
+                    verifiedGeneration: verifiedGeneration,
+                    pageCount: verifiedPageCount
                 )
             } catch {
                 return nil
             }
             await librarySession.thumbnailStore.invalidate(itemIDs: [itemID])
             guard model.saveState == .saved,
-                model.verifiedCheckpointGeneration == snapshot.generation,
+                model.verifiedCheckpointGeneration == verifiedGeneration,
                 !Task.isCancelled else { return nil }
         }
 
@@ -2274,10 +2489,10 @@ final class NotateApplicationCoordinator {
             let current = repository.item(id: itemID),
             current.payloadState == .ready,
             current.isTrashed == false,
-            model.verifiedCheckpointGeneration == snapshot.generation else {
+            model.verifiedCheckpointGeneration == verifiedGeneration else {
             return nil
         }
-        return snapshot.generation
+        return verifiedGeneration
     }
 
     /// Coalesces the complete post-checkpoint pipeline. A successor drains its cancelled predecessor before starting,

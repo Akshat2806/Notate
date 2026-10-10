@@ -613,7 +613,7 @@ public nonisolated struct CanvasPaperTemplate: Codable, Equatable, Sendable {
     /// Geometry authored by the source page. Rotation is stored independently so
     /// PDF/image bytes remain immutable while PaperKit markup can be transformed
     /// into the currently displayed coordinate space.
-public struct CanvasPageGeometry: Codable, Equatable, Sendable {
+public nonisolated struct CanvasPageGeometry: Codable, Equatable, Sendable {
     public var authoredWidth: Double
     public var authoredHeight: Double
     public var quarterTurns: Int
@@ -715,7 +715,7 @@ public struct CanvasPageGeometry: Codable, Equatable, Sendable {
 /// importer before its first checkpoint) and is deliberately excluded from
 /// the Canvas Core envelope. Every page can therefore share the same source
 /// bytes in memory without serializing a full PDF once per page.
-public struct CanvasPDFSourceReference: Equatable, Sendable {
+public nonisolated struct CanvasPDFSourceReference: Equatable, Sendable {
     public let relativePath: String
     public let documentData: Data?
     public let contentChecksum: String?
@@ -759,7 +759,7 @@ public struct CanvasPDFSourceReference: Equatable, Sendable {
 ///
 /// The original bytes live in the item's `Sources` directory. `imageData` is
 /// hydrated for editing/rendering but is never written into a v5-or-later checkpoint.
-public struct CanvasImageSourceReference: Equatable, Sendable {
+public nonisolated struct CanvasImageSourceReference: Equatable, Sendable {
     public let relativePath: String
     public let imageData: Data?
     public let contentChecksum: String?
@@ -801,7 +801,7 @@ public struct CanvasImageSourceReference: Equatable, Sendable {
 
     /// Immutable content rendered beneath PaperKit markup. Images remain embedded
     /// only in memory; both images and PDFs persist as item-scoped source files.
-public enum CanvasPageBackground: Equatable, Sendable {
+public nonisolated enum CanvasPageBackground: Equatable, Sendable {
     case paper
     case image(source: CanvasImageSourceReference, suggestedName: String?)
     case pdfPage(
@@ -1058,7 +1058,7 @@ public enum CanvasShape: String, CaseIterable, Codable, Sendable {
     /// The explicit size selected in the Add tray before a table is inserted.
     /// Keeping this value typed prevents invalid picker state from crossing the
     /// canvas command boundary.
-public struct CanvasTableSize: Codable, Equatable, Hashable, Sendable {
+public nonisolated struct CanvasTableSize: Codable, Equatable, Hashable, Sendable {
     public static let pickerRange = 1...8
     public static let standard = CanvasTableSize(rowCount: 2, columnCount: 2)
 
@@ -1081,7 +1081,7 @@ public struct CanvasTableSize: Codable, Equatable, Hashable, Sendable {
     /// no table element or stable element identifiers, so keeping this geometry in
     /// the page snapshot lets Notate redraw and resize the table without trying to
     /// reverse-engineer a collection of unrelated line markups.
-public struct CanvasTable: Codable, Equatable, Identifiable, Sendable {
+public nonisolated struct CanvasTable: Codable, Equatable, Identifiable, Sendable {
     public static let minimumRowCount = 1
     public static let minimumColumnCount = 1
     public static let defaultRowCount = 2
@@ -1429,7 +1429,7 @@ public struct CanvasToolState: Codable, Equatable, Sendable {
     }
 }
 
-public struct CanvasViewportState: Codable, Equatable, Sendable {
+public nonisolated struct CanvasViewportState: Codable, Equatable, Sendable {
     public var normalizedCenterX: Double
     public var normalizedCenterY: Double
     public var visibleWidth: Double
@@ -2082,6 +2082,10 @@ public protocol PaperCanvasCommanding: AnyObject {
     /// True after an ordinary app insertion has been accepted but before its
     /// immutable undo pair and Canvas Core publication are complete.
     var hasPendingProgrammaticInsertions: Bool { get }
+    /// True when the controller has document mutations that have not yet been
+    /// reflected by its model callbacks. Stable PaperKit pages are already
+    /// authoritative in the model and should not be re-read at every save.
+    var hasPendingSnapshotReconciliation: Bool { get }
     func applyToolState(_ state: CanvasToolState)
     func applyInputMode(_ mode: CanvasInputMode)
     @discardableResult
@@ -2164,6 +2168,7 @@ public protocol PaperCanvasCommanding: AnyObject {
 public extension PaperCanvasCommanding {
     var hasActiveSnapshotContact: Bool { false }
     var hasPendingProgrammaticInsertions: Bool { false }
+    var hasPendingSnapshotReconciliation: Bool { true }
     func setCheckpointRetryPending(_ isPending: Bool) {}
     func completeDismantle() {}
     @discardableResult
@@ -2247,7 +2252,7 @@ public enum CanvasConstants {
     /// repeated low-zoom edge expansion even when the visible region is small.
     /// 65,536 points is sixteen times the initial board along each axis while
     /// keeping transforms, tile indexes, and persisted snapshots predictable.
-    public static let maximumPersistedCanvasDimension: CGFloat = 65_536
+    public nonisolated static let maximumPersistedCanvasDimension: CGFloat = 65_536
     public static let freeformExpansionChunk: CGFloat = 2_048
     public static let freeformEdgeThreshold: CGFloat = 320
     public static let pageGap: CGFloat = 24
@@ -2260,6 +2265,9 @@ public enum CanvasConstants {
     /// Keep a wider, stable renderer range than the persisted/user-facing
     /// range so paper and ink remain in the same projection below 50% and
     /// above 1000% while the outer notebook scroll view springs to its limit.
+    /// Keep PaperKit's native gesture range stable through transient bounce.
+    /// The notebook still persists and publishes only its supported 0.5...10
+    /// logical zoom range after the native gesture settles.
     public static let nativeViewportRenderingZoomRange: ClosedRange<CGFloat> = 0.25...12
     /// A pull starts only when a new drag begins this close to a settled edge.
     public static let boundaryPullStartSlop: CGFloat = 10

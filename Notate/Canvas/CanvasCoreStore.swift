@@ -3,7 +3,7 @@ import CryptoKit
 import Foundation
 import PaperKit
 
-public struct CanvasPageSnapshot: Equatable, Sendable, Identifiable {
+public nonisolated struct CanvasPageSnapshot: Equatable, Sendable, Identifiable {
     public let id: UUID
     public let markup: PaperMarkup
     public let tables: [CanvasTable]
@@ -62,7 +62,7 @@ public struct CanvasPageSnapshot: Equatable, Sendable, Identifiable {
     }
 }
 
-public struct CanvasCoreSnapshot: Equatable, Sendable {
+public nonisolated struct CanvasCoreSnapshot: Equatable, Sendable {
     public let generation: Int64
     public let pages: [CanvasPageSnapshot]
     public let currentPageID: UUID
@@ -119,6 +119,34 @@ public struct CanvasVerifiedIndexDelta: Equatable, Sendable {
         self.changedPageIDs = changedPageIDs
         self.removedPageIDs = removedPageIDs
         self.pageOrderChanged = pageOrderChanged
+    }
+}
+
+/// Computes index work from page revisions captured with a verified
+/// generation. Ink markup remains owned by the editor/store; index publication
+/// needs only page identities and revisions, so it never has to compare every
+/// full PaperMarkup value after an autosave.
+nonisolated enum CanvasPageRevisionDelta {
+    static func make(
+        baseGeneration: Int64,
+        generation: Int64,
+        previousPageIDs: [UUID],
+        previousContentRevisions: [UUID: UInt64],
+        currentPageIDs: [UUID],
+        currentContentRevisions: [UUID: UInt64]
+    ) -> CanvasVerifiedIndexDelta {
+        let currentIDSet = Set(currentPageIDs)
+        let changedPageIDs = currentPageIDs.filter { pageID in
+            previousContentRevisions[pageID] != currentContentRevisions[pageID]
+        }
+        let removedPageIDs = previousPageIDs.filter { !currentIDSet.contains($0) }
+        return CanvasVerifiedIndexDelta(
+            baseGeneration: baseGeneration,
+            generation: generation,
+            changedPageIDs: changedPageIDs,
+            removedPageIDs: removedPageIDs,
+            pageOrderChanged: previousPageIDs != currentPageIDs
+        )
     }
 }
 
@@ -192,12 +220,12 @@ public enum CanvasCoreStoreError: Error, Equatable, LocalizedError, Sendable {
 
 /// Async boundary around PaperKit's data representation. Tests can inject a
 /// controlled implementation without teaching the store about PaperKit internals.
-public protocol CanvasCoreMarkupCoding: Sendable {
+public nonisolated protocol CanvasCoreMarkupCoding: Sendable {
     func encode(_ markup: PaperMarkup) async throws -> Data
     func decode(_ data: Data) async throws -> PaperMarkup
 }
 
-public struct PaperKitCanvasCoreCodec: CanvasCoreMarkupCoding, Sendable {
+public nonisolated struct PaperKitCanvasCoreCodec: CanvasCoreMarkupCoding, Sendable {
     public init() {}
 
     public func encode(_ markup: PaperMarkup) async throws -> Data {
@@ -227,7 +255,7 @@ public extension CanvasCoreCheckpointing {
     }
 }
 
-struct CanvasCoreResourceLimits: Equatable, Sendable {
+nonisolated struct CanvasCoreResourceLimits: Equatable, Sendable {
     static let production = CanvasCoreResourceLimits(
         maximumPageCount: 1_000,
         maximumCheckpointEncodedByteCount: 128 * 1_024 * 1_024,
@@ -255,6 +283,12 @@ struct CanvasCoreResourceLimits: Equatable, Sendable {
     let maximumSerializedWorkingSetByteCount: Int
     let maximumUniqueImportedSourceCount: Int
     let maximumPersistedGeneration: Int64
+
+    var aggregateMarkupLimitDescription: String {
+        let mebibyte = 1_024 * 1_024
+        let maximumMebibytes = (maximumAggregateMarkupByteCount + mebibyte - 1) / mebibyte
+        return "Notate supports up to \(maximumMebibytes) MiB of PaperKit markup across one notebook. Reduce the number or complexity of pages, or split the content across notebooks. Larger dense notebooks require streamed page storage."
+    }
 
     init(
         maximumPageCount: Int,
@@ -775,6 +809,22 @@ public actor CanvasCoreStore: CanvasCoreCheckpointing {
         }
     }
 
+    /// Resolves an imported page's source bytes for the copy-only v7 developer
+    /// import. The returned value is detached from this store's item-relative
+    /// asset paths, and this method never writes into the source notebook.
+    func hasCheckpointForDeveloperImport() -> Bool {
+        FileManager.default.fileExists(atPath: currentURL.path)
+            || FileManager.default.fileExists(atPath: previousURL.path)
+    }
+
+    func pageForDeveloperImport(_ page: CanvasPageSnapshot) throws -> CanvasPageSnapshot {
+        let background = try Self.resolveDeveloperImportBackground(
+            page.background,
+            sourcesRootURL: sourcesRootURL
+        )
+        return page.replacing(background: background)
+    }
+
     public func checkpoint(_ snapshot: CanvasCoreSnapshot) async throws {
         try Self.validate(snapshot, limits: resourceLimits)
         let requestToken = try beginRequest(for: snapshot.generation)
@@ -905,7 +955,7 @@ public actor CanvasCoreStore: CanvasCoreCheckpointing {
                     <= resourceLimits.maximumAggregateMarkupByteCount else {
                 group.cancelAll()
                 throw CanvasCoreStoreError.resourceLimitExceeded(
-                    "The document exceeds the supported aggregate PaperKit size limit."
+                    resourceLimits.aggregateMarkupLimitDescription
                 )
             }
             admittedMarkupByteCount = nextMarkupByteCount
@@ -2372,6 +2422,46 @@ private nonisolated static func runtimeBackground(
     }
 }
 
+private nonisolated static func resolveDeveloperImportBackground(
+    _ background: CanvasPageBackground,
+    sourcesRootURL: URL
+) throws -> CanvasPageBackground {
+    switch background {
+    case .paper:
+        return .paper
+    case let .image(source, suggestedName):
+        guard source.isValid else {
+            throw CanvasCoreStoreError.invalidSnapshot("The imported image reference is invalid.")
+        }
+        let data = try source.imageData ?? readImportedSource(
+            relativePath: source.relativePath,
+            sourceRootURL: sourcesRootURL
+        )
+        guard !data.isEmpty, data.count <= CanvasCoreResourceLimits.production.maximumImportedSourceByteCount,
+              source.contentChecksum == nil || sha256(data) == source.contentChecksum else {
+            throw CanvasCoreStoreError.verificationFailed("The imported image source failed checksum verification.")
+        }
+        return .image(source: source.resolving(imageData: data), suggestedName: suggestedName)
+    case let .pdfPage(source, pageIndex, suggestedName):
+        guard source.isValid, pageIndex >= 0 else {
+            throw CanvasCoreStoreError.invalidSnapshot("The imported PDF reference is invalid.")
+        }
+        let data = try source.documentData ?? readImportedSource(
+            relativePath: source.relativePath,
+            sourceRootURL: sourcesRootURL
+        )
+        guard !data.isEmpty, data.count <= CanvasCoreResourceLimits.production.maximumImportedSourceByteCount,
+              source.contentChecksum == nil || sha256(data) == source.contentChecksum else {
+            throw CanvasCoreStoreError.verificationFailed("The imported PDF source failed checksum verification.")
+        }
+        return .pdfPage(
+            source: source.resolving(documentData: data),
+            pageIndex: pageIndex,
+            suggestedName: suggestedName
+        )
+    }
+}
+
 private nonisolated static func legacyBackground(
     _ background: LegacyCanvasPageBackgroundV4
 ) -> CanvasPageBackground {
@@ -3351,7 +3441,7 @@ private nonisolated static func persistImportedSource(
             )
             guard overflow == false,
                   nextByteCount <= limits.maximumAggregateMarkupByteCount else {
-                throw error("The document exceeds the supported aggregate PaperKit size limit.")
+                throw error(limits.aggregateMarkupLimitDescription)
             }
             aggregateByteCount = nextByteCount
         }

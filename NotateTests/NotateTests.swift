@@ -10,8 +10,7 @@ import XCTest
 import UIKit
 import PaperKit
 
-@MainActor
-private final class FailOnceCanvasMarkupCodec: CanvasCoreMarkupCoding {
+private actor FailOnceCanvasMarkupCodec: CanvasCoreMarkupCoding {
     private var shouldFailEncoding = true
 
     func encode(_ markup: PaperMarkup) async throws -> Data {
@@ -58,6 +57,45 @@ final class NotateTests: XCTestCase {
         self.measure {
             // Put the code you want to measure the time of here.
         }
+    }
+
+    func testVerifiedIndexDeltaUsesPageRevisionsInsteadOfMarkupEquality() {
+        let removed = UUID()
+        let unchanged = UUID()
+        let revised = UUID()
+        let added = UUID()
+        let delta = CanvasPageRevisionDelta.make(
+            baseGeneration: 8,
+            generation: 9,
+            previousPageIDs: [removed, unchanged, revised],
+            previousContentRevisions: [removed: 1, unchanged: 4, revised: 7],
+            currentPageIDs: [unchanged, revised, added],
+            currentContentRevisions: [unchanged: 4, revised: 8, added: 0]
+        )
+
+        XCTAssertEqual(delta.baseGeneration, 8)
+        XCTAssertEqual(delta.generation, 9)
+        XCTAssertEqual(delta.changedPageIDs, [revised, added])
+        XCTAssertEqual(delta.removedPageIDs, [removed])
+        XCTAssertTrue(delta.pageOrderChanged)
+    }
+
+    func testVerifiedIndexDeltaKeepsOrderChangesSeparateFromContentChanges() {
+        let first = UUID()
+        let second = UUID()
+        let revisions: [UUID: UInt64] = [first: 3, second: 5]
+        let delta = CanvasPageRevisionDelta.make(
+            baseGeneration: 2,
+            generation: 3,
+            previousPageIDs: [first, second],
+            previousContentRevisions: revisions,
+            currentPageIDs: [second, first],
+            currentContentRevisions: revisions
+        )
+
+        XCTAssertTrue(delta.changedPageIDs.isEmpty)
+        XCTAssertTrue(delta.removedPageIDs.isEmpty)
+        XCTAssertTrue(delta.pageOrderChanged)
     }
 
     func testPaperSetupCatalogUsesTheIntendedCategoryOrderAndTemplates() {
@@ -320,11 +358,13 @@ final class NotateTests: XCTestCase {
 
     func testResourceLimitFailureIsPermanentAndExplained() {
         let error = CanvasCoreStoreError.resourceLimitExceeded(
-            "The document exceeds the supported PaperKit size limit."
+            CanvasCoreResourceLimits.production.aggregateMarkupLimitDescription
         )
 
         XCTAssertFalse(error.isTransientCheckpointFailure)
         XCTAssertTrue(error.localizedDescription.contains("supported storage limit"))
+        XCTAssertTrue(error.localizedDescription.contains("96 MiB"))
+        XCTAssertTrue(error.localizedDescription.contains("streamed page storage"))
     }
 
     @MainActor
