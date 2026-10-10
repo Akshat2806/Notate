@@ -63,6 +63,27 @@ final class CanvasNativeViewportTests: XCTestCase {
         XCTAssertTrue(CanvasConstants.nativeViewportRenderingZoomRange.contains(10.5))
     }
 
+    func testMirroredPinchKeepsAuthoredPointUnderMovingCentroid() {
+        let anchor = CanvasNativePinchAnchor(
+            pageID: UUID(),
+            pagePoint: CGPoint(x: 420, y: 680),
+            screenPoint: CGPoint(x: 330, y: 520)
+        )
+
+        let corrected = anchor.contentOffset(
+            currentOffset: CGPoint(x: 50, y: 80),
+            projectedAnchorOnScreen: CGPoint(x: 334, y: 532)
+        )
+
+        XCTAssertEqual(corrected.x, 54, accuracy: 0.001)
+        XCTAssertEqual(corrected.y, 92, accuracy: 0.001)
+        XCTAssertEqual(
+            CGPoint(x: 334 - (corrected.x - 50), y: 532 - (corrected.y - 80)),
+            anchor.screenPoint,
+            "Changing scale must preserve the authored point under the pinch centroid on both axes."
+        )
+    }
+
     func testNativeViewportClampsOuterZoomAtSupportedMinimum() {
         let native = makeController(mode: .nativeViewport)
         defer { native.completeDismantle() }
@@ -123,18 +144,78 @@ final class CanvasNativeViewportTests: XCTestCase {
 
         outerScroll.setZoomScale(CanvasConstants.absoluteZoomRange.lowerBound, animated: false)
         controller.scrollViewDidZoom(outerScroll)
-        let offsetAtRelease = outerScroll.contentOffset
         controller.scrollViewDidEndZooming(outerScroll, with: nil,
                                            atScale: outerScroll.zoomScale)
-        XCTAssertEqual(outerScroll.contentOffset.x, offsetAtRelease.x, accuracy: 0.5,
-            "Native viewport settlement must not recenter the pinch from a clamped page-relative anchor.")
-        XCTAssertEqual(outerScroll.contentOffset.y, offsetAtRelease.y, accuracy: 0.5,
-            "Native viewport settlement must keep UIKit's final vertical position.")
         controller.scrollViewDidEndDecelerating(outerScroll)
         controller.scrollViewDidEndScrollingAnimation(outerScroll)
         controller.flushNativeViewportUpdatesForTesting()
         XCTAssertEqual(controller.focusedPageIDForTesting, pages[2].id,
             "Zoom and settlement callbacks must preserve the page that owned the pinch.")
+        XCTAssertTrue(controller.nativePaperProjectionMatchesForTesting(pageID: pages[2].id),
+            controller.nativePaperProjectionDiagnosticsForTesting(pageID: pages[2].id))
+    }
+
+    func testFocusedPaperKitViewportKeepsItsBoundsStableThroughZoomAndSettlement() throws {
+        let controller = makeController(viewSize: CGSize(width: 768, height: 1_024))
+        defer { controller.completeDismantle() }
+        let pageID = controller.focusedPageIDForTesting
+        let outerScroll = controller.outerScrollViewForTesting
+        controller.flushNativeViewportUpdatesForTesting()
+
+        outerScroll.minimumZoomScale = 0.4
+        controller.scrollViewWillBeginZooming(outerScroll, with: nil)
+        for zoom: CGFloat in [0.5, 0.4, 0.5, 0.6, 1, 6, 10, 0.5] {
+            outerScroll.setZoomScale(zoom, animated: false)
+            controller.scrollViewDidZoom(outerScroll)
+            controller.flushNativeViewportUpdatesForTesting()
+
+            let hostFrame = try XCTUnwrap(controller.pageHostFrameForTesting(pageID: pageID))
+            let viewport = try XCTUnwrap(controller.nativeViewportForTesting(pageID: pageID))
+            let expectedBuffer = outerScroll.bounds.height * 0.25
+            let expectedFrame = outerScroll.bounds.insetBy(dx: 0, dy: -expectedBuffer)
+            XCTAssertEqual(hostFrame.origin, CGPoint(x: expectedFrame.minX - outerScroll.bounds.minX,
+                                                       y: expectedFrame.minY - outerScroll.bounds.minY),
+                           "zoom=\(zoom)")
+            XCTAssertEqual(hostFrame.size, expectedFrame.size, "zoom=\(zoom)")
+            XCTAssertEqual(viewport.renderScreenFrame, expectedFrame, "zoom=\(zoom)")
+            XCTAssertTrue(controller.nativePaperProjectionMatchesForTesting(pageID: pageID),
+                           controller.nativePaperProjectionDiagnosticsForTesting(pageID: pageID))
+        }
+
+        controller.scrollViewDidEndZooming(outerScroll, with: nil, atScale: outerScroll.zoomScale)
+        controller.flushNativeViewportUpdatesForTesting()
+        let settledFrame = try XCTUnwrap(controller.pageHostFrameForTesting(pageID: pageID))
+        XCTAssertEqual(settledFrame.height, outerScroll.bounds.height * 1.5, accuracy: 0.1,
+                       "PaperKit must keep the buffered viewport size after the outer pinch settles.")
+        XCTAssertEqual(settledFrame.width, outerScroll.bounds.width, accuracy: 0.1)
+        XCTAssertTrue(controller.nativePaperProjectionMatchesForTesting(pageID: pageID),
+                      controller.nativePaperProjectionDiagnosticsForTesting(pageID: pageID))
+    }
+
+    func testExpandedFocusedViewportPassesTouchesThroughToAdjacentVisiblePage() throws {
+        let pages = (0..<4).map { _ in CanvasPageSnapshot(markup: CanvasInkViewportFixture.markup()) }
+        let controller = makeNotebook(pages: pages)
+        defer { controller.completeDismantle() }
+        controller.setZoomScale(0.5)
+        controller.flushNativeViewportUpdatesForTesting()
+
+        let focusedID = controller.focusedPageIDForTesting
+        XCTAssertTrue(try XCTUnwrap(controller.nativeViewportForTesting(pageID: focusedID)).expandsToViewport)
+        let otherVisiblePage = pages.first { page in
+            page.id != focusedID && controller.nativeViewportForTesting(pageID: page.id) != nil
+        }
+        guard let otherVisiblePage else {
+            XCTFail("Expected a second visible page at 50% zoom.")
+            return
+        }
+        let otherPageFrame = try XCTUnwrap(controller.projectedPageFrameForTesting(pageID: otherVisiblePage.id))
+        let point = controller.outerScrollViewForTesting.convert(
+            CGPoint(x: otherPageFrame.midX, y: otherPageFrame.midY),
+            to: controller.view
+        )
+        XCTAssertFalse(try XCTUnwrap(controller.pageHostAcceptsInputForTesting(point, pageID: focusedID)),
+                       "The screen-sized focused viewport must not intercept a neighboring sheet.")
+        XCTAssertTrue(try XCTUnwrap(controller.pageHostAcceptsInputForTesting(point, pageID: otherVisiblePage.id)))
     }
 
     func testFirstNativeZoomDoesNotRepositionThePageAtSettlement() throws {
@@ -163,6 +244,37 @@ final class CanvasNativeViewportTests: XCTestCase {
             "The page under the first pinch must remain the page that owns the zoom.")
     }
 
+    func testNativePinchDefersInsetsAndOnlyAppliesTheFinalBoundsClamp() throws {
+        let controller = makeController(viewSize: CGSize(width: 768, height: 1_024))
+        defer { controller.completeDismantle() }
+        let scroll = controller.outerScrollViewForTesting
+        let insetsBeforePinch = scroll.contentInset
+
+        scroll.minimumZoomScale = CanvasConstants.nativeViewportRenderingZoomRange.lowerBound
+        controller.scrollViewWillBeginZooming(scroll, with: nil)
+        scroll.setZoomScale(CanvasConstants.nativeViewportRenderingZoomRange.lowerBound, animated: false)
+        controller.scrollViewDidZoom(scroll)
+
+        XCTAssertEqual(scroll.contentInset, insetsBeforePinch,
+            "A live native pinch must not recenter its content by recomputing page insets on every zoom callback.")
+
+        let offsetAtLiftOff = scroll.contentOffset
+        controller.scrollViewDidEndZooming(scroll, with: nil, atScale: scroll.zoomScale)
+        let expectedOffset = CanvasStackLayout.clampedContentOffset(
+            offsetAtLiftOff,
+            viewportSize: scroll.bounds.size,
+            contentSize: scroll.contentSize,
+            contentInset: scroll.contentInset,
+            zoomScale: 1
+        )
+        XCTAssertEqual(scroll.contentOffset.x, expectedOffset.x, accuracy: 1,
+            "Settlement may clamp to the newly centered sheet bounds, but must not add a second zoom-anchor correction.")
+        XCTAssertEqual(scroll.contentOffset.y, expectedOffset.y, accuracy: 1,
+            "Settlement may clamp to the newly centered sheet bounds, but must not add a second zoom-anchor correction.")
+        XCTAssertNotEqual(scroll.contentInset, insetsBeforePinch,
+            "The page centering inset should be recomputed once the pinch settles.")
+    }
+
     func testMarkupPublicationWaitsUntilContactEndsAndReadsOnlyChangedPage() throws {
         let page = CanvasPageSnapshot(markup: CanvasInkViewportFixture.markup())
         var publishedPageIDs: [UUID] = []
@@ -180,6 +292,7 @@ final class CanvasNativeViewportTests: XCTestCase {
         controller.applyToolState(CanvasToolState())
         controller.flushNativeViewportUpdatesForTesting()
         defer { controller.completeDismantle() }
+        XCTAssertFalse(controller.hasPendingSnapshotReconciliation)
 
         let paper = try XCTUnwrap(controller.nativePaperControllerForTesting(pageID: page.id))
         var changedMarkup = try XCTUnwrap(paper.markup)
@@ -191,12 +304,33 @@ final class CanvasNativeViewportTests: XCTestCase {
         controller.beginContactForTesting()
         paper.markup = changedMarkup
         controller.paperMarkupViewControllerDidChangeMarkup(paper)
+        XCTAssertTrue(controller.hasPendingSnapshotReconciliation)
         XCTAssertTrue(publishedPageIDs.isEmpty, "PaperMarkup must not be copied into the model during contact")
         XCTAssertEqual(controller.pendingMarkupPageCountForTesting, 1)
 
         controller.endContactForTesting()
         XCTAssertEqual(publishedPageIDs, [page.id])
         XCTAssertEqual(controller.pendingMarkupPageCountForTesting, 0)
+        XCTAssertFalse(controller.hasPendingSnapshotReconciliation)
+
+        let comparisonsBeforeChangeDelivery = controller.markupEqualityComparisonCountForTesting(
+            pageID: page.id
+        )
+        controller.paperMarkupViewControllerDidChangeMarkup(paper)
+        XCTAssertEqual(controller.markupEqualityComparisonCountForTesting(pageID: page.id),
+                       comparisonsBeforeChangeDelivery,
+                       "A PaperKit change revision must not compare the complete dense markup tree.")
+    }
+
+    func testStableCheckpointSnapshotDoesNotRecompareUnchangedPaperKitMarkup() throws {
+        let controller = makeController()
+        defer { controller.completeDismantle() }
+        let pageID = controller.focusedPageIDForTesting
+
+        XCTAssertNotNil(controller.snapshotDocument())
+
+        XCTAssertEqual(controller.markupEqualityComparisonCountForTesting(pageID: pageID), 0,
+            "A stable PaperKit page already delivered to the model must not be deeply compared at each save boundary.")
     }
 
     func testFingerContactInsideNativeSelectionIsEditingRatherThanScrolling() throws {
@@ -219,6 +353,41 @@ final class CanvasNativeViewportTests: XCTestCase {
                                    y: controller.view.bounds.maxY - 4)
         XCTAssertFalse(controller.directTouchWouldManipulateNativeSelectionForTesting(at: outsidePoint),
             "A finger starting outside the selection must remain available for ordinary scrolling.")
+    }
+
+    func testSelectionFrameIsCachedAcrossScrollFramesAndRefreshedOnSelectionChange() throws {
+        let controller = makeController()
+        defer { controller.completeDismantle() }
+        let pageID = controller.focusedPageIDForTesting
+        let paper = try XCTUnwrap(controller.nativePaperControllerForTesting(pageID: pageID))
+        let scrollView = controller.outerScrollViewForTesting
+
+        _ = controller.directTouchWouldManipulateNativeSelectionForTesting(at: .zero)
+        let initialReads = controller.selectedMarkupFrameReadCountForTesting(pageID: pageID)
+        XCTAssertGreaterThan(initialReads, 0)
+
+        for _ in 0..<12 {
+            scrollView.contentOffset.y += 1
+            controller.scrollViewDidScroll(scrollView)
+            controller.flushNativeViewportUpdatesForTesting()
+        }
+        XCTAssertEqual(controller.selectedMarkupFrameReadCountForTesting(pageID: pageID), initialReads,
+            "Viewport scrolling must reuse selection geometry instead of asking PaperKit to rebuild it.")
+
+        paper.selectedMarkup = CanvasInkViewportFixture.markup()
+        controller.paperMarkupViewControllerDidChangeSelection(paper)
+        controller.flushNativeViewportUpdatesForTesting()
+        let refreshedReads = controller.selectedMarkupFrameReadCountForTesting(pageID: pageID)
+        XCTAssertGreaterThan(refreshedReads, initialReads,
+            "A PaperKit selection change must invalidate and refresh the cached frame.")
+
+        for _ in 0..<12 {
+            scrollView.contentOffset.y += 1
+            controller.scrollViewDidScroll(scrollView)
+            controller.flushNativeViewportUpdatesForTesting()
+        }
+        XCTAssertEqual(controller.selectedMarkupFrameReadCountForTesting(pageID: pageID), refreshedReads,
+            "Repeated scrolling after a selection change must reuse the refreshed selection frame.")
     }
 
     func testSelectionTransformDefersPaperViewportReconciliationUntilLiftOff() throws {
@@ -301,6 +470,105 @@ final class CanvasNativeViewportTests: XCTestCase {
         ))
         XCTAssertNotEqual(first.visiblePageRect, second.visiblePageRect)
         XCTAssertTrue(first.hasSameRenderingProjection(as: second))
+    }
+
+    func testRetainedPaperKitCropCoversScrollBufferAndRebasesOnlyAtItsEdge() throws {
+        let pageID = UUID()
+        let page = CGRect(x: 0, y: 0, width: 595 * 6, height: 842 * 6)
+        let buffer = CGSize(width: 0, height: 256)
+        let first = try XCTUnwrap(CanvasNativeViewport(
+            pageID: pageID, projectedPageFrame: page,
+            viewportBounds: CGRect(x: 0, y: 0, width: 768, height: 1_024),
+            logicalZoom: 6, expandsToViewport: true, renderOverscan: buffer
+        ))
+        XCTAssertEqual(first.renderScreenFrame.size, CGSize(width: 768, height: 1_536))
+
+        // Ordinary movement within the rendered buffer changes only the
+        // visible page intersection. PaperKit keeps the same authored crop;
+        // the host frame can translate with the notebook scroll offset.
+        let movedWithinBuffer = try XCTUnwrap(CanvasNativeViewport(
+            pageID: pageID, projectedPageFrame: page,
+            viewportBounds: CGRect(x: 0, y: 100, width: 768, height: 1_024),
+            logicalZoom: 6, expandsToViewport: true, renderOverscan: buffer,
+            retainedRenderPageRect: first.renderPageRect
+        ))
+        XCTAssertNotEqual(first.visiblePageRect, movedWithinBuffer.visiblePageRect)
+        XCTAssertEqual(first.renderPageRect, movedWithinBuffer.renderPageRect)
+        XCTAssertTrue(first.hasSameRenderingProjection(as: movedWithinBuffer))
+        XCTAssertEqual(movedWithinBuffer.renderScreenFrame.minY, first.renderScreenFrame.minY,
+                       accuracy: 0.001)
+
+        // Once the user moves beyond the reserved area, the viewport rebases
+        // around the current screen while retaining an exact page projection.
+        let beyondBuffer = try XCTUnwrap(CanvasNativeViewport(
+            pageID: pageID, projectedPageFrame: page,
+            viewportBounds: CGRect(x: 0, y: 900, width: 768, height: 1_024),
+            logicalZoom: 6, expandsToViewport: true, renderOverscan: buffer,
+            retainedRenderPageRect: first.renderPageRect
+        ))
+        XCTAssertNotEqual(first.renderPageRect, beyondBuffer.renderPageRect)
+        XCTAssertTrue(beyondBuffer.renderPageRect.contains(beyondBuffer.visiblePageRect))
+        XCTAssertTrue(beyondBuffer.renderScreenFrame.intersection(
+            CGRect(x: 0, y: 900, width: 768, height: 1_024)
+        ).contains(beyondBuffer.screenFrame))
+    }
+
+    func testZoomChangesProjectionWithoutResizingBufferedPaperKitSurface() throws {
+        let pageID = UUID()
+        let pagePoint = CGPoint(x: 274, y: 391)
+        let viewportBounds = CGRect(x: 0, y: 0, width: 768, height: 1_024)
+        let overscan = CGSize(width: 0, height: 256)
+        let expectedSurfaceSize = CGSize(width: 768, height: 1_536)
+
+        for zoom: CGFloat in [0.5, 0.6, 1, 5, 6, 8, 10] {
+            let projectedPage = CGRect(
+                x: 160,
+                y: 300,
+                width: 595 * zoom,
+                height: 842 * zoom
+            )
+            let viewport = try XCTUnwrap(CanvasNativeViewport(
+                pageID: pageID,
+                projectedPageFrame: projectedPage,
+                viewportBounds: viewportBounds,
+                logicalZoom: zoom,
+                expandsToViewport: true,
+                renderOverscan: overscan
+            ))
+
+            XCTAssertEqual(viewport.renderScreenFrame.width, expectedSurfaceSize.width, accuracy: 0.01,
+                           "Zoom \(zoom) must not resize PaperKit's viewport width.")
+            XCTAssertEqual(viewport.renderScreenFrame.height, expectedSurfaceSize.height, accuracy: 0.01,
+                           "Zoom \(zoom) must not resize PaperKit's viewport height.")
+            XCTAssertTrue(viewport.renderPageRect.contains(viewport.visiblePageRect),
+                          "The authored crop must cover every visible point at zoom \(zoom).")
+            let screenPoint = CGPoint(
+                x: viewport.renderScreenFrame.minX + viewport.localPoint(fromPage: pagePoint).x,
+                y: viewport.renderScreenFrame.minY + viewport.localPoint(fromPage: pagePoint).y
+            )
+            XCTAssertEqual(screenPoint.x, projectedPage.minX + pagePoint.x * zoom, accuracy: 0.001)
+            XCTAssertEqual(screenPoint.y, projectedPage.minY + pagePoint.y * zoom, accuracy: 0.001)
+        }
+    }
+
+    func testViewportWindowPreparesOnePaperKitPageAhead() throws {
+        let pages = (0..<10).map { _ in CanvasPageSnapshot(markup: CanvasInkViewportFixture.markup()) }
+        let controller = makeNotebook(pages: pages)
+        defer { controller.completeDismantle() }
+        controller.setZoomScale(0.5)
+        controller.flushNativeViewportUpdatesForTesting()
+
+        let prefetched = controller.prefetchedPageIDsForTesting
+        XCTAssertEqual(prefetched.count, 1,
+                       "The lookahead budget is one page even when multiple sheets are visible.")
+        let pageID = try XCTUnwrap(prefetched.first)
+        XCTAssertTrue(controller.mountedPageIDsForTesting.contains(pageID))
+        let viewport = try XCTUnwrap(controller.nativeViewportForTesting(pageID: pageID))
+        let paper = try XCTUnwrap(controller.nativePaperControllerForTesting(pageID: pageID))
+        XCTAssertEqual(paper.contentVisibleFrame, viewport.renderPageRect)
+        XCTAssertEqual(paper.view.bounds.size, viewport.renderScreenFrame.size)
+        XCTAssertTrue(controller.nativePaperProjectionMatchesForTesting(pageID: pageID),
+                      controller.nativePaperProjectionDiagnosticsForTesting(pageID: pageID))
     }
 
     func testRejectsInvalidOrOffscreenGeometry() {
@@ -386,21 +654,35 @@ final class CanvasNativeViewportTests: XCTestCase {
                         "state=\(controller.navigationDiagnosticsForTesting(pageID: pages[4].id))"
                 )
                 let bounds = paper.view.bounds
-                let renderRect = try XCTUnwrap(controller.nativeViewportForTesting(pageID: pages[4].id)).renderPageRect
-                let count = try XCTUnwrap(controller.nativeGeometryApplicationCountForTesting(pageID: pages[4].id))
+                let initialNativeViewport = try XCTUnwrap(
+                    controller.nativeViewportForTesting(pageID: pages[4].id)
+                )
+                let initialGeometryApplications = try XCTUnwrap(
+                    controller.nativeGeometryApplicationCountForTesting(pageID: pages[4].id)
+                )
                 let forward = stride(from: CGFloat(0), through: CGFloat(180), by: 12).map { $0 }
                 for delta in forward + forward.reversed() + forward.map({ -$0 }) + forward.reversed().map({ -$0 }) {
                     var offset = initialOffset
                     if direction == .vertical { offset.y += delta } else { offset.x += delta }
                     scroll.setContentOffset(offset, animated: false)
-                    // Let the normal display-link path run during motion.
-                    try await Task.sleep(for: .milliseconds(20))
+                    // Let the normal display-link path run across two 60 Hz
+                    // frame intervals. A 20 ms fixed delay can land just
+                    // before the next frame depending on when the offset
+                    // change arrives relative to the display phase.
+                    try await Task.sleep(for: .milliseconds(34))
                     let viewport = try XCTUnwrap(controller.nativeViewportForTesting(pageID: pages[4].id))
                     XCTAssertEqual(paper.view.bounds, bounds)
-                    if direction == .horizontal || zoom <= 0.6 {
-                        XCTAssertEqual(viewport.renderPageRect, renderRect)
-                        XCTAssertEqual(controller.nativeGeometryApplicationCountForTesting(pageID: pages[4].id), count)
-                    }
+                    XCTAssertTrue(viewport.expandsToViewport)
+                    XCTAssertEqual(viewport.renderScreenFrame.size, bounds.size)
+                    XCTAssertEqual(viewport.renderPageRect, initialNativeViewport.renderPageRect,
+                                   "Scrolling inside the reserved tile buffer must retain PaperKit's crop.")
+                    XCTAssertEqual(
+                        controller.nativeGeometryApplicationCountForTesting(pageID: pages[4].id),
+                        initialGeometryApplications,
+                        "A page pan inside its render buffer must not reapply PaperKit geometry."
+                    )
+                    XCTAssertTrue(controller.nativePaperProjectionMatchesForTesting(pageID: pages[4].id),
+                                   controller.nativePaperProjectionDiagnosticsForTesting(pageID: pages[4].id))
                     XCTAssertEqual(paper.zoomRange, CanvasConstants.nativeViewportRenderingZoomRange)
                     XCTAssertEqual(controller.effectiveZoomScaleForTesting, zoom, accuracy: 0.0001)
                     let projected = try XCTUnwrap(controller.projectedPageFrameForTesting(pageID: pages[4].id))
@@ -447,8 +729,9 @@ final class CanvasNativeViewportTests: XCTestCase {
             if #available(iOS 27.0, *) {
                 XCTAssertEqual(paper.scrollConfiguration.zoomScale, zoom, accuracy: 0.001)
             }
-            XCTAssertLessThanOrEqual(paper.view.bounds.width, controller.view.bounds.width)
-            XCTAssertLessThanOrEqual(paper.view.bounds.height, controller.view.bounds.height)
+            XCTAssertEqual(paper.view.bounds.size, value.renderScreenFrame.size)
+            XCTAssertEqual(value.renderScreenFrame.height, controller.view.bounds.height * 1.5,
+                           accuracy: 0.1)
             XCTAssertEqual(paper.markup?.bounds, originalBounds)
             XCTAssertEqual(controller.isPageRasterizedForTesting(pageID: pageID), false)
         }
@@ -477,6 +760,38 @@ final class CanvasNativeViewportTests: XCTestCase {
         XCTAssertTrue(scroll.panGestureRecognizer.isEnabled)
         XCTAssertEqual(controller.paperMarkupControllerForTesting.zoomRange,
                        CanvasConstants.nativeViewportRenderingZoomRange)
+    }
+
+    func testZoomScrubbingSynchronizesPaperKitViewportBeforeLiftOff() throws {
+        let controller = makeController()
+        defer { controller.completeDismantle() }
+        let pageID = controller.focusedPageIDForTesting
+        let paper = controller.paperMarkupControllerForTesting
+        let initial = try XCTUnwrap(controller.nativeViewportForTesting(pageID: pageID))
+        let initialEditorBounds = paper.view.bounds
+
+        controller.beginZoomScrubbing()
+        controller.setZoomScale(7)
+        XCTAssertTrue(controller.hasPendingNativeViewportUpdateForTesting,
+                      "Zoom scrubbing must schedule coalesced native rendering before lift-off.")
+
+        controller.flushNativeViewportUpdatesForTesting()
+        let zoomed = try XCTUnwrap(controller.nativeViewportForTesting(pageID: pageID))
+        XCTAssertEqual(zoomed.logicalZoom, 7, accuracy: 0.0001)
+        XCTAssertEqual(zoomed.expandsToViewport, initial.expandsToViewport)
+        XCTAssertEqual(paper.view.bounds.width, initialEditorBounds.width, accuracy: 0.001,
+                       "The active PaperKit controller bounds must stay stable during zoom scrubbing.")
+        XCTAssertEqual(paper.view.bounds.height, initialEditorBounds.height, accuracy: 0.001)
+        XCTAssertEqual(paper.contentVisibleFrame.minX, zoomed.renderPageRect.minX, accuracy: 0.001)
+        XCTAssertEqual(paper.contentVisibleFrame.minY, zoomed.renderPageRect.minY, accuracy: 0.001)
+        XCTAssertEqual(paper.contentVisibleFrame.width, zoomed.renderPageRect.width, accuracy: 0.001)
+        XCTAssertEqual(paper.contentVisibleFrame.height, zoomed.renderPageRect.height, accuracy: 0.001)
+        XCTAssertTrue(controller.nativePaperProjectionMatchesForTesting(pageID: pageID),
+                      controller.nativePaperProjectionDiagnosticsForTesting(pageID: pageID))
+
+        controller.endZoomScrubbing()
+        controller.flushNativeViewportUpdatesForTesting()
+        XCTAssertFalse(controller.hasPendingNativeViewportUpdateForTesting)
     }
 
     func testOverlayMappingsAndNativeScrollFeedbackRemainAligned() async throws {
@@ -612,8 +927,9 @@ final class CanvasNativeViewportTests: XCTestCase {
                     XCTAssertEqual(viewport.screenFrame.width, expected.width, accuracy: 0.05)
                     XCTAssertEqual(viewport.screenFrame.height, expected.height, accuracy: 0.05)
                     let host = try XCTUnwrap(controller.pageHostFrameForTesting(pageID: page.id))
-                    XCTAssertEqual(host.width, min(projected.width, controller.outerScrollViewForTesting.bounds.width), accuracy: 0.05)
-                    XCTAssertEqual(host.height, min(projected.height, controller.outerScrollViewForTesting.bounds.height), accuracy: 0.05)
+                    XCTAssertTrue(viewport.expandsToViewport,
+                                  "The active page keeps a stable screen-sized PaperKit viewport.")
+                    XCTAssertEqual(host.size, controller.outerScrollViewForTesting.bounds.size)
                     XCTAssertEqual(controller.paperTemplateForTesting(pageID: page.id), page.paperTemplate)
                     XCTAssertEqual(controller.snapshotActivePage()?.markup.bounds.size, CanvasConstants.a4PortraitSize)
                 }
@@ -670,6 +986,30 @@ final class CanvasNativeViewportTests: XCTestCase {
             attachment.lifetime = .keepAlways
             add(attachment)
         }
+    }
+
+    func testDensePageHostRetirementDoesNotCompareTheWholeMarkupTwice() throws {
+        let markup = CanvasInkViewportFixture.markup()
+        let pages = (0..<4).map { _ in CanvasPageSnapshot(markup: markup) }
+        let controller = makeNotebook(pages: pages)
+        defer { controller.completeDismantle() }
+
+        let departingPageID = pages[0].id
+        XCTAssertNotNil(controller.nativePaperControllerForTesting(pageID: departingPageID))
+        XCTAssertEqual(controller.markupEqualityComparisonCountForTesting(pageID: departingPageID), 0)
+
+        controller.scrollToPage(id: pages[3].id, animated: false)
+        controller.flushNativeViewportUpdatesForTesting()
+
+        XCTAssertNil(controller.nativePaperControllerForTesting(pageID: departingPageID),
+            "An unchanged page without undo history should release its PaperKit host after leaving the render window.")
+        XCTAssertEqual(controller.markupEqualityComparisonCountForTesting(pageID: departingPageID), 1,
+            "Retiring a clean PaperKit host needs one authoritative equality fallback, not repeated whole-markup scans.")
+        XCTAssertEqual(
+            controller.snapshotDocument()?.pages.first(where: { $0.id == departingPageID })?.markup,
+            markup,
+            "Host retirement must retain the full canonical page markup for remounting."
+        )
     }
 
     func testIdleNativeEditorsReuseWithoutMarkupSelectionOrUndoCrossingPages() async throws {
@@ -768,7 +1108,10 @@ final class CanvasNativeViewportTests: XCTestCase {
         let viewport = try XCTUnwrap(controller.nativeViewportForTesting(pageID: pageID))
         let paper = try XCTUnwrap(controller.nativePaperControllerForTesting(pageID: pageID))
         let authoredBounds = try XCTUnwrap(paper.markup).bounds
-        XCTAssertEqual(viewport.renderScreenFrame, controller.outerScrollViewForTesting.bounds)
+        XCTAssertEqual(viewport.renderScreenFrame.height,
+                       controller.outerScrollViewForTesting.bounds.height * 1.5, accuracy: 0.1)
+        XCTAssertEqual(viewport.renderScreenFrame.width,
+                       controller.outerScrollViewForTesting.bounds.width, accuracy: 0.1)
         XCTAssertLessThan(viewport.renderPageRect.minX, authoredBounds.minX)
         XCTAssertGreaterThan(viewport.renderPageRect.maxX, authoredBounds.maxX)
         XCTAssertTrue(paper.isRulerActive)
@@ -787,10 +1130,21 @@ final class CanvasNativeViewportTests: XCTestCase {
         XCTAssertEqual(actualPageFrame.height, expectedPageFrame.height, accuracy: 0.5)
     }
 
-    func testNativeRulerRemainsOnTheFocusedPageAcrossNavigationAndRotation() throws {
+    func testNativeRulerRemainsOnTheFocusedPageAcrossNavigationAndLayout() throws {
         let pages = (0..<4).map { _ in CanvasPageSnapshot(markup: CanvasInkViewportFixture.markup()) }
         let controller = makeNotebook(pages: pages)
-        defer { controller.completeDismantle() }
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previous = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        controller.view.layoutIfNeeded()
+        defer {
+            controller.completeDismantle()
+            window.isHidden = true
+            window.rootViewController = nil
+            previous?.makeKeyAndVisible()
+        }
 
         controller.setRulerActive(true)
         controller.scrollToPage(id: pages[2].id, animated: false)
@@ -805,7 +1159,9 @@ final class CanvasNativeViewportTests: XCTestCase {
         XCTAssertTrue(controller.nativePaperProjectionMatchesForTesting(pageID: pages[2].id),
                       controller.nativePaperProjectionDiagnosticsForTesting(pageID: pages[2].id))
 
-        controller.view.frame = CGRect(x: 0, y: 0, width: 1_024, height: 768)
+        // Re-resolve the real window-backed viewport after page navigation.
+        // Orientation changes are exercised by the device UI run, since a
+        // detached controller cannot receive UIKit's scene rotation sequence.
         controller.view.setNeedsLayout()
         controller.view.layoutIfNeeded()
         controller.flushNativeViewportUpdatesForTesting()

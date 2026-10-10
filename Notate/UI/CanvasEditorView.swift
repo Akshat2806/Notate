@@ -977,11 +977,29 @@ private struct CanvasZoomControl: View {
         ZStack {
             keyboardShortcuts
             scrubber
+#if DEBUG || NOTATE_INK_PROFILING
+            if ProcessInfo.processInfo.environment["NOTATE_UI_TESTING"] == "1"
+                || ProcessInfo.processInfo.environment["NOTATE_NATIVE_PINCH_DIAGNOSTICS"] == "1" {
+                Text(model.nativePinchDiagnosticForTesting)
+                    .font(.system(size: 1))
+                    .frame(width: 1, height: 1)
+                    .opacity(0.01)
+                    .allowsHitTesting(false)
+                    .accessibilityIdentifier("canvas.debug.nativeZoom")
+                    .accessibilityLabel(model.nativePinchDiagnosticForTesting)
+                    .accessibilityElement()
+            }
+#endif
         }
         .onAppear {
             if model.isZoomInteractionActive || voiceOverEnabled {
                 reveal(autoHide: false)
             }
+#if DEBUG || NOTATE_INK_PROFILING
+            if ProcessInfo.processInfo.environment["NOTATE_UI_TESTING"] == "1" {
+                reveal(autoHide: false)
+            }
+#endif
         }
         .onChange(of: model.isZoomInteractionActive) { _, isActive in
             if isActive {
@@ -1052,6 +1070,7 @@ private struct CanvasZoomControl: View {
         .animation(visibilityAnimation, value: controlIsVisible)
         .allowsHitTesting(controlIsVisible)
         .accessibilityElement(children: .ignore)
+        .accessibilityIdentifier("canvas.zoom.scrubber")
         .accessibilityLabel("Zoom")
         .accessibilityValue("\(model.currentZoomPercent) percent")
         .accessibilityHint("Drag left or right, or swipe with VoiceOver, to adjust magnification")
@@ -1152,7 +1171,12 @@ private struct CanvasZoomControl: View {
     }
 
     private var controlIsVisible: Bool {
-        isVisible || voiceOverEnabled
+#if DEBUG || NOTATE_INK_PROFILING
+        if ProcessInfo.processInfo.environment["NOTATE_UI_TEST_KEEP_ZOOM_VISIBLE"] == "1" {
+            return true
+        }
+#endif
+        return isVisible || voiceOverEnabled
     }
 
     private var visibilityAnimation: Animation? {
@@ -1173,6 +1197,13 @@ private struct CanvasZoomControl: View {
 
     private func scheduleHide() {
         hideTask?.cancel()
+#if DEBUG
+        if ProcessInfo.processInfo.environment["NOTATE_UI_TESTING"] == "1" {
+            isVisible = true
+            hideTask = nil
+            return
+        }
+#endif
         guard voiceOverEnabled == false else { return }
 
         hideTask = Task { @MainActor in

@@ -36,6 +36,28 @@ nonisolated enum CanvasPagedRenderingMode: Equatable, Sendable {
     }
 }
 
+/// The fixed authored point remains stable while the current gesture centroid
+/// moves in the notebook controller's root-view coordinate space.
+nonisolated struct CanvasNativePinchAnchor: Equatable, Sendable {
+    let pageID: UUID
+    let pagePoint: CGPoint
+    var screenPoint: CGPoint
+
+    /// Return the outer scroll offset that keeps this authored page point
+    /// beneath the current pinch centroid. Computing this from the pinch
+    /// anchor avoids repeatedly aligning the page's top-left corner, which
+    /// moves the content along an unintended diagonal during a mirrored pinch.
+    func contentOffset(
+        currentOffset: CGPoint,
+        projectedAnchorOnScreen: CGPoint
+    ) -> CGPoint {
+        CGPoint(
+            x: currentOffset.x + projectedAnchorOnScreen.x - screenPoint.x,
+            y: currentOffset.y + projectedAnchorOnScreen.y - screenPoint.y
+        )
+    }
+}
+
 /// Screen coordinates are in the outer scroll view's coordinate space,
 /// including its bounds origin. Local coordinates belong to the unscaled
 /// PaperKit host; authored coordinates always belong to the full page.
@@ -56,7 +78,9 @@ nonisolated struct CanvasNativeViewport: Equatable, Sendable {
         projectedPageFrame: CGRect,
         viewportBounds: CGRect,
         logicalZoom: CGFloat,
-        expandsToViewport: Bool = false
+        expandsToViewport: Bool = false,
+        renderOverscan: CGSize = .zero,
+        retainedRenderPageRect: CGRect? = nil
     ) {
         guard logicalZoom.isFinite, logicalZoom > 0,
               Self.isValid(projectedPageFrame), Self.isValid(viewportBounds) else { return nil }
@@ -70,20 +94,40 @@ nonisolated struct CanvasNativeViewport: Equatable, Sendable {
         )
         let pageSize = CGSize(width: projectedPageFrame.width / logicalZoom,
                               height: projectedPageFrame.height / logicalZoom)
-        let renderSize = CGSize(width: (expandsToViewport ? viewportBounds.width : min(projectedPageFrame.width, viewportBounds.width)) / logicalZoom,
-                                height: (expandsToViewport ? viewportBounds.height : min(projectedPageFrame.height, viewportBounds.height)) / logicalZoom)
+        let validOverscan = CGSize(
+            width: expandsToViewport && renderOverscan.width.isFinite
+                ? max(0, renderOverscan.width) : 0,
+            height: expandsToViewport && renderOverscan.height.isFinite
+                ? max(0, renderOverscan.height) : 0
+        )
+        let renderBounds = viewportBounds.insetBy(
+            dx: -validOverscan.width,
+            dy: -validOverscan.height
+        )
+        let renderSize = CGSize(width: (expandsToViewport ? renderBounds.width : min(projectedPageFrame.width, viewportBounds.width)) / logicalZoom,
+                                height: (expandsToViewport ? renderBounds.height : min(projectedPageFrame.height, viewportBounds.height)) / logicalZoom)
         let renderRect: CGRect
         if expandsToViewport {
             // PaperKit receives a canvas-sized viewport while the authored
-            // page remains in its original coordinate space. Negative or
-            // beyond-page visible coordinates are intentional margins for
-            // the native ruler and selection controls.
-            renderRect = CGRect(
-                x: (viewportBounds.minX - projectedPageFrame.minX) / logicalZoom,
-                y: (viewportBounds.minY - projectedPageFrame.minY) / logicalZoom,
-                width: renderSize.width,
-                height: renderSize.height
-            )
+            // page remains in its original coordinate space. A retained crop
+            // is reused while it still covers the visible page intersection.
+            // This gives PaperKit extra rendered travel around the viewport so
+            // ordinary scrolling moves its already-laid-out surface instead of
+            // replacing contentVisibleFrame on every display frame.
+            if let retainedRenderPageRect,
+               Self.isValid(retainedRenderPageRect),
+               abs(retainedRenderPageRect.width - renderSize.width) <= 0.01,
+               abs(retainedRenderPageRect.height - renderSize.height) <= 0.01,
+               retainedRenderPageRect.contains(visible) {
+                renderRect = retainedRenderPageRect
+            } else {
+                renderRect = CGRect(
+                    x: (renderBounds.minX - projectedPageFrame.minX) / logicalZoom,
+                    y: (renderBounds.minY - projectedPageFrame.minY) / logicalZoom,
+                    width: renderSize.width,
+                    height: renderSize.height
+                )
+            }
         } else {
             renderRect = CGRect(
                 x: min(max(visible.midX - renderSize.width / 2, 0), pageSize.width - renderSize.width),
@@ -99,7 +143,7 @@ nonisolated struct CanvasNativeViewport: Equatable, Sendable {
         self.visiblePageRect = visible
         self.renderPageRect = renderRect
         self.expandsToViewport = expandsToViewport
-        self.renderScreenFrame = expandsToViewport ? viewportBounds : CGRect(
+        self.renderScreenFrame = CGRect(
             x: projectedPageFrame.minX + renderRect.minX * logicalZoom,
             y: projectedPageFrame.minY + renderRect.minY * logicalZoom,
             width: renderSize.width * logicalZoom, height: renderSize.height * logicalZoom)

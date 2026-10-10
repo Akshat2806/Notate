@@ -11,15 +11,28 @@ enum CanvasInkViewportProfile {
     struct ScrollReport: Codable {
         let buildConfiguration: String
         let workload: String
+        let fixture: String
+        let sourcePageNumber: Int?
+        let sourcePageStrokeCount: Int?
+        let fixturePageStrokeCount: Int?
+        let estimatedFixtureCheckpointBytes: Int64?
         let direction: String
+        let operatingSystem: String
         let logicalZoom: Double
         let pageCount: Int
         let updates: Int
+        let soakTargetSeconds: Int
+        let elapsedSeconds: Double
         let maximumMountedPageHosts: Int
         let maximumIdleNativeEditors: Int
         let viewportViolationCount: Int
         let updateMedianMilliseconds: Double
         let updateP95Milliseconds: Double
+        let updateP99Milliseconds: Double
+        let updateMaximumMilliseconds: Double
+        let updatesOver16Milliseconds: Int
+        let updatesOver33Milliseconds: Int
+        let firstViewportViolationDiagnostics: String?
         let samples: [Sample]
     }
 
@@ -29,15 +42,25 @@ enum CanvasInkViewportProfile {
     static func runFixedScroll(direction: String, zoom: CGFloat, pageCount: Int,
                                idleEditorCount: () -> Int,
                                viewportViolationCount: () -> Int,
+                               viewportViolationDiagnostics: () -> String = { "" },
                                update: (CGFloat) -> Int) async throws -> ScrollReport {
-        let steps = 2_048
+        let environment = ProcessInfo.processInfo.environment
+        let soakTargetSeconds = min(1_800, max(0, Int(environment["NOTATE_INK_SCROLL_SOAK_SECONDS"] ?? "") ?? 0))
+        let updateLimit = soakTargetSeconds > 0 ? max(2_049, soakTargetSeconds * 75) : 2_049
         var durations: [Double] = []
         var samples: [Sample] = []
         var maximumMounted = 0
         var maximumIdle = 0
         var violations = 0
+        var firstViolationDiagnostics: String?
         try await Task.sleep(for: .seconds(5))
-        for step in 0...steps {
+        let startedAt = CACurrentMediaTime()
+        var step = 0
+        while step < updateLimit {
+            if soakTargetSeconds > 0,
+               CACurrentMediaTime() - startedAt >= Double(soakTargetSeconds) {
+                break
+            }
             try Task.checkCancellation()
             let phase = CGFloat(step % 1_024) / 512
             let progress = phase <= 1 ? phase : 2 - phase
@@ -48,31 +71,63 @@ enum CanvasInkViewportProfile {
             maximumIdle = max(maximumIdle, idleEditorCount())
             // Check after the next presented frame, including framework layout.
             try await Task.sleep(for: .milliseconds(16))
-            violations += viewportViolationCount()
-            if step.isMultiple(of: 128) {
-                samples.append(Sample(completedCycles: step, physicalFootprintBytes: footprint(),
-                                      mountedPageHosts: mounted, idleNativeEditors: idleEditorCount()))
+            let frameViolations = viewportViolationCount()
+            violations += frameViolations
+            if frameViolations > 0 && firstViolationDiagnostics == nil {
+                firstViolationDiagnostics = viewportViolationDiagnostics()
             }
+            if step.isMultiple(of: 128) {
+                samples.append(sample(completedCycles: step, mountedPageHosts: mounted,
+                                      idleNativeEditors: idleEditorCount()))
+            }
+            step += 1
         }
+        let elapsedSeconds = CACurrentMediaTime() - startedAt
         try await Task.sleep(for: .seconds(10))
-        samples.append(Sample(completedCycles: steps, physicalFootprintBytes: footprint(),
-                              mountedPageHosts: maximumMounted, idleNativeEditors: idleEditorCount()))
+        samples.append(sample(completedCycles: durations.count, mountedPageHosts: maximumMounted,
+                              idleNativeEditors: idleEditorCount()))
         let ordered = durations.sorted()
+        let p99Index = min(ordered.count - 1, Int(Double(ordered.count) * 0.99))
         #if DEBUG
         let configuration = "Debug"
         #else
         let configuration = "Release (profiling enabled)"
         #endif
-        return ScrollReport(buildConfiguration: configuration, workload: "fixed-zoom-two-round-trips",
-            direction: direction, logicalZoom: Double(zoom), pageCount: pageCount, updates: steps + 1,
+        let isHandwritingFixture = ProcessInfo.processInfo.arguments
+            .contains("--ink-handwriting-stress")
+        let fixture = isHandwritingFixture
+            ? "quick-note-copy-handwriting"
+            : "synthetic"
+        let defaults = UserDefaults.standard
+        return ScrollReport(buildConfiguration: configuration,
+            workload: "fixed-zoom-two-round-trips", fixture: fixture,
+            sourcePageNumber: isHandwritingFixture
+                ? defaults.integer(forKey: "notate.inkProfiling.handwritingSourcePageNumber") : nil,
+            sourcePageStrokeCount: isHandwritingFixture
+                ? defaults.integer(forKey: "notate.inkProfiling.handwritingSourceStrokeCount") : nil,
+            fixturePageStrokeCount: isHandwritingFixture
+                ? defaults.integer(forKey: "notate.inkProfiling.handwritingStrokesPerPage") : nil,
+            estimatedFixtureCheckpointBytes: isHandwritingFixture
+                ? (defaults.object(forKey: "notate.inkProfiling.handwritingEstimatedCheckpointBytes") as? Int64) : nil,
+            direction: direction, operatingSystem: UIDevice.current.systemVersion,
+            logicalZoom: Double(zoom), pageCount: pageCount, updates: durations.count,
+            soakTargetSeconds: soakTargetSeconds, elapsedSeconds: elapsedSeconds,
             maximumMountedPageHosts: maximumMounted, maximumIdleNativeEditors: maximumIdle,
             viewportViolationCount: violations, updateMedianMilliseconds: ordered[ordered.count / 2],
-            updateP95Milliseconds: ordered[Int(Double(ordered.count) * 0.95)], samples: samples)
+            updateP95Milliseconds: ordered[Int(Double(ordered.count) * 0.95)],
+            updateP99Milliseconds: ordered[p99Index],
+            updateMaximumMilliseconds: ordered[ordered.count - 1],
+            updatesOver16Milliseconds: durations.filter { $0 > 16 }.count,
+            updatesOver33Milliseconds: durations.filter { $0 > 33 }.count,
+            firstViewportViolationDiagnostics: firstViolationDiagnostics,
+            samples: samples)
     }
 
     struct Sample: Codable {
         let completedCycles: Int
         let physicalFootprintBytes: UInt64?
+        let thermalState: String
+        let availableStorageBytes: UInt64?
         let mountedPageHosts: Int
         let idleNativeEditors: Int
     }
@@ -123,20 +178,20 @@ enum CanvasInkViewportProfile {
                 // Give Core Animation/PaperKit multiple presentation frames.
                 try await Task.sleep(for: .milliseconds(50))
                 if cycle == 0 && samples.isEmpty {
-                    samples.append(Sample(completedCycles: 0, physicalFootprintBytes: footprint(),
-                                          mountedPageHosts: mounted, idleNativeEditors: idleEditorCount()))
+                    samples.append(sample(completedCycles: 0, mountedPageHosts: mounted,
+                                          idleNativeEditors: idleEditorCount()))
                 }
                 if step == zoomSteps.count - 1 && (cycle + 1).isMultiple(of: 10) {
-                    samples.append(Sample(completedCycles: cycle + 1, physicalFootprintBytes: footprint(),
-                                          mountedPageHosts: mounted, idleNativeEditors: idleEditorCount()))
+                    samples.append(sample(completedCycles: cycle + 1, mountedPageHosts: mounted,
+                                          idleNativeEditors: idleEditorCount()))
                 }
             }
         }
         try await Task.sleep(for: .seconds(settleSeconds))
         if let last = samples.last {
-            samples[samples.count - 1] = Sample(completedCycles: cycleCount, physicalFootprintBytes: footprint(),
-                                              mountedPageHosts: last.mountedPageHosts,
-                                              idleNativeEditors: idleEditorCount())
+            samples[samples.count - 1] = sample(completedCycles: cycleCount,
+                                                mountedPageHosts: last.mountedPageHosts,
+                                                idleNativeEditors: idleEditorCount())
         }
         let ordered = durations.sorted()
         #if DEBUG
@@ -163,6 +218,24 @@ enum CanvasInkViewportProfile {
             }
         }
         return status == KERN_SUCCESS ? info.phys_footprint : nil
+    }
+
+    private static func sample(completedCycles: Int, mountedPageHosts: Int,
+                               idleNativeEditors: Int) -> Sample {
+        let thermalState: String
+        switch ProcessInfo.processInfo.thermalState {
+        case .nominal: thermalState = "nominal"
+        case .fair: thermalState = "fair"
+        case .serious: thermalState = "serious"
+        case .critical: thermalState = "critical"
+        @unknown default: thermalState = "unknown"
+        }
+        let availableStorageBytes = (try? FileManager.default.attributesOfFileSystem(
+            forPath: NSHomeDirectory()
+        )[.systemFreeSize] as? NSNumber)?.uint64Value
+        return Sample(completedCycles: completedCycles, physicalFootprintBytes: footprint(),
+                      thermalState: thermalState, availableStorageBytes: availableStorageBytes,
+                      mountedPageHosts: mountedPageHosts, idleNativeEditors: idleNativeEditors)
     }
 }
 #endif

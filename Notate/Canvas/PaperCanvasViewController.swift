@@ -36,7 +36,34 @@ private final class CanvasHistorySwipeGestureRecognizer: UISwipeGestureRecognize
 }
 
 @MainActor
+private final class PaperKitPinchGestureMonitor: NSObject {
+    weak var owner: PaperCanvasViewController?
+    let pageID: UUID
+    let isNotebookGesture: Bool
+
+    init(owner: PaperCanvasViewController, pageID: UUID, isNotebookGesture: Bool = false) {
+        self.owner = owner
+        self.pageID = pageID
+        self.isNotebookGesture = isNotebookGesture
+    }
+
+    @objc func gestureChanged(_ recognizer: UIPinchGestureRecognizer) {
+        owner?.nativePaperPinchGestureChanged(
+            recognizer,
+            pageID: pageID,
+            isNotebookGesture: isNotebookGesture
+        )
+    }
+}
+
+@MainActor
 final class PaperCanvasViewController: UIViewController, PaperCanvasCommanding {
+    private static let viewportLog = OSLog(
+        subsystem: Bundle.main.bundleIdentifier ?? "Notate",
+        // Instruments' Points of Interest instrument only records events in
+        // this category; a custom category silently omitted our measurements.
+        category: .pointsOfInterest
+    )
     private static let insertionLogger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "Notate",
         category: "CanvasInsertion"
@@ -68,6 +95,15 @@ final class PaperCanvasViewController: UIViewController, PaperCanvasCommanding {
             || pagesPreparingInsertionHistory.isEmpty == false
             || pendingInsertions.isEmpty == false
             || retainedProgrammaticInsertionCosts.isEmpty == false
+    }
+    var hasPendingSnapshotReconciliation: Bool {
+        pendingMarkupPageIDs.isEmpty == false
+            || pendingPageCommands.isEmpty == false
+            || pendingPaperTemplates.isEmpty == false
+            || pendingHistoryCommands.isEmpty == false
+            || pagesPreparingInsertionHistory.isEmpty == false
+            || pendingBoundaryPageInsertion != nil
+            || hasPendingProgrammaticInsertions
     }
 
     private struct ViewportEnvironment: Equatable {
@@ -161,11 +197,19 @@ final class PaperCanvasViewController: UIViewController, PaperCanvasCommanding {
     @MainActor
     private final class PageUndoViewController: UIViewController {
         private final class PassthroughView: UIView {
+            /// Expanded native viewports can cover the whole screen while the
+            /// paper itself occupies only a portion of it. Route touches only
+            /// to that page (or to native chrome that is intentionally allowed
+            /// in the margins) so a focused page cannot steal input from a
+            /// neighboring visible sheet.
+            var interactionFrame: CGRect?
+
             override var editingInteractionConfiguration: UIEditingInteractionConfiguration {
                 .none
             }
 
             override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+                if let interactionFrame, !interactionFrame.contains(point) { return nil }
                 let hitView = super.hitTest(point, with: event)
                 // Preserve the old direct-child behavior when PaperKit is
                 // hidden or disabled for laser/region-selection interaction.
@@ -191,6 +235,14 @@ final class PaperCanvasViewController: UIViewController, PaperCanvasCommanding {
             view.clipsToBounds = false
             self.view = view
         }
+
+        func setViewportInteractionFrame(_ frame: CGRect?) {
+            (viewIfLoaded as? PassthroughView)?.interactionFrame = frame
+        }
+
+        var viewportInteractionFrameForTesting: CGRect? {
+            (viewIfLoaded as? PassthroughView)?.interactionFrame
+        }
     }
 
     @MainActor
@@ -207,10 +259,19 @@ final class PaperCanvasViewController: UIViewController, PaperCanvasCommanding {
         var deliveredMarkupRevision: UInt64 = 0
         var renderedZoomScale: CGFloat = CanvasConstants.defaultZoomScale
         var nativeViewport: CanvasNativeViewport?
+        /// Selection geometry changes only at PaperKit selection boundaries,
+        /// while viewport hit-testing runs during every scroll frame. Reading
+        /// selectedMarkup recomputes its contents frame, so cache that frame
+        /// until the delegate reports a selection change.
+        var cachedSelectedMarkupFrameForHitTesting: CGRect?
         #if DEBUG
         var nativeGeometryApplicationCount = 0
+        var markupEqualityComparisonCount = 0
+        var selectedMarkupFrameReadCount = 0
         #endif
         let navigationScrollViews = NSHashTable<UIScrollView>.weakObjects()
+        var nativePinchRecognizer: UIPinchGestureRecognizer?
+        var nativePinchMonitor: PaperKitPinchGestureMonitor?
         var hasConfiguredGeometry = false
         var isApplyingGeometry = false
 
@@ -257,9 +318,26 @@ private let nativeViewportContainer = UIView()
 // construction also bounds those framework resources during long page navigation.
 private var idleNativeControllers: [PaperMarkupViewController] = []
 private static let maximumIdleNativeControllerCount = 1
+/// Keep at most one direction-aware PaperKit page prepared ahead of scrolling.
+private var nativePrefetchedPageIDs: Set<UUID> = []
+private var lastNativeScrollOffset: CGPoint?
+private var nativeScrollDirectionSign: CGFloat = 1
+#if DEBUG || NOTATE_INK_PROFILING
+/// A/B probe for Instruments: replacing the markup on an already-loaded
+/// PaperKit controller is synchronous and may be more expensive than creating
+/// a fresh controller whose markup is installed before its view loads.
+private var bypassNativeControllerReuseForProfiling: Bool {
+    ProcessInfo.processInfo.environment["NOTATE_INK_DISABLE_CONTROLLER_REUSE"] == "1"
+}
+#else
+private let bypassNativeControllerReuseForProfiling = false
+#endif
 #if DEBUG
 private var nativeControllerCreationCount = 0
 private var nativeControllerReuseCount = 0
+private var markupEqualityComparisonCountsByPageID: [UUID: Int] = [:]
+private var markupEqualityComparisonPageIDOrder: [UUID] = []
+private let maximumRetainedMarkupComparisonDiagnostics = 128
 private var lastRequestedViewportOffsetForTesting: CGPoint = .zero
 private var lastAppliedViewportOffsetForTesting: CGPoint = .zero
 private var lastViewportTransactionForTesting = "none"
@@ -273,10 +351,16 @@ private final class ViewportDisplayLinkTarget: NSObject {
     weak var owner: PaperCanvasViewController?
     @objc func tick(_ link: CADisplayLink) {
         guard let owner else { link.invalidate(); return }
+        owner.recordNativeViewportDisplayFrame(link)
         owner.flushNativeViewportUpdates()
     }
 }
 private var nativeViewportDisplayLink: CADisplayLink?
+private var nativeViewportTransactionRevision: UInt64 = 0
+private let nativeViewportSessionID = UUID().uuidString
+private var nativeViewportGestureRevision: UInt64 = 0
+private var nativeViewportContactGestureIsActive = false
+private var previousNativeViewportFrameTimestamp: CFTimeInterval?
 private var isPreparingNativeViewportForContact = false
 private var hasStoppedViewportPresentation = false
 private var nativeContactNavigationState: (pan: Bool, pinch: Bool)?
@@ -434,6 +518,29 @@ private lazy var pencilInteraction = UIPencilInteraction(delegate: self)
 private var renderedZoomScale = CanvasConstants.defaultZoomScale
 private var isZoomScrubbing = false
 private var isNativeZoomInteractionActive = false
+/// Debug-only prototype that lets PaperKit own the active page pinch while
+/// mirroring its presentation into notebook navigation. Keep it opt-in until
+/// the physical-device pinch/bounce gate passes on both supported OS releases.
+private var paperKitOwnsNativePinch: Bool {
+#if DEBUG
+    usesNativePageViewports
+        && ProcessInfo.processInfo.environment["NOTATE_PAPERKIT_PINCH_OWNS_ZOOM"] == "1"
+#else
+    false
+#endif
+}
+private var nativePaperPinchOwnerPageID: UUID?
+private var nativePaperPinchAnchor: CanvasNativePinchAnchor?
+private var notebookPinchDiagnosticMonitor: PaperKitPinchGestureMonitor?
+private var nativePaperPinchLastUpdateTime: TimeInterval = 0
+private var nativePaperPinchLastTraceTime: TimeInterval = 0
+#if DEBUG
+private var nativePinchDiagnosticStartedAt: TimeInterval = 0
+private var nativePinchDiagnosticLastSampleTime: TimeInterval = 0
+private var nativePinchDiagnosticSamples: [String] = []
+private var lastProgrammaticZoomMutationForTesting = "none"
+private var lastViewportLayoutTransitionForTesting = "none"
+#endif
 /// Keeps the page that owns a native pinch as the anchor through spring-back
 /// and its final correction frame. Pan, explicit page navigation, or a direct
 /// PaperKit interaction releases this focus lock.
@@ -468,7 +575,9 @@ private var settledInkPreviewToken: UInt64 = 0
     // once after the user pauses, rather than rebuilding its tile hierarchy
     // at every intermediate scale.
 private var programmaticFreeformZoomSettlementTask: Task<Void, Never>?
-private static let renderedPageOverscanViewports: CGFloat = 0.25
+private static let renderedPageLookaheadViewports: CGFloat = 1
+private static let renderedPageTrailingPrefetchViewports: CGFloat = 0.15
+private static let nativeViewportScrollBufferViewports: CGFloat = 0.25
     // The fallback keeps its eager threshold. Native notebooks always create
     // PaperKit stacks only for the active viewport;
     // hosts with native undo or live interaction state remain pinned.
@@ -1015,6 +1124,12 @@ let retainedPageID = lastPublishedViewportPageID.flatMap { id in
 pages.contains(where: { $0.id == id }) ? id : nil
 } ?? focusedPageID
 let retainedViewport = lastPublishedViewport ?? currentViewportState()
+#if DEBUG
+if ProcessInfo.processInfo.environment["NOTATE_NATIVE_PINCH_DIAGNOSTICS"] == "1"
+    || ProcessInfo.processInfo.environment["NOTATE_UI_TESTING"] == "1" {
+    lastViewportLayoutTransitionForTesting = "old=\(String(describing: settledEnvironment)) new=\(environment) retained=\(retainedViewport.stackZoomScale) lastPublished=\(String(describing: lastPublishedViewport?.stackZoomScale)) current=\(currentViewportState().stackZoomScale) focused=\(focusedPageID.uuidString)"
+}
+#endif
 settledEnvironment = environment
 setFocusedPage(retainedPageID, fromDirectInteraction: false)
 invalidateLayoutPlan()
@@ -1036,13 +1151,16 @@ view.setNeedsLayout()
 override func didReceiveMemoryWarning() {
 super.didReceiveMemoryWarning()
 idleNativeControllers.removeAll()
+nativePrefetchedPageIDs.removeAll()
 clearSettledInkPreviews()
 isUnderMemoryPressure = true
+if usesNativePageViewports { updateRenderedPageWindow(force: true) }
 // Pressure is transient. Leaving the flag set would disable prefetch and
 // discard undo history on every eviction for the rest of the session.
 Task { @MainActor [weak self] in
 try? await Task.sleep(for: .seconds(10))
 self?.isUnderMemoryPressure = false
+if self?.usesNativePageViewports == true { self?.updateRenderedPageWindow(force: true) }
 }
 cancelProgrammaticFreeformZoomSettlement()
 endInteractiveZoomPresentation()
@@ -1153,6 +1271,7 @@ _ = detachPageHost(id: pageID)
 }
         pageIDByController.removeAll(keepingCapacity: false)
         idleNativeControllers.removeAll()
+        nativePrefetchedPageIDs.removeAll(keepingCapacity: false)
         pendingAppUndoRegistrations.removeAll(keepingCapacity: false)
         undoManagersFlushingAppRegistrations.removeAll(keepingCapacity: false)
         undoHistoryPageRecency.removeAll(keepingCapacity: false)
@@ -1443,6 +1562,7 @@ _ = detachPageHost(id: pageID)
 
     func beginZoomScrubbing() {
         guard isZoomScrubbing == false else { return }
+        advanceNativeViewportGestureRevision()
         if usesNativePageViewports { nativeZoomAnchorPageID = focusedPageID }
         cancelProgrammaticNavigationForDirectInteraction()
         cancelProgrammaticFreeformZoomSettlement()
@@ -3225,12 +3345,13 @@ private func drainPendingHistoryCommandsIfPossible() {
 /// half-committed page.
 func snapshotDocument() -> CanvasDocumentSnapshot? {
     guard pagesPreparingInsertionHistory.isEmpty,
-        pages.contains(where: { $0.id == focusedPageID }) else { return nil }
-    // Unmounted pages already have authoritative snapshots. Read only live
-    // hosts at this safe save boundary instead of walking the entire notebook.
-    for pageID in hostsByPageID.keys {
-        deliverMarkupIfChanged(pageID: pageID, forceRead: true)
-    }
+        pageIndex(for: focusedPageID) != nil else { return nil }
+    // PaperKit's delegate advances a page revision for stroke, selection,
+    // transform, text, and erase changes. Deliver only those changed pages;
+    // force-reading every mounted markup here traverses all strokes after each
+    // lift and competes with the next Pencil contact. Unmounted pages and
+    // stable hosts already have authoritative model snapshots.
+    deliverAllChangedMarkup()
     return CanvasDocumentSnapshot(
         pages: pages,
         currentPageID: focusedPageID,
@@ -3263,8 +3384,12 @@ private func configureOuterScrollView() {
     // at its supported minimum; retain the legacy bounce for the full-page
     // renderer until native PaperKit owns pinch presentation end-to-end.
     scrollView.bouncesZoom = !usesNativePageViewports
-    scrollView.minimumZoomScale = CanvasConstants.absoluteZoomRange.lowerBound
-    scrollView.maximumZoomScale = CanvasConstants.absoluteZoomRange.upperBound
+    scrollView.minimumZoomScale = paperKitOwnsNativePinch
+        ? 0.25
+        : CanvasConstants.absoluteZoomRange.lowerBound
+    scrollView.maximumZoomScale = paperKitOwnsNativePinch
+        ? 12
+        : CanvasConstants.absoluteZoomRange.upperBound
     scrollView.zoomScale = CanvasConstants.defaultZoomScale
     scrollView.showsVerticalScrollIndicator = false
     scrollView.showsHorizontalScrollIndicator = false
@@ -3346,7 +3471,7 @@ private func isDirectTouchOnSelectedNativeContent(_ touch: UITouch) -> Bool {
 }
 
 private func nativeSelectionManipulationHitFrame(for host: PageHost) -> CGRect? {
-    let selectedFrame = host.controller.selectedMarkup.contentsRenderFrame
+    let selectedFrame = selectedMarkupFrameForHitTesting(host)
     guard !selectedFrame.isNull, !selectedFrame.isEmpty,
         selectedFrame.minX.isFinite, selectedFrame.minY.isFinite,
         selectedFrame.width.isFinite, selectedFrame.height.isFinite else { return nil }
@@ -3865,6 +3990,13 @@ private static func prepareImagePlaygroundSource(_ image: CGImage) -> CGImage? {
             scrollView.panGestureRecognizer.maximumNumberOfTouches = 2
         } else {
             scrollView.panGestureRecognizer.minimumNumberOfTouches = 1
+            // In native viewport mode a two-touch scale gesture must reach
+            // UIScrollView's pinch recognizer. Allowing the outer pan to claim
+            // both touches first turns a failed minimum-zoom pinch into a page
+            // translation, which looks like the sheet is slipping sideways.
+            // Pencil-only navigation remains available with one-finger pan;
+            // the explicit Pencil-and-Finger mode below retains its two-finger
+            // pan gesture.
             scrollView.panGestureRecognizer.maximumNumberOfTouches = 2
         }
     }
@@ -3942,23 +4074,104 @@ private static func prepareImagePlaygroundSource(_ image: CGImage) -> CGImage? {
 #endif
             return
         }
-        let initialHostFrame = usesNativePageViewports ? CGRect(
-            origin: .zero,
-            size: CGSize(width: max(scrollView.bounds.width, 1), height: max(scrollView.bounds.height, 1))
-        ) : scaledRect(
-            layoutPlan.pageFrame(at: pageIndex),
-            by: renderedZoomScale
-        )
+#if DEBUG || NOTATE_INK_PROFILING
+        let hostMountStartedAt = CACurrentMediaTime()
+        let exposesNativePinchDiagnostics = ProcessInfo.processInfo.environment[
+            "NOTATE_NATIVE_PINCH_DIAGNOSTICS"
+        ] == "1"
+        let mountedStrokeCount: Int
+        if exposesNativePinchDiagnostics, #available(iOS 27.0, *) {
+            mountedStrokeCount = page.markup.subelements.strokes.count
+        } else {
+            // Enumerating PaperKit elements can be expensive on dense pages.
+            // Do it only for an explicitly requested profiling test, never as
+            // part of ordinary Release host mounting or scroll instrumentation.
+            mountedStrokeCount = 0
+        }
+        defer {
+            os_signpost(
+                .event,
+                log: Self.viewportLog,
+                name: "NativePageHostMount",
+                "session=%{public}@ page=%{public}@ revision=%{public}llu gesture=%{public}llu pageIndex=%{public}u strokes=%{public}u duration_ms=%{public}.3f",
+                nativeViewportSessionID as NSString,
+                page.id.uuidString as NSString,
+                nativeViewportTransactionRevision,
+                nativeViewportGestureRevision,
+                UInt(pageIndex), UInt(mountedStrokeCount),
+                (CACurrentMediaTime() - hostMountStartedAt) * 1_000
+            )
+        }
+#endif
         let pageBounds = CGRect(origin: .zero, size: page.displaySize)
+        // Seed a newly visible PaperKit controller with its final authored
+        // crop before its view loads. The previous path first gave PaperKit
+        // the full page, loaded its tiled view, and then immediately replaced
+        // that crop in configureNativeViewportHost. On dense pages this made
+        // the first visible frame compete with a second tile/layout pass.
+        let initialNativeViewport: CanvasNativeViewport? = {
+            guard usesNativePageViewports else { return nil }
+            return nativeViewport(forPageAt: pageIndex, previous: nil)
+        }()
+        let initialHostFrame: CGRect
+        if usesNativePageViewports {
+            if let initialNativeViewport {
+                initialHostFrame = initialNativeViewport.renderScreenFrame.offsetBy(
+                    dx: -scrollView.bounds.minX,
+                    dy: -scrollView.bounds.minY
+                )
+            } else {
+                initialHostFrame = CGRect(
+                    origin: .zero,
+                    size: CGSize(
+                        width: max(nativeViewportBounds.width, 1),
+                        height: max(nativeViewportBounds.height, 1)
+                    )
+                )
+            }
+        } else {
+            initialHostFrame = scaledRect(
+                layoutPlan.pageFrame(at: pageIndex),
+                by: renderedZoomScale
+            )
+        }
+#if DEBUG || NOTATE_INK_PROFILING
+        let controllerSetupStartedAt = CACurrentMediaTime()
+#endif
         let paperController: PaperMarkupViewController
-        if usesNativePageViewports, let recycled = idleNativeControllers.popLast() {
+        if usesNativePageViewports,
+           !bypassNativeControllerReuseForProfiling,
+           let recycled = idleNativeControllers.popLast() {
             paperController = recycled
 #if DEBUG
             nativeControllerReuseCount += 1
 #endif
             paperController.markup = page.markup
-            paperController.selectedMarkup = PaperMarkup(bounds: page.markup.bounds)
+#if DEBUG || NOTATE_INK_PROFILING
+            recordNativeViewportStage(
+                "mount-markup-assignment",
+                startedAt: controllerSetupStartedAt,
+                pageID: page.id
+            )
+            let selectionResetStartedAt = CACurrentMediaTime()
+#endif
+            setSelectedMarkup(PaperMarkup(bounds: page.markup.bounds), on: paperController)
+#if DEBUG || NOTATE_INK_PROFILING
+            recordNativeViewportStage(
+                "mount-selection-reset",
+                startedAt: selectionResetStartedAt,
+                pageID: page.id
+            )
+            let recycledToolSetupStartedAt = CACurrentMediaTime()
+#endif
             paperController.drawingTool = PKInkingTool(.pen, color: .black, width: 3)
+#if DEBUG || NOTATE_INK_PROFILING
+            recordNativeViewportStage(
+                "mount-recycled-tool-setup",
+                startedAt: recycledToolSetupStartedAt,
+                pageID: page.id
+            )
+#endif
         } else {
             paperController = PaperMarkupViewController(
                 markup: page.markup,
@@ -3967,7 +4180,22 @@ private static func prepareImagePlaygroundSource(_ image: CGImage) -> CGImage? {
             #if DEBUG
             nativeControllerCreationCount += 1
             #endif
+#if DEBUG || NOTATE_INK_PROFILING
+            recordNativeViewportStage(
+                "mount-controller-construction",
+                startedAt: controllerSetupStartedAt,
+                pageID: page.id
+            )
+#endif
         }
+#if DEBUG || NOTATE_INK_PROFILING
+        recordNativeViewportStage(
+            "mount-controller-total",
+            startedAt: controllerSetupStartedAt,
+            pageID: page.id
+        )
+        var mountStageStartedAt = CACurrentMediaTime()
+#endif
         let host = PageHost(
             id: page.id,
             controller: paperController,
@@ -3980,6 +4208,23 @@ private static func prepareImagePlaygroundSource(_ image: CGImage) -> CGImage? {
             // thin rules and dots remain tiled independently of PaperKit ink.
             rendersPaperTemplateInContentView: documentMode != .freeform
         )
+        host.nativeViewport = initialNativeViewport
+#if DEBUG || NOTATE_INK_PROFILING
+        recordNativeViewportStage("mount-host-metadata", startedAt: mountStageStartedAt, pageID: page.id)
+        mountStageStartedAt = CACurrentMediaTime()
+#endif
+#if DEBUG || NOTATE_INK_PROFILING
+        if exposesNativePinchDiagnostics {
+            // Give UI automation a page-bounded gesture target. The workspace
+            // covers the full screen, including margins intentionally excluded
+            // from page hit testing; the paper element keeps synthetic contact
+            // points inside the authored sheet.
+            host.contentView.isAccessibilityElement = true
+            host.contentView.accessibilityIdentifier = "canvas.paper.page.\(pageIndex + 1)"
+            host.contentView.accessibilityLabel = "Paper page \(pageIndex + 1), \(mountedStrokeCount) strokes"
+            host.contentView.accessibilityValue = "\(mountedStrokeCount)"
+        }
+#endif
         hostsByPageID[page.id] = host
         pageIDByController[ObjectIdentifier(paperController)] = page.id
 
@@ -3990,38 +4235,52 @@ private static func prepareImagePlaygroundSource(_ image: CGImage) -> CGImage? {
         // rejects in `_clampedZoomScale` during launch.
         host.undoController.view.frame = initialHostFrame
         host.undoController.addChild(paperController)
-        paperController.view.frame = host.undoController.view.bounds
-        paperController.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        host.undoController.view.addSubview(paperController.view)
-        paperController.didMove(toParent: host.undoController)
-
         paperController.delegate = self
         // Paper tones are authored light surfaces and do not invert with the
         // app. Keep PaperKit in that same appearance so it does not adapt black
         // strokes for a dark surface that is not actually behind the ink.
         paperController.overrideUserInterfaceStyle = .light
         paperController.contentView = host.contentView
+#if DEBUG || NOTATE_INK_PROFILING
+        recordNativeViewportStage("mount-paperkit-content-view", startedAt: mountStageStartedAt, pageID: page.id)
+        mountStageStartedAt = CACurrentMediaTime()
+#endif
         host.undoController.view.clipsToBounds = usesNativePageViewports
         let isLaserPointerActive = appliedToolState?.activeTool == .laserPointer
         paperController.isEditable = isReaderModeEnabled == false
             && isLaserPointerActive == false
-        paperController.view.isUserInteractionEnabled = isReaderModeEnabled == false
-            && isLaserPointerActive == false
-            && regionSelectionInteractionSnapshot == nil
         paperController.isRulerActive = isReaderModeEnabled == false
             && isRulerActive
             && page.id == focusedPageID
-        paperController.contentVisibleFrame = pageBounds
+#if DEBUG || NOTATE_INK_PROFILING
+        var mountGeometryStageStartedAt = CACurrentMediaTime()
+#endif
+        paperController.contentVisibleFrame = initialNativeViewport?.renderPageRect ?? pageBounds
+#if DEBUG || NOTATE_INK_PROFILING
+        recordNativeViewportStage(
+            "mount-content-visible-frame",
+            startedAt: mountGeometryStageStartedAt,
+            pageID: page.id
+        )
+        mountGeometryStageStartedAt = CACurrentMediaTime()
+#endif
         paperController.zoomRange = usesNativePageViewports
             ? CanvasConstants.nativeViewportRenderingZoomRange
             : renderedZoomScale...renderedZoomScale
+#if DEBUG || NOTATE_INK_PROFILING
+        recordNativeViewportStage(
+            "mount-zoom-range",
+            startedAt: mountGeometryStageStartedAt,
+            pageID: page.id
+        )
+#endif
+#if DEBUG || NOTATE_INK_PROFILING
+        recordNativeViewportStage("mount-paperkit-page-geometry", startedAt: mountStageStartedAt, pageID: page.id)
+        mountStageStartedAt = CACurrentMediaTime()
+#endif
         host.renderedZoomScale = renderedZoomScale
         host.hasConfiguredGeometry = true
         paperController.indirectPointerTouchMode = .selection
-        paperController.view.backgroundColor = .clear
-        paperController.view.clipsToBounds = usesNativePageViewports
-        paperController.view.isHidden = true
-        applyInputMode(inputMode, to: paperController)
         if let appliedToolState,
             let nativeTool = CanvasNativeToolMapper.nativeTool(for: appliedToolState) {
             paperController.drawingTool = nativeTool
@@ -4031,7 +4290,7 @@ private static func prepareImagePlaygroundSource(_ image: CGImage) -> CGImage? {
             scrollConfiguration.visibleScrollIndicators = []
             scrollConfiguration.bounces = []
             scrollConfiguration.alwaysBounces = []
-            scrollConfiguration.bouncesZoom = false
+            scrollConfiguration.bouncesZoom = paperKitOwnsNativePinch
             scrollConfiguration.contentInset = .zero
             scrollConfiguration.contentInsetAdjustmentBehavior = .never
             scrollConfiguration.scrollsToTop = false
@@ -4043,6 +4302,30 @@ private static func prepareImagePlaygroundSource(_ image: CGImage) -> CGImage? {
             paperController.showsVerticalScrollIndicator = false
             paperController.showsHorizontalScrollIndicator = false
         }
+#if DEBUG || NOTATE_INK_PROFILING
+        recordNativeViewportStage("mount-paperkit-interaction-config", startedAt: mountStageStartedAt, pageID: page.id)
+        mountStageStartedAt = CACurrentMediaTime()
+#endif
+
+        // Apply the authored page viewport and native tool configuration before
+        // PaperKit loads its scroll view. Otherwise `contentView`, crop, zoom,
+        // and tool changes can invalidate the just-created canvas in the same
+        // main-thread mount transaction.
+        paperController.view.frame = host.undoController.view.bounds
+        paperController.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        paperController.view.isUserInteractionEnabled = isReaderModeEnabled == false
+            && isLaserPointerActive == false
+            && regionSelectionInteractionSnapshot == nil
+        paperController.view.backgroundColor = .clear
+        paperController.view.clipsToBounds = usesNativePageViewports
+        paperController.view.isHidden = true
+        applyInputMode(inputMode, to: paperController)
+        host.undoController.view.addSubview(paperController.view)
+        paperController.didMove(toParent: host.undoController)
+#if DEBUG || NOTATE_INK_PROFILING
+        recordNativeViewportStage("mount-view-attachment", startedAt: mountStageStartedAt, pageID: page.id)
+        mountStageStartedAt = CACurrentMediaTime()
+#endif
 
         documentView.addSubview(host.decorationView)
         if usesNativePageViewports {
@@ -4069,6 +4352,9 @@ private static func prepareImagePlaygroundSource(_ image: CGImage) -> CGImage? {
             host.decorationView.setOverlayPresentationActive(true)
             documentView.bringSubviewToFront(host.decorationView)
         }
+#if DEBUG || NOTATE_INK_PROFILING
+        recordNativeViewportStage("mount-window-attachment", startedAt: mountStageStartedAt, pageID: page.id)
+#endif
 #if DEBUG
         lastHostMountTransactionForTesting = "mounted host \(page.id) at index \(pageIndex)"
 #endif
@@ -4093,6 +4379,15 @@ private static func prepareImagePlaygroundSource(_ image: CGImage) -> CGImage? {
             undoManagersFlushingAppRegistrations.remove(managerID)
         }
         pageIDByController.removeValue(forKey: ObjectIdentifier(host.controller))
+        if let recognizer = host.nativePinchRecognizer,
+           let monitor = host.nativePinchMonitor {
+            recognizer.removeTarget(
+                monitor,
+                action: #selector(PaperKitPinchGestureMonitor.gestureChanged(_:))
+            )
+        }
+        host.nativePinchRecognizer = nil
+        host.nativePinchMonitor = nil
         host.controller.delegate = nil
         host.controller.view.endEditing(true)
         host.controller.isEditable = false
@@ -4103,11 +4398,12 @@ private static func prepareImagePlaygroundSource(_ image: CGImage) -> CGImage? {
         host.controller.view.removeFromSuperview()
         host.controller.removeFromParent()
         if let markupBounds = host.controller.markup?.bounds {
-            host.controller.selectedMarkup = PaperMarkup(bounds: markupBounds)
+            setSelectedMarkup(PaperMarkup(bounds: markupBounds), on: host.controller)
         }
         host.controller.contentView = nil
         host.controller.markup = nil
         if recyclingNativeController, usesNativePageViewports,
+           !bypassNativeControllerReuseForProfiling,
            idleNativeControllers.count < Self.maximumIdleNativeControllerCount,
            !hasStoppedViewportPresentation {
             idleNativeControllers.append(host.controller)
@@ -4254,6 +4550,10 @@ private static func prepareImagePlaygroundSource(_ image: CGImage) -> CGImage? {
         link.add(to: .main, forMode: .common)
     }
 
+    private func advanceNativeViewportGestureRevision() {
+        nativeViewportGestureRevision &+= 1
+    }
+
     private func cancelNativeViewportUpdate() {
         nativeViewportDisplayLink?.invalidate()
         nativeViewportDisplayLink = nil
@@ -4264,14 +4564,35 @@ private var hasValidNativeZoomAnchor: Bool {
     return pageIndex(for: nativeZoomAnchorPageID) != nil
 }
 
-    private func flushNativeViewportUpdates() {
+private func flushNativeViewportUpdates() {
+        let transactionStartedAt = CACurrentMediaTime()
         cancelNativeViewportUpdate()
         guard usesNativePageViewports, !hasStoppedViewportPresentation else { return }
+        var stageStartedAt = CACurrentMediaTime()
+        synchronizePaperKitPinchPresentation()
+        recordNativeViewportStage("pinch-mirror", startedAt: stageStartedAt)
+        guard !hasStoppedViewportPresentation else { return }
+        nativeViewportTransactionRevision &+= 1
+#if DEBUG || NOTATE_INK_PROFILING
+        os_signpost(
+            .event,
+            log: Self.viewportLog,
+            name: "NativeViewportTransaction",
+            "session=%{public}@ page=%{public}@ revision=%{public}llu gesture=%{public}llu zoom=%{public}.4f mounted=%{public}u state=%{public}u",
+            nativeViewportSessionID as NSString,
+            (nativePaperPinchOwnerPageID ?? focusedPageID).uuidString as NSString,
+            nativeViewportTransactionRevision,
+            nativeViewportGestureRevision,
+            Double(effectiveZoomScale),
+            UInt(mountedPageIndices.count),
+            UInt((scrollView.isZooming || isNativeZoomInteractionActive) ? 1 : 0)
+        )
+#endif
         if !hasActiveRenderingContact || isPreparingNativeViewportForContact {
             // Keep PaperKit ancestors in viewport-local coordinates even near
             // page 1,000. Large scroll offsets otherwise propagate into UIKit's
             // internal layout constraints and exceed their supported constants.
-            nativeViewportContainer.frame = scrollView.bounds
+            nativeViewportContainer.frame = nativeViewportBounds
             // A pinch owns one page anchor for its whole presentation. During
             // the final zoom frames, the visible-area winner can briefly
             // change to a neighboring sheet; adopting that page here makes
@@ -4282,16 +4603,352 @@ private var hasValidNativeZoomAnchor: Bool {
             let zoomPresentationIsActive = scrollView.isZooming
                 || isNativeZoomInteractionActive
                 || isZoomScrubbing
+            stageStartedAt = CACurrentMediaTime()
             if programmaticNavigationPageID == nil
                 && !zoomPresentationIsActive
                 && !hasValidNativeZoomAnchor {
                 updateFocusFromVisibleArea(unlessDirectInteraction: true)
             }
             updatePaperTemplatePresentationWindows()
+            recordNativeViewportStage("focus-template", startedAt: stageStartedAt)
         }
-        updateRenderedPageWindow(force: true)
+        stageStartedAt = CACurrentMediaTime()
+        updateRenderedPageWindow(force: true, refreshAccessibilityIfMounted: false)
+        recordNativeViewportStage("page-window", startedAt: stageStartedAt)
+        stageStartedAt = CACurrentMediaTime()
         refreshRegionSelectionPresentation()
+        recordNativeViewportStage("selection", startedAt: stageStartedAt)
+        stageStartedAt = CACurrentMediaTime()
         refreshTableAccessibilityElements()
+        recordNativeViewportStage("table-accessibility", startedAt: stageStartedAt)
+        recordNativeViewportStage("transaction", startedAt: transactionStartedAt)
+        if nativePaperPinchOwnerPageID != nil {
+            // Keep one display-frame observer alive through PaperKit's native
+            // spring-back. Delegate callbacks are coalesced into this same
+            // transaction; the quiet interval ends the mirrored presentation.
+            scheduleNativeViewportUpdate()
+        }
+    }
+
+    private func recordNativeViewportStage(
+        _ stage: String,
+        startedAt: CFTimeInterval,
+        pageID: UUID? = nil
+    ) {
+#if DEBUG || NOTATE_INK_PROFILING
+        let correlatedPageID = pageID ?? nativePaperPinchOwnerPageID ?? focusedPageID
+        os_signpost(
+            .event,
+            log: Self.viewportLog,
+            name: "NativeViewportStage",
+            "session=%{public}@ page=%{public}@ revision=%{public}llu gesture=%{public}llu stage=%{public}@ duration_ms=%{public}.3f",
+            nativeViewportSessionID as NSString,
+            correlatedPageID.uuidString as NSString,
+            nativeViewportTransactionRevision,
+            nativeViewportGestureRevision,
+            stage as NSString,
+            (CACurrentMediaTime() - startedAt) * 1_000
+        )
+#endif
+    }
+
+    private func recordNativeViewportDisplayFrame(_ link: CADisplayLink) {
+#if DEBUG || NOTATE_INK_PROFILING
+        let now = CACurrentMediaTime()
+        let intervalMilliseconds = previousNativeViewportFrameTimestamp.map {
+            (link.timestamp - $0) * 1_000
+        } ?? 0
+        previousNativeViewportFrameTimestamp = link.timestamp
+        let callbackLatenessMilliseconds = max(0, now - link.targetTimestamp) * 1_000
+        let interactionState: UInt = hasActiveRenderingContact ? 3
+            : (scrollView.isZooming || isNativeZoomInteractionActive ? 2
+                : (scrollView.isDragging || scrollView.isDecelerating ? 1 : 0))
+        os_signpost(
+            .event,
+            log: Self.viewportLog,
+            name: "NativeViewportDisplayFrame",
+            "session=%{public}@ page=%{public}@ revision=%{public}llu gesture=%{public}llu interval_ms=%{public}.3f callback_lateness_ms=%{public}.3f frame_budget_ms=%{public}.3f state=%{public}u",
+            nativeViewportSessionID as NSString,
+            (nativePaperPinchOwnerPageID ?? focusedPageID).uuidString as NSString,
+            nativeViewportTransactionRevision,
+            nativeViewportGestureRevision,
+            intervalMilliseconds,
+            callbackLatenessMilliseconds,
+            link.duration * 1_000,
+            interactionState
+        )
+#else
+        _ = link
+#endif
+    }
+
+    private func synchronizePaperKitPinchPresentation() {
+        guard paperKitOwnsNativePinch,
+              let ownerPageID = nativePaperPinchOwnerPageID,
+              let pageIndex = pageIndex(for: ownerPageID),
+              let host = hostsByPageID[ownerPageID] else { return }
+
+        let now = CACurrentMediaTime()
+        let nativeScroll = nativePaperScrollView(host)
+        if nativeScroll?.isZooming == true {
+            nativePaperPinchLastUpdateTime = now
+        }
+
+        let nativeScale = nativePaperZoom(host) ?? effectiveZoomScale
+        mirrorPaperKitZoomIntoNotebook(
+            nativeScale,
+            pageIndex: pageIndex,
+            host: host
+        )
+        recordNativePinchDiagnosticSample(
+            event: "frame",
+            nativeScale: nativeScale,
+            host: host,
+            force: false
+        )
+
+        guard nativeScroll?.isZooming != true,
+              now - nativePaperPinchLastUpdateTime >= 0.18 else { return }
+        finishPaperKitOwnedPinch(nativeScale: nativeScale)
+    }
+
+    fileprivate func nativePaperPinchGestureChanged(
+        _ recognizer: UIPinchGestureRecognizer,
+        pageID: UUID,
+        isNotebookGesture: Bool
+    ) {
+#if DEBUG
+        guard let host = hostsByPageID[isNotebookGesture ? focusedPageID : pageID] else { return }
+        let nativeScale = nativePaperZoom(host) ?? effectiveZoomScale
+        let event = isNotebookGesture
+            ? String(format: "notebook-recognizer-%ld-scale%.3f-velocity%.3f", recognizer.state.rawValue, Double(recognizer.scale), Double(recognizer.velocity))
+            : String(format: "paper-recognizer-%ld-scale%.3f-velocity%.3f", recognizer.state.rawValue, Double(recognizer.scale), Double(recognizer.velocity))
+        recordNativePinchDiagnosticSample(
+            event: event,
+            nativeScale: nativeScale,
+            host: host,
+            force: true
+        )
+        guard paperKitOwnsNativePinch else { return }
+        switch recognizer.state {
+        case .began:
+            if nativePaperPinchOwnerPageID == nil {
+                beginPaperKitOwnedPinch(on: pageID, recognizer: recognizer)
+            }
+            guard nativePaperPinchOwnerPageID == pageID else { return }
+            updatePaperKitPinchAnchorScreenPoint(from: recognizer)
+            nativePaperPinchLastUpdateTime = CACurrentMediaTime()
+            scheduleNativeViewportUpdate()
+        case .changed:
+            if nativePaperPinchOwnerPageID == nil {
+                beginPaperKitOwnedPinch(on: pageID, recognizer: recognizer)
+            }
+            guard nativePaperPinchOwnerPageID == pageID else { return }
+            updatePaperKitPinchAnchorScreenPoint(from: recognizer)
+            nativePaperPinchLastUpdateTime = CACurrentMediaTime()
+            scheduleNativeViewportUpdate()
+        case .ended, .cancelled:
+            guard nativePaperPinchOwnerPageID == pageID else { return }
+            updatePaperKitPinchAnchorScreenPoint(from: recognizer)
+            nativePaperPinchLastUpdateTime = CACurrentMediaTime()
+            scheduleNativeViewportUpdate()
+        default:
+            break
+        }
+#else
+        _ = recognizer
+        _ = pageID
+        _ = isNotebookGesture
+#endif
+    }
+
+    private func beginPaperKitOwnedPinch(
+        on pageID: UUID,
+        recognizer: UIPinchGestureRecognizer
+    ) {
+        guard paperKitOwnsNativePinch,
+              nativePaperPinchOwnerPageID == nil,
+              let host = hostsByPageID[pageID] else { return }
+        advanceNativeViewportGestureRevision()
+        let hostPoint = recognizer.location(in: host.undoController.view)
+        let localPoint = host.controller.view.convert(hostPoint, from: host.undoController.view)
+        let pagePoint = host.nativeViewport?.pagePoint(fromLocal: localPoint) ?? CGPoint(
+            x: localPoint.x / max(host.renderedZoomScale, 0.0001),
+            y: localPoint.y / max(host.renderedZoomScale, 0.0001)
+        )
+        nativePaperPinchOwnerPageID = pageID
+        nativePaperPinchAnchor = CanvasNativePinchAnchor(
+            pageID: pageID,
+            pagePoint: pagePoint,
+            screenPoint: recognizer.location(in: view)
+        )
+        nativeZoomAnchorPageID = pageID
+        nativePaperPinchLastUpdateTime = CACurrentMediaTime()
+#if DEBUG
+        if nativePinchDiagnosticStartedAt == 0 {
+            nativePinchDiagnosticStartedAt = nativePaperPinchLastUpdateTime
+        }
+        if let host = hostsByPageID[pageID] {
+            recordNativePinchDiagnosticSample(event: "begin", nativeScale: nativePaperZoom(host) ?? effectiveZoomScale, host: host, force: true)
+        }
+#endif
+        isNativeZoomInteractionActive = true
+        usesHorizontalPageFit = false
+        clearSettledInkPreviews()
+        cancelProgrammaticFreeformZoomSettlement()
+        beginInteractiveZoomPresentation()
+        setFocusedPage(pageID, fromDirectInteraction: false)
+        callbacks.zoomInteractionChanged(true)
+    }
+
+    private func updatePaperKitPinchAnchorScreenPoint(from recognizer: UIPinchGestureRecognizer) {
+        guard var anchor = nativePaperPinchAnchor,
+              anchor.pageID == nativePaperPinchOwnerPageID else { return }
+        anchor.screenPoint = recognizer.location(in: view)
+        nativePaperPinchAnchor = anchor
+    }
+
+    private func mirrorPaperKitZoomIntoNotebook(
+        _ nativeScale: CGFloat,
+        pageIndex: Int,
+        host: PageHost
+    ) {
+        guard nativeScale.isFinite, nativeScale > 0,
+              nativePaperPinchOwnerPageID == host.id else { return }
+        let requestedOuterScale = nativeScale / max(renderedZoomScale, 0.0001)
+        let outerScale = min(
+            max(requestedOuterScale, scrollView.minimumZoomScale),
+            scrollView.maximumZoomScale
+        )
+        isApplyingGeometry = true
+        defer { isApplyingGeometry = false }
+
+        if abs(scrollView.zoomScale - outerScale) > 0.0001 {
+            scrollView.setZoomScale(outerScale, animated: false)
+        }
+
+        // Mirror around the same authored point PaperKit is pinching around.
+        // Aligning page origins each frame ignores the gesture centroid and
+        // makes the page appear to travel toward a corner as scale changes.
+        preservePaperKitPinchAnchor(pageIndex: pageIndex, pageID: host.id)
+#if DEBUG
+        if ProcessInfo.processInfo.environment["NOTATE_UI_TESTING"] == "1",
+           CACurrentMediaTime() - nativePaperPinchLastTraceTime >= 0.2 {
+            nativePaperPinchLastTraceTime = CACurrentMediaTime()
+            let pageBounds = CGRect(origin: .zero, size: pages[pageIndex].displaySize)
+            let alignedPaper = host.contentView.convert(pageBounds, to: view)
+            let anchor = nativePaperPinchAnchor
+            let projectedAnchor = anchor.map { value in
+                documentView.convert(
+                    CGPoint(
+                        x: layoutPlan.pageFrame(at: pageIndex).origin.x + value.pagePoint.x,
+                        y: layoutPlan.pageFrame(at: pageIndex).origin.y + value.pagePoint.y
+                    ),
+                    to: view
+                )
+            }
+            print("PAPERKIT_PINCH_TRACE page=\(pageIndex) paperZoom=\(nativeScale) notebookZoom=\(effectiveZoomScale) nativeVisible=\(host.controller.contentVisibleFrame) paper=\(alignedPaper) anchor=\(String(describing: projectedAnchor)) target=\(String(describing: anchor?.screenPoint)) bounds=\(host.undoController.view.bounds) outerOffset=\(scrollView.contentOffset)")
+        }
+#endif
+    }
+
+    private func preservePaperKitPinchAnchor(pageIndex: Int, pageID: UUID) {
+        guard let anchor = nativePaperPinchAnchor,
+              anchor.pageID == pageID,
+              pages.indices.contains(pageIndex) else { return }
+        let pageOrigin = layoutPlan.pageFrame(at: pageIndex).origin
+        let documentAnchor = CGPoint(
+            x: pageOrigin.x + anchor.pagePoint.x,
+            y: pageOrigin.y + anchor.pagePoint.y
+        )
+        let projectedAnchor = documentView.convert(documentAnchor, to: view)
+        guard projectedAnchor.x.isFinite, projectedAnchor.y.isFinite,
+              anchor.screenPoint.x.isFinite, anchor.screenPoint.y.isFinite else { return }
+        let correctedOffset = anchor.contentOffset(
+            currentOffset: scrollView.contentOffset,
+            projectedAnchorOnScreen: projectedAnchor
+        )
+        if abs(correctedOffset.x - scrollView.contentOffset.x) > 0.01
+            || abs(correctedOffset.y - scrollView.contentOffset.y) > 0.01 {
+            scrollView.setContentOffset(correctedOffset, animated: false)
+        }
+    }
+
+    private func recordNativePinchDiagnosticSample(
+        event: String,
+        nativeScale: CGFloat,
+        host: PageHost,
+        force: Bool
+    ) {
+#if DEBUG
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["NOTATE_UI_TESTING"] == "1"
+            || environment["NOTATE_NATIVE_PINCH_DIAGNOSTICS"] == "1" else { return }
+        let now = CACurrentMediaTime()
+        if nativePinchDiagnosticStartedAt == 0 {
+            nativePinchDiagnosticStartedAt = now
+        }
+        guard force || now - nativePinchDiagnosticLastSampleTime >= 0.035 else { return }
+        nativePinchDiagnosticLastSampleTime = now
+        let nativeScroll = nativePaperScrollView(host)
+        let relativeTime = max(0, now - nativePinchDiagnosticStartedAt)
+        let sample = String(
+            format: "t=%.3f %@ paper=%.3f nativeUIKitZoom=%.3f nativeMin=%.3f nativeMax=%.3f outer=%.3f outerZooming=%d logical=%.3f paperPinch=%ld outerPinch=%ld zooming=%d frame=%@",
+            relativeTime,
+            event,
+            Double(nativeScale),
+            Double(nativeScroll?.zoomScale ?? -1),
+            Double(nativeScroll?.minimumZoomScale ?? -1),
+            Double(nativeScroll?.maximumZoomScale ?? -1),
+            Double(scrollView.zoomScale),
+            scrollView.isZooming ? 1 : 0,
+            Double(effectiveZoomScale),
+            nativeScroll?.pinchGestureRecognizer?.state.rawValue ?? -1,
+            scrollView.pinchGestureRecognizer?.state.rawValue ?? -1,
+            nativeScroll?.isZooming == true ? 1 : 0,
+            String(describing: host.controller.contentVisibleFrame)
+        )
+        nativePinchDiagnosticSamples.append(sample)
+        if nativePinchDiagnosticSamples.count > 128 {
+            nativePinchDiagnosticSamples.removeFirst(nativePinchDiagnosticSamples.count - 128)
+        }
+#endif
+    }
+
+    private func finishPaperKitOwnedPinch(nativeScale: CGFloat) {
+        guard let ownerPageID = nativePaperPinchOwnerPageID else { return }
+        if let host = hostsByPageID[ownerPageID] {
+            recordNativePinchDiagnosticSample(
+                event: "finish",
+                nativeScale: nativeScale,
+                host: host,
+                force: true
+            )
+        }
+        let supportedScale = CanvasZoom.clampedScale(nativeScale)
+        isApplyingGeometry = true
+        scrollView.setZoomScale(
+            supportedScale / max(renderedZoomScale, 0.0001),
+            animated: false
+        )
+        updateContentInsets()
+        if let pageIndex = pageIndex(for: ownerPageID) {
+            preservePaperKitPinchAnchor(pageIndex: pageIndex, pageID: ownerPageID)
+        }
+        isApplyingGeometry = false
+
+        if documentMode == .paged,
+           pageLayout.scrollDirection == .horizontal {
+            usesHorizontalPageFit = abs(supportedScale - minimumLogicalZoomScale) < 0.005
+        }
+        nativePaperPinchOwnerPageID = nil
+        nativePaperPinchAnchor = nil
+        nativePaperPinchLastUpdateTime = 0
+        nativeZoomAnchorPageID = ownerPageID
+        isNativeZoomInteractionActive = false
+        flushTransientViewportPublication()
+        scheduleEndInteractiveZoomPresentation()
+        callbacks.zoomInteractionChanged(false)
     }
 
     private func configureNativeViewportHost(
@@ -4301,15 +4958,12 @@ private var hasValidNativeZoomAnchor: Bool {
             pendingRenderedPageWindowUpdate = true
             return
         }
-        let projectedPageFrame = documentView.convert(layoutPlan.pageFrame(at: pageIndex), to: scrollView)
-        let allowsNativeRulerMargins = isRulerActive
-            && host.id == focusedPageID
-            && isReaderModeEnabled == false
-        guard !hidden, let viewport = CanvasNativeViewport(
-            pageID: host.id, projectedPageFrame: projectedPageFrame,
-            viewportBounds: scrollView.bounds, logicalZoom: effectiveZoomScale,
-            expandsToViewport: allowsNativeRulerMargins
-        ) else {
+        let previousViewport = host.nativeViewport
+        // Keep PaperKit's bounds fixed through scroll and pinch. Along the
+        // notebook axis the viewport includes a small render buffer; the outer
+        // clipped container hides that buffer while a retained authored crop
+        // lets the host move across it without rebuilding PaperKit's tiles.
+        guard !hidden, let viewport = nativeViewport(forPageAt: pageIndex, previous: previousViewport) else {
             host.undoController.view.isHidden = true
             host.controller.view.isHidden = true
             host.nativeViewport = nil
@@ -4317,18 +4971,19 @@ private var hasValidNativeZoomAnchor: Bool {
             host.contentView.setRenderingActive(false)
             return
         }
-        let previousViewport = host.nativeViewport
-        let changed = previousViewport.map { !approximatelyEqual($0.renderPageRect, viewport.renderPageRect) } ?? true
+        let nativeHostSizeChanged = host.undoController.view.bounds.size
+            != viewport.renderScreenFrame.size
+        let nativeControllerSizeChanged = host.controller.view.bounds.size
+            != viewport.renderScreenFrame.size
+        let changed = previousViewport.map { !$0.hasSameRenderingProjection(as: viewport) } ?? true
             || host.controller.view.isHidden
             || !nativePaperVisibleFrameMatches(host, viewport: viewport)
             || nativePaperZoom(host).map { abs($0 - viewport.logicalZoom) > 0.0001 } == true
+        let paperKitOwnsThisPinch = paperKitOwnsNativePinch
+            && nativePaperPinchOwnerPageID == host.id
+            && isNativeZoomInteractionActive
         host.isApplyingGeometry = true
         defer { host.isApplyingGeometry = false }
-        // PaperKit defers parts of its canvas layout while hidden. Make the
-        // complete host visible before resolving geometry in this same main
-        // actor transaction, so its first presented frame is already settled.
-        host.undoController.view.isHidden = false
-        host.controller.view.isHidden = false
         host.undoController.view.frame = viewport.renderScreenFrame.offsetBy(
             dx: -scrollView.bounds.minX, dy: -scrollView.bounds.minY
         )
@@ -4341,6 +4996,23 @@ private var hasValidNativeZoomAnchor: Bool {
         #if DEBUG
         host.nativeGeometryApplicationCount += 1
         #endif
+#if DEBUG || NOTATE_INK_PROFILING
+        let geometryStartedAt = CACurrentMediaTime()
+        defer {
+            let durationMilliseconds = (CACurrentMediaTime() - geometryStartedAt) * 1_000
+            os_signpost(
+                .event,
+                log: Self.viewportLog,
+                name: "NativeViewportGeometry",
+                "session=%{public}@ page=%{public}@ revision=%{public}llu gesture=%{public}llu pageIndex=%{public}u zoom=%{public}.4f duration_ms=%{public}.3f",
+                nativeViewportSessionID as NSString,
+                host.id.uuidString as NSString,
+                nativeViewportTransactionRevision,
+                nativeViewportGestureRevision,
+                UInt(pageIndex), Double(viewport.logicalZoom), durationMilliseconds
+            )
+        }
+#endif
         UIView.performWithoutAnimation {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -4353,18 +5025,203 @@ private var hasValidNativeZoomAnchor: Bool {
         if host.controller.zoomRange != CanvasConstants.nativeViewportRenderingZoomRange {
             host.controller.zoomRange = CanvasConstants.nativeViewportRenderingZoomRange
         }
-        host.controller.view.layoutIfNeeded()
-        synchronizeNativePaperZoom(host, scale: viewport.logicalZoom)
-        host.controller.contentVisibleFrame = viewport.renderPageRect
-        if viewport.expandsToViewport {
+        if nativeHostSizeChanged || nativeControllerSizeChanged || !host.hasConfiguredGeometry {
+            // Resolve the new host bounds before asking PaperKit to apply the
+            // notebook zoom. Doing this afterward lets PaperKit's fit pass
+            // overwrite the requested zoom (visible during rotation).
+            host.controller.view.setNeedsLayout()
+            host.controller.view.layoutIfNeeded()
+            nativePaperScrollView(host)?.setNeedsLayout()
+            nativePaperScrollView(host)?.layoutIfNeeded()
+            host.undoController.view.setNeedsLayout()
+            host.undoController.view.layoutIfNeeded()
+        }
+        if !paperKitOwnsThisPinch {
+            // Publish the new authored crop before changing native scale. On
+            // zoom-out, doing this in the opposite order briefly asks PaperKit
+            // to draw a low-zoom page through the previous high-zoom crop; dense
+            // pages then show a stale rectangle until the expanded tiles arrive.
+            if !approximatelyEqual(
+                host.controller.contentVisibleFrame,
+                viewport.renderPageRect
+            ) {
+                #if DEBUG || NOTATE_INK_PROFILING
+                let cropStartedAt = CACurrentMediaTime()
+                #endif
+                host.controller.contentVisibleFrame = viewport.renderPageRect
+                #if DEBUG || NOTATE_INK_PROFILING
+                recordNativeViewportStage("paperkit-content-crop", startedAt: cropStartedAt, pageID: host.id)
+                #endif
+            }
+            synchronizeNativePaperZoom(host, scale: viewport.logicalZoom)
+        }
+        if viewport.expandsToViewport && !paperKitOwnsThisPinch {
             alignExpandedPaperContentToPage(host, pageIndex: pageIndex, viewport: viewport)
         }
+        updateNativeViewportHitTesting(host, pageIndex: pageIndex, viewport: viewport)
         configureNativeNavigationPrecedence(for: host)
         host.hasConfiguredGeometry = true
+        // A newly mounted controller remains hidden through the crop/zoom
+        // transaction; an already visible controller receives both changes
+        // in this disabled-animation transaction. The first presented PaperKit
+        // frame therefore uses the matching projection.
         host.undoController.view.isHidden = false
         host.controller.view.isHidden = false
         host.controller.view.layer.shouldRasterize = false
         }
+    }
+
+    private func nativeViewportUsesFullScreenFrame(for pageID: UUID) -> Bool {
+        if pageID == focusedPageID || pageID == nativeZoomAnchorPageID
+            || (isRulerActive && pageID == focusedPageID && isReaderModeEnabled == false) {
+            return true
+        }
+        // Every sheet that is actually visible gets the same viewport-sized
+        // PaperKit surface. A page-sized surface clips/reflows as it crosses
+        // the viewport edge, which produces a visible jump when the next host
+        // takes over. Passthrough hit testing still limits ordinary input to
+        // the authored paper rectangle, so adjacent visible hosts can coexist.
+        guard let index = pageIndex(for: pageID) else { return false }
+        let projected = documentView.convert(layoutPlan.pageFrame(at: index), to: scrollView)
+        return projected.intersects(nativeViewportBounds)
+    }
+
+    private func nativeViewport(
+        forPageAt pageIndex: Int,
+        previous: CanvasNativeViewport?
+    ) -> CanvasNativeViewport? {
+        guard pages.indices.contains(pageIndex) else { return nil }
+        let pageID = pages[pageIndex].id
+        let projectedPageFrame = documentView.convert(
+            layoutPlan.pageFrame(at: pageIndex), to: scrollView
+        )
+        let isPrefetched = nativePrefetchedPageIDs.contains(pageID)
+        let expandsToViewport = isPrefetched || nativeViewportUsesFullScreenFrame(for: pageID)
+        let viewportBounds = viewportBoundsForNativePage(forPageAt: pageIndex, prefetched: isPrefetched)
+        let overscan = expandsToViewport ? nativeViewportScrollOverscan : .zero
+        let reusableCrop: CGRect? = {
+            guard let previous,
+                  previous.pageID == pageID,
+                  previous.expandsToViewport == expandsToViewport,
+                  abs(previous.logicalZoom - effectiveZoomScale) <= 0.0001 else { return nil }
+            return previous.renderPageRect
+        }()
+        return CanvasNativeViewport(
+            pageID: pageID,
+            projectedPageFrame: projectedPageFrame,
+            viewportBounds: viewportBounds,
+            logicalZoom: effectiveZoomScale,
+            expandsToViewport: expandsToViewport,
+            renderOverscan: overscan,
+            retainedRenderPageRect: reusableCrop
+        )
+    }
+
+    private var nativeViewportScrollOverscan: CGSize {
+        guard !isUnderMemoryPressure else { return .zero }
+        let amount: CGFloat
+        switch pageLayout.scrollDirection {
+        case .vertical:
+            amount = nativeViewportBounds.height * Self.nativeViewportScrollBufferViewports
+            return CGSize(width: 0, height: amount)
+        case .horizontal:
+            amount = nativeViewportBounds.width * Self.nativeViewportScrollBufferViewports
+            return CGSize(width: amount, height: 0)
+        }
+    }
+
+    /// A lookahead host is configured against a future viewport centered on
+    /// its page. Its PaperKit view can load and rasterize behind the clipped
+    /// notebook viewport before the sheet becomes visible.
+    private func viewportBoundsForNativePage(
+        forPageAt pageIndex: Int,
+        prefetched: Bool
+    ) -> CGRect {
+        guard prefetched, pages.indices.contains(pageIndex) else { return nativeViewportBounds }
+        let pageFrame = documentView.convert(layoutPlan.pageFrame(at: pageIndex), to: scrollView)
+        let delta: CGFloat
+        switch pageLayout.scrollDirection {
+        case .vertical:
+            delta = pageFrame.midY - nativeViewportBounds.midY
+            let limit = nativeViewportBounds.height * Self.renderedPageLookaheadViewports
+            return nativeViewportBounds.offsetBy(dx: 0, dy: min(max(delta, -limit), limit))
+        case .horizontal:
+            delta = pageFrame.midX - nativeViewportBounds.midX
+            let limit = nativeViewportBounds.width * Self.renderedPageLookaheadViewports
+            return nativeViewportBounds.offsetBy(dx: min(max(delta, -limit), limit), dy: 0)
+        }
+    }
+
+    /// The outer scroll view fills this controller's view. During a rotation,
+    /// UIKit can leave its own bounds at the previous orientation until the
+    /// next layout pass, while the root view already has the new size. Keep
+    /// PaperKit hosts and the viewport overlay on the root view's current size
+    /// for that transition; preserve the scroll view's content-space origin.
+    private var nativeViewportBounds: CGRect {
+        var bounds = scrollView.bounds
+        let currentSize = view.bounds.size
+        if currentSize.width.isFinite, currentSize.height.isFinite,
+           currentSize.width > 0, currentSize.height > 0 {
+            bounds.size = currentSize
+        }
+        return bounds
+    }
+
+private func updateNativeViewportHitTesting(
+        _ host: PageHost, pageIndex: Int, viewport: CanvasNativeViewport
+    ) {
+        guard viewport.expandsToViewport else {
+            host.undoController.setViewportInteractionFrame(nil)
+            return
+        }
+        if host.controller.isRulerActive {
+            host.undoController.setViewportInteractionFrame(host.undoController.view.bounds)
+            return
+        }
+
+        let pageBounds = CGRect(origin: .zero, size: pages[pageIndex].displaySize)
+        let paperFrame = host.contentView.convert(pageBounds, to: host.undoController.view)
+        var interactionFrame = paperFrame
+        let selectedFrame = selectedMarkupFrameForHitTesting(host)
+        if !selectedFrame.isNull, !selectedFrame.isEmpty {
+            let selectionFrame = host.contentView.convert(selectedFrame, to: host.undoController.view)
+            interactionFrame = interactionFrame.union(selectionFrame.insetBy(dx: -44, dy: -44))
+        }
+        host.undoController.setViewportInteractionFrame(
+            interactionFrame.intersection(host.undoController.view.bounds)
+        )
+    }
+
+    private func selectedMarkupFrameForHitTesting(_ host: PageHost) -> CGRect {
+        if let cachedFrame = host.cachedSelectedMarkupFrameForHitTesting {
+            return cachedFrame
+        }
+        let frame = host.controller.selectedMarkup.contentsRenderFrame
+        host.cachedSelectedMarkupFrameForHitTesting = frame
+#if DEBUG
+        host.selectedMarkupFrameReadCount += 1
+#endif
+        return frame
+    }
+
+    private func invalidateSelectedMarkupFrameForHitTesting(_ host: PageHost) {
+        host.cachedSelectedMarkupFrameForHitTesting = nil
+    }
+
+    private func invalidateSelectedMarkupFrameForHitTesting(
+        controller: PaperMarkupViewController
+    ) {
+        guard let pageID = pageIDByController[ObjectIdentifier(controller)],
+              let host = hostsByPageID[pageID] else { return }
+        invalidateSelectedMarkupFrameForHitTesting(host)
+    }
+
+    private func setSelectedMarkup(
+        _ markup: PaperMarkup,
+        on controller: PaperMarkupViewController
+    ) {
+        invalidateSelectedMarkupFrameForHitTesting(controller: controller)
+        controller.selectedMarkup = markup
     }
 
     private func nativePaperVisibleFrameMatches(_ host: PageHost, viewport: CanvasNativeViewport) -> Bool {
@@ -4466,14 +5323,64 @@ private var hasValidNativeZoomAnchor: Bool {
         // scroll-view recognizers and failure relationships, without accessing
         // private classes, KVC, layers, or drawing/selection recognizers.
         // Native selection and drawing still compete normally with navigation.
+        let shouldObserveNativePinch: Bool
+#if DEBUG
+        shouldObserveNativePinch = paperKitOwnsNativePinch
+            || ProcessInfo.processInfo.environment["NOTATE_NATIVE_PINCH_DIAGNOSTICS"] == "1"
+#else
+        shouldObserveNativePinch = false
+#endif
+        if shouldObserveNativePinch,
+           notebookPinchDiagnosticMonitor == nil,
+           let notebookPinch = scrollView.pinchGestureRecognizer {
+            let monitor = PaperKitPinchGestureMonitor(
+                owner: self,
+                pageID: host.id,
+                isNotebookGesture: true
+            )
+            notebookPinch.addTarget(
+                monitor,
+                action: #selector(PaperKitPinchGestureMonitor.gestureChanged(_:))
+            )
+            notebookPinchDiagnosticMonitor = monitor
+        }
         var pending = [host.controller.view!]
         while let candidate = pending.popLast() {
+            if shouldObserveNativePinch,
+               let nativeScroll = candidate as? UIScrollView,
+               let nativePinch = nativeScroll.pinchGestureRecognizer,
+               host.nativePinchRecognizer !== nativePinch {
+                if let oldRecognizer = host.nativePinchRecognizer,
+                   let oldMonitor = host.nativePinchMonitor {
+                    oldRecognizer.removeTarget(
+                        oldMonitor,
+                        action: #selector(PaperKitPinchGestureMonitor.gestureChanged(_:))
+                    )
+                }
+                let monitor = PaperKitPinchGestureMonitor(owner: self, pageID: host.id)
+                nativePinch.addTarget(
+                    monitor,
+                    action: #selector(PaperKitPinchGestureMonitor.gestureChanged(_:))
+                )
+                host.nativePinchRecognizer = nativePinch
+                host.nativePinchMonitor = monitor
+            }
             if let nativeScroll = candidate as? UIScrollView,
                !host.navigationScrollViews.contains(nativeScroll) {
                 nativeScroll.panGestureRecognizer.require(toFail: scrollView.panGestureRecognizer)
+                if paperKitOwnsNativePinch {
+                    nativeScroll.bouncesZoom = true
+                }
                 if let nativePinch = nativeScroll.pinchGestureRecognizer,
                    let notebookPinch = scrollView.pinchGestureRecognizer {
-                    nativePinch.require(toFail: notebookPinch)
+                    if paperKitOwnsNativePinch {
+                        // The active PaperKit canvas owns scale and bounce.
+                        // The notebook pinch waits, then mirrors the native
+                        // visible-frame projection once per display frame.
+                        notebookPinch.require(toFail: nativePinch)
+                    } else {
+                        nativePinch.require(toFail: notebookPinch)
+                    }
                 }
                 host.navigationScrollViews.add(nativeScroll)
             }
@@ -4590,7 +5497,10 @@ private var hasValidNativeZoomAnchor: Bool {
         host.controller.view.isHidden = hidden
     }
 
-    private func updateRenderedPageWindow(force: Bool = false) {
+    private func updateRenderedPageWindow(
+        force: Bool = false,
+        refreshAccessibilityIfMounted: Bool = true
+    ) {
         if usesNativePageViewports && !force {
             scheduleNativeViewportUpdate()
             return
@@ -4606,16 +5516,50 @@ private var hasValidNativeZoomAnchor: Bool {
         }
 
         pendingRenderedPageWindowUpdate = false
-        if usesNativePageViewports { nativeViewportContainer.frame = scrollView.bounds }
+        if usesNativePageViewports { nativeViewportContainer.frame = nativeViewportBounds }
+        var stageStartedAt = CACurrentMediaTime()
         let visibleRect = visibleDocumentRect
         let prefetchedRect: CGRect
+        let primaryExtent: CGFloat
         switch pageLayout.scrollDirection {
         case .vertical:
-            let overscan = visibleRect.height * Self.renderedPageOverscanViewports
-            prefetchedRect = visibleRect.insetBy(dx: 0, dy: -overscan)
+            primaryExtent = max(visibleRect.height, 1)
+            let lookahead = primaryExtent * Self.renderedPageLookaheadViewports
+            let trailing = primaryExtent * Self.renderedPageTrailingPrefetchViewports
+            if nativeScrollDirectionSign >= 0 {
+                prefetchedRect = CGRect(
+                    x: visibleRect.minX,
+                    y: visibleRect.minY - trailing,
+                    width: visibleRect.width,
+                    height: visibleRect.height + trailing + lookahead
+                )
+            } else {
+                prefetchedRect = CGRect(
+                    x: visibleRect.minX,
+                    y: visibleRect.minY - lookahead,
+                    width: visibleRect.width,
+                    height: visibleRect.height + lookahead + trailing
+                )
+            }
         case .horizontal:
-            let overscan = visibleRect.width * Self.renderedPageOverscanViewports
-            prefetchedRect = visibleRect.insetBy(dx: -overscan, dy: 0)
+            primaryExtent = max(visibleRect.width, 1)
+            let lookahead = primaryExtent * Self.renderedPageLookaheadViewports
+            let trailing = primaryExtent * Self.renderedPageTrailingPrefetchViewports
+            if nativeScrollDirectionSign >= 0 {
+                prefetchedRect = CGRect(
+                    x: visibleRect.minX - trailing,
+                    y: visibleRect.minY,
+                    width: visibleRect.width + trailing + lookahead,
+                    height: visibleRect.height
+                )
+            } else {
+                prefetchedRect = CGRect(
+                    x: visibleRect.minX - lookahead,
+                    y: visibleRect.minY,
+                    width: visibleRect.width + lookahead + trailing,
+                    height: visibleRect.height
+                )
+            }
         }
 
         let plan = layoutPlan
@@ -4623,9 +5567,16 @@ private var hasValidNativeZoomAnchor: Bool {
             visibleDocumentRect: visibleRect
         )
         let exactlyVisibleSet = Set(exactlyVisible)
-        let prefetchLimit = isUnderMemoryPressure ? exactlyVisible.count : max(exactlyVisible.count, 2)
-        let nearestPrefetch = plan.visiblePageIndices(visibleDocumentRect: prefetchedRect)
-            .filter { !exactlyVisibleSet.contains($0) }
+        let focusedIndex = pageIndex(for: focusedPageID) ?? 0
+        let prefetchBoundary = nativeScrollDirectionSign >= 0
+            ? (exactlyVisible.max() ?? focusedIndex)
+            : (exactlyVisible.min() ?? focusedIndex)
+        let prefetchLimit = isUnderMemoryPressure ? exactlyVisible.count : exactlyVisible.count + 1
+        let nearestPrefetch = Array(plan.visiblePageIndices(visibleDocumentRect: prefetchedRect)
+            .filter {
+                !exactlyVisibleSet.contains($0)
+                    && (nativeScrollDirectionSign >= 0 ? $0 > prefetchBoundary : $0 < prefetchBoundary)
+            }
             .sorted {
                 let lhsDistance = CanvasStackLayout.primaryAxisDistance(
                     from: plan.pageFrame(at: $0),
@@ -4639,8 +5590,10 @@ private var hasValidNativeZoomAnchor: Bool {
                 )
                 return lhsDistance < rhsDistance
             }
-            .prefix(max(0, prefetchLimit - exactlyVisible.count))
+            .prefix(max(0, prefetchLimit - exactlyVisible.count)))
+        nativePrefetchedPageIDs = Set(nearestPrefetch.map { pages[$0].id })
         let renderedIndices = exactlyVisibleSet.union(nearestPrefetch)
+        recordNativeViewportStage("page-window-discovery", startedAt: stageStartedAt)
 
         var requiredPageIDs = Set(renderedIndices.map { pages[$0].id })
         requiredPageIDs.insert(focusedPageID)
@@ -4650,6 +5603,7 @@ private var hasValidNativeZoomAnchor: Bool {
         }
 
         let mountedPageIDsBeforeUpdate = Set(hostsByPageID.keys)
+        stageStartedAt = CACurrentMediaTime()
         if virtualizesPageHosts {
             for pageID in requiredPageIDs {
                 _ = ensurePageHostMounted(for: pageID)
@@ -4657,7 +5611,9 @@ private var hasValidNativeZoomAnchor: Bool {
         } else {
             for page in pages { mountPage(page) }
         }
+        recordNativeViewportStage("page-window-mount", startedAt: stageStartedAt)
 
+        stageStartedAt = CACurrentMediaTime()
         for index in mountedPageIndices {
             guard let host = hostsByPageID[pages[index].id] else { continue }
             if renderedIndices.contains(index) {
@@ -4687,7 +5643,9 @@ private var hasValidNativeZoomAnchor: Bool {
                 )
             }
         }
+        recordNativeViewportStage("page-window-configure", startedAt: stageStartedAt)
 
+        stageStartedAt = CACurrentMediaTime()
         if virtualizesPageHosts {
             let evictionCandidates = hostsByPageID.keys.filter {
                 requiredPageIDs.contains($0) == false
@@ -4699,8 +5657,10 @@ private var hasValidNativeZoomAnchor: Bool {
                 )
             }
         }
+        recordNativeViewportStage("page-window-retire", startedAt: stageStartedAt)
 
-        if mountedPageIDsBeforeUpdate != Set(hostsByPageID.keys) {
+        if refreshAccessibilityIfMounted,
+            mountedPageIDsBeforeUpdate != Set(hostsByPageID.keys) {
             refreshTableAccessibilityElements()
         }
         raiseActiveNativeRulerHost()
@@ -4711,6 +5671,9 @@ private var hasValidNativeZoomAnchor: Bool {
         pageID: UUID,
         discardingUndoHistory: Bool = false
     ) {
+        guard let canonicalPageIndex = pageIndex(for: pageID),
+              pages.indices.contains(canonicalPageIndex),
+              let host = hostsByPageID[pageID] else { return }
         guard virtualizesPageHosts,
             pageID != focusedPageID,
             pageID != programmaticNavigationPageID,
@@ -4729,7 +5692,6 @@ private var hasValidNativeZoomAnchor: Bool {
             activeTableCell?.pageID != pageID,
             hoveredTableCell?.pageID != pageID,
             tableTransformSession?.pageID != pageID,
-            let host = hostsByPageID[pageID],
             host.controller.presentedViewController == nil,
             host.controller.view.isFirstResponder == false else { return }
 
@@ -4757,21 +5719,22 @@ private var hasValidNativeZoomAnchor: Bool {
             // entire offscreen PaperKit hierarchy alive. Memory pressure may
             // retire that selection only after every interaction/undo safety
             // gate above has closed; authored content is verified below.
-            host.controller.selectedMarkup = PaperMarkup(bounds: markupBounds)
+            setSelectedMarkup(PaperMarkup(bounds: markupBounds), on: host.controller)
         }
 
-        // A framework mutation can arrive without a delegate callback. Make
-        // the canonical page snapshot current before deciding the host is
-        // disposable, then require every remountable surface to match it.
-        deliverMarkupIfChanged(pageID: pageID)
-        guard let page = pages.first(where: { $0.id == pageID }),
-            let markup = host.controller.markup,
-            markup == host.lastDeliveredMarkup,
-            markup == page.markup,
-            host.contentView.template == page.paperTemplate,
-            host.contentView.geometry == page.geometry,
-            host.contentView.pageBackground == page.background,
-            host.contentView.tables == page.tables else { return }
+        // A framework mutation can arrive without a delegate callback. Force
+        // one authoritative read at this safe retirement boundary; the
+        // revision-aware delivery performs at most one deep equality fallback
+        // when PaperKit did not publish a change. Resolve its canonical page
+        // through the cached page index instead of scanning all notebook pages
+        // during every dense-page eviction.
+        let canonicalPage = pages[canonicalPageIndex]
+        guard deliverMarkupIfChanged(pageID: pageID, forceRead: true),
+            host.markupRevision == host.deliveredMarkupRevision,
+            host.contentView.template == canonicalPage.paperTemplate,
+            host.contentView.geometry == canonicalPage.geometry,
+            host.contentView.pageBackground == canonicalPage.background,
+            host.contentView.tables == canonicalPage.tables else { return }
 
         host.controller.undoManager?.removeAllActions()
         _ = detachPageHost(id: pageID, recyclingNativeController: true)
@@ -4952,7 +5915,7 @@ private func performPaperTemplateChanges(
     host.decorationView.template = page.paperTemplate
     host.decorationView.pageBackground = page.background
     host.controller.markup = page.markup
-    host.controller.selectedMarkup = PaperMarkup(bounds: page.markup.bounds)
+    setSelectedMarkup(PaperMarkup(bounds: page.markup.bounds), on: host.controller)
     host.hasConfiguredGeometry = false
     if let activeTableTarget,
         activeTableTarget.pageID == page.id,
@@ -4994,7 +5957,7 @@ private func performLegacyActivation(
         pages[index] = existing.replacing(markup: markup)
         acceptMarkupBaseline(markup, for: host)
         host.controller.markup = markup
-        host.controller.selectedMarkup = PaperMarkup(bounds: markup.bounds)
+        setSelectedMarkup(PaperMarkup(bounds: markup.bounds), on: host.controller)
         host.controller.undoManager?.removeAllActions()
         lockPaperViewport(for: host)
     } else {
@@ -5104,6 +6067,11 @@ private func performLegacyActivation(
         configureTransientZoomRange()
         let presentationScale = scale / renderedZoomScale
         if abs(scrollView.zoomScale - presentationScale) > 0.0001 {
+#if DEBUG
+            recordProgrammaticZoomMutationForTesting(
+                "applyViewport requested=\(presentationScale) logical=\(scale) current=\(scrollView.zoomScale) page=\(pageID.uuidString) lastPublished=\(String(describing: lastPublishedViewport?.stackZoomScale)) currentViewport=\(currentViewportState().stackZoomScale) environment=\(String(describing: settledEnvironment))"
+            )
+#endif
             scrollView.setZoomScale(presentationScale, animated: false)
         }
         updateContentInsets()
@@ -5157,6 +6125,13 @@ private func performLegacyActivation(
         scrollView.bounds.height > 0 else { return }
     isApplyingGeometry = true
     let scale = viewport.stackZoomScale
+#if DEBUG
+    if abs(scrollView.zoomScale - scale / renderedZoomScale) > 0.0001 {
+        recordProgrammaticZoomMutationForTesting(
+            "applyTransientZoom requested=\(scale / renderedZoomScale) logical=\(scale) current=\(scrollView.zoomScale) page=\(pageID.uuidString)"
+        )
+    }
+#endif
     scrollView.setZoomScale(scale / renderedZoomScale, animated: false)
     updateContentInsets()
     let offset = CanvasStackLayout.targetContentOffset(
@@ -5172,6 +6147,13 @@ private func performLegacyActivation(
     isApplyingGeometry = false
     updatePaperTemplatePresentationWindows()
     setFocusedPage(pageID, fromDirectInteraction: false)
+    if usesNativePageViewports {
+        // The notebook's PaperKit hosts live beside the zoomed document view.
+        // During zoom scrubbing the paper projection changes immediately, so
+        // keep the native editor on the same logical viewport once per display
+        // frame instead of leaving stale ink enlarged until lift-off.
+        scheduleNativeViewportUpdate()
+    }
     scheduleTransientViewportPublication()
 }
 private func settleTransientZoom() {
@@ -5237,6 +6219,7 @@ private func updateContentInsets() {
         scrollView.scrollIndicatorInsets = insets
     }
 }
+
 @discardableResult
 private func expandFreeformCanvasIfNeeded(
     visibleRect: CGRect? = nil
@@ -5320,7 +6303,7 @@ private func performFreeformExpansion(
         host.controller.selection = selectedElementIDs
     } else {
         host.controller.markup = markup
-        host.controller.selectedMarkup = PaperMarkup(bounds: markup.bounds)
+        setSelectedMarkup(PaperMarkup(bounds: markup.bounds), on: host.controller)
     }
     if shouldResumeUndoRegistration { historyManager?.enableUndoRegistration() }
     // Native PaperKit undo closures captured before a whole-document
@@ -5538,15 +6521,15 @@ preferredPageIndex: self.pageIndex(for: focusedPageID)
 setFocusedPage(pages[index].id, fromDirectInteraction: false)
 }
 private func setFocusedPage(_ id: UUID, fromDirectInteraction: Bool) {
-guard self.pageIndex(for: id) != nil,
-ensurePageHostMounted(for: id) != nil else { return }
-if fromDirectInteraction { nativeZoomAnchorPageID = nil }
-isDirectInteractionActive = fromDirectInteraction
-guard focusedPageID != id else {
-publishUndoAvailability()
-return
-}
-if let outgoingHost = hostsByPageID[focusedPageID] {
+    guard self.pageIndex(for: id) != nil,
+    ensurePageHostMounted(for: id) != nil else { return }
+    if fromDirectInteraction { nativeZoomAnchorPageID = nil }
+    isDirectInteractionActive = fromDirectInteraction
+    guard focusedPageID != id else {
+        publishUndoAvailability()
+        return
+    }
+    if let outgoingHost = hostsByPageID[focusedPageID] {
 // Commit any active text editor before judging the outgoing host
 // noninteractive. Authored changes and their native undo entry are
 // then either checkpointed or keep this exact controller pinned.
@@ -5556,8 +6539,8 @@ deliverMarkupIfChanged(pageID: focusedPageID)
 if let activeTableTarget, activeTableTarget.pageID != id {
 clearActiveTableTarget()
 }
-focusedPageID = id
-synchronizeRulerState()
+    focusedPageID = id
+    synchronizeRulerState()
 recordUndoHistoryActivity(pageID: id)
 lastPublishedViewport = nil
 lastPublishedViewportPageID = nil
@@ -5813,6 +6796,10 @@ host.decorationView.setSettledInkPreview(nil, cropRect: nil)
         }
     }
 private func contactDidBegin() {
+if !nativeViewportContactGestureIsActive {
+    nativeViewportContactGestureIsActive = true
+    advanceNativeViewportGestureRevision()
+}
 if usesNativePageViewports {
     // Contact monitoring runs before the native drawing recognizer accepts
     // this touch. Commit a pending navigation frame now, then freeze geometry
@@ -5843,6 +6830,7 @@ if let state = nativeContactNavigationState {
 }
 }
 private func contactDidEnd() {
+nativeViewportContactGestureIsActive = false
 isNativeDirectDrawingActive = false
 restoreNativeContactNavigation()
 let pageCommands = pendingPageCommands
@@ -5916,12 +6904,15 @@ private func synchronizeRulerState() {
 let wantsRuler = isReaderModeEnabled == false && isRulerActive
 guard usesNativePageViewports, wantsRuler else {
     pendingNativeRulerActivationAfterViewportLayout = false
-    for (pageID, host) in hostsByPageID {
-        let shouldBeActive = wantsRuler && pageID == focusedPageID
-        if host.controller.isRulerActive != shouldBeActive {
-            host.controller.isRulerActive = shouldBeActive
+        for (pageID, host) in hostsByPageID {
+            let shouldBeActive = wantsRuler && pageID == focusedPageID
+            if host.controller.isRulerActive != shouldBeActive {
+                host.controller.isRulerActive = shouldBeActive
+            }
+            if let index = self.pageIndex(for: pageID), let viewport = host.nativeViewport {
+                updateNativeViewportHitTesting(host, pageIndex: index, viewport: viewport)
+            }
         }
-    }
     raiseActiveNativeRulerHost()
     return
 }
@@ -5933,6 +6924,9 @@ guard usesNativePageViewports, wantsRuler else {
 for (pageID, host) in hostsByPageID where pageID != focusedPageID {
     if host.controller.isRulerActive {
         host.controller.isRulerActive = false
+    }
+    if let index = self.pageIndex(for: pageID), let viewport = host.nativeViewport {
+        updateNativeViewportHitTesting(host, pageIndex: index, viewport: viewport)
     }
 }
 
@@ -5960,6 +6954,9 @@ guard pendingNativeRulerActivationAfterViewportLayout,
 
 pendingNativeRulerActivationAfterViewportLayout = false
 host.controller.isRulerActive = true
+if let pageIndex = self.pageIndex(for: host.id), let viewport = host.nativeViewport {
+    updateNativeViewportHitTesting(host, pageIndex: pageIndex, viewport: viewport)
+}
 raiseActiveNativeRulerHost()
 }
 
@@ -5992,24 +6989,44 @@ private func acceptMarkupBaseline(_ markup: PaperMarkup, for host: PageHost) {
     pendingMarkupPageIDs.remove(host.id)
 }
 
-private func deliverMarkupIfChanged(
-    pageID: UUID,
-    includingPreparedInsertion: Bool = false,
-    forceRead: Bool = false
-) {
+    @discardableResult
+    private func deliverMarkupIfChanged(
+        pageID: UUID,
+        includingPreparedInsertion: Bool = false,
+        forceRead: Bool = false
+    ) -> Bool {
     guard includingPreparedInsertion
     || pagesPreparingInsertionHistory.contains(pageID) == false,
         let host = hostsByPageID[pageID],
         forceRead || includingPreparedInsertion
             || pendingMarkupPageIDs.contains(pageID)
             || host.markupRevision != host.deliveredMarkupRevision,
-        let markup = host.controller.markup else { return }
+        let markup = host.controller.markup else { return false }
     pendingMarkupPageIDs.remove(pageID)
+    let revisionChanged = host.markupRevision != host.deliveredMarkupRevision
     host.deliveredMarkupRevision = host.markupRevision
-    guard markup != host.lastDeliveredMarkup else { return }
+    // PaperKit's change delegate is the page revision signal. Comparing two
+    // complete PaperMarkup values here walks every stroke and node on the hot
+    // path (often immediately after every Pencil lift). Only a read without a
+    // new revision needs the equality fallback.
+    if !revisionChanged {
+        #if DEBUG
+        host.markupEqualityComparisonCount += 1
+        if markupEqualityComparisonCountsByPageID[pageID] == nil {
+            markupEqualityComparisonPageIDOrder.append(pageID)
+            if markupEqualityComparisonPageIDOrder.count > maximumRetainedMarkupComparisonDiagnostics {
+                let expiredPageID = markupEqualityComparisonPageIDOrder.removeFirst()
+                markupEqualityComparisonCountsByPageID.removeValue(forKey: expiredPageID)
+            }
+        }
+        markupEqualityComparisonCountsByPageID[pageID, default: 0] += 1
+        #endif
+        guard markup != host.lastDeliveredMarkup else { return true }
+    }
     host.lastDeliveredMarkup = markup
     replacePageMarkup(id: pageID, markup: markup)
     callbacks.markupChanged(pageID, markup)
+    return true
 }
 private func replacePageMarkup(id: UUID, markup: PaperMarkup) {
 guard let index = self.pageIndex(for: id) else { return }
@@ -6312,7 +7329,7 @@ historyManager?.enableUndoRegistration()
         // Detach first, matching the normal serialized undo/redo path.
         paperController.markup = nil
         paperController.markup = restoredMarkup
-        paperController.selectedMarkup = originalSelection
+        setSelectedMarkup(originalSelection, on: paperController)
 
         // PaperKit 26.0 can enqueue native undo work one run-loop turn after
         // insertion. Yield before registration is re-enabled by the caller's
@@ -6418,7 +7435,7 @@ historyManager?.enableUndoRegistration()
             var combined = markup
             combined.append(contentsOf: inserted)
             paperController.markup = combined
-            paperController.selectedMarkup = inserted
+            setSelectedMarkup(inserted, on: paperController)
             return
 
         case .text:
@@ -6429,7 +7446,7 @@ historyManager?.enableUndoRegistration()
             Self.sharedInsertionContext,
             insertNewContents: inserted
         )
-        paperController.selectedMarkup = inserted
+        setSelectedMarkup(inserted, on: paperController)
     }
 
     private func registerMarkupReplacement(
@@ -6784,12 +7801,7 @@ historyManager?.enableUndoRegistration()
         for index in mountedPageIndices {
             guard let host = hostsByPageID[pages[index].id], let viewport = host.nativeViewport else { continue }
             let projected = documentView.convert(layoutPlan.pageFrame(at: index), to: scrollView)
-            let allowsNativeRulerMargins = isRulerActive
-                && host.id == focusedPageID
-                && isReaderModeEnabled == false
-            guard let expected = CanvasNativeViewport(pageID: host.id, projectedPageFrame: projected,
-                viewportBounds: scrollView.bounds, logicalZoom: effectiveZoomScale,
-                expandsToViewport: allowsNativeRulerMargins) else {
+            guard let expected = nativeViewport(forPageAt: index, previous: viewport) else {
                 // A prefetched host can cross fully outside the clipped
                 // viewport before the next display-link retires it. It cannot
                 // contribute visible pixels and is not a render mismatch.
@@ -6798,8 +7810,8 @@ historyManager?.enableUndoRegistration()
             if !expected.hasSameRenderingProjection(as: viewport)
                 || abs(projected.width - pages[index].displaySize.width * effectiveZoomScale) > 0.1
                 || abs(projected.height - pages[index].displaySize.height * effectiveZoomScale) > 0.1
-                || host.undoController.view.bounds.width > scrollView.bounds.width + 0.1
-                || host.undoController.view.bounds.height > scrollView.bounds.height + 0.1
+                || abs(host.undoController.view.bounds.width - expected.renderScreenFrame.width) > 0.1
+                || abs(host.undoController.view.bounds.height - expected.renderScreenFrame.height) > 0.1
                 || !nativePaperVisibleFrameMatches(host, viewport: viewport)
                 || nativePaperZoom(host).map({ abs($0 - viewport.logicalZoom) > 0.0001 }) == true {
                 count += 1
@@ -6818,19 +7830,14 @@ historyManager?.enableUndoRegistration()
         for index in mountedPageIndices {
             guard let host = hostsByPageID[pages[index].id], let viewport = host.nativeViewport else { continue }
             let projected = documentView.convert(layoutPlan.pageFrame(at: index), to: scrollView)
-            let allowsNativeRulerMargins = isRulerActive
-                && host.id == focusedPageID
-                && isReaderModeEnabled == false
-            let expected = CanvasNativeViewport(pageID: host.id, projectedPageFrame: projected,
-                viewportBounds: scrollView.bounds, logicalZoom: effectiveZoomScale,
-                expandsToViewport: allowsNativeRulerMargins)
+            let expected = nativeViewport(forPageAt: index, previous: viewport)
             guard let expected else { continue }
             let zoomMismatch = nativePaperZoom(host).map { abs($0 - viewport.logicalZoom) > 0.0001 } ?? false
             let projectionMatches = nativePaperVisibleFrameMatches(host, viewport: viewport)
             let sizeMismatch = abs(projected.width - pages[index].displaySize.width * effectiveZoomScale) > 0.1
                 || abs(projected.height - pages[index].displaySize.height * effectiveZoomScale) > 0.1
-            let overBounds = host.undoController.view.bounds.width > scrollView.bounds.width + 0.1
-                || host.undoController.view.bounds.height > scrollView.bounds.height + 0.1
+            let overBounds = abs(host.undoController.view.bounds.width - expected.renderScreenFrame.width) > 0.1
+                || abs(host.undoController.view.bounds.height - expected.renderScreenFrame.height) > 0.1
             let renderProjectionMismatch = !expected.hasSameRenderingProjection(as: viewport)
             if renderProjectionMismatch || sizeMismatch || overBounds || !projectionMatches || zoomMismatch {
                 diagnostics.append("page=\(index) viewport=\(viewport) expected=\(String(describing: expected)) size=\(sizeMismatch) bounds=\(overBounds) projection=\(projectionMatches) zoomMismatch=\(zoomMismatch) native=\(nativePaperViewportDiagnostics(host, viewport: viewport))")
@@ -6838,6 +7845,31 @@ historyManager?.enableUndoRegistration()
         }
         return diagnostics.joined(separator: "\n")
     }
+    var nativePinchDiagnosticForTesting: String {
+        let pageID = nativePaperPinchOwnerPageID ?? focusedPageID
+        guard let host = hostsByPageID[pageID] else { return "missing focused host" }
+        let nativeScroll = nativePaperScrollView(host)
+        let zoomingView = viewForZooming(in: scrollView)
+        let nativeRange = nativeScroll.map { "\($0.minimumZoomScale)...\($0.maximumZoomScale)" } ?? "none"
+        let prefetchPageIndices = nativePrefetchedPageIDs.compactMap(pageIndex(for:)).sorted()
+        let viewport = host.nativeViewport
+        let summary = "ownerEnabled=\(paperKitOwnsNativePinch) paper=\(String(describing: nativePaperZoom(host))) nativeUIKitZoom=\(String(describing: nativeScroll?.zoomScale)) nativeRange=\(nativeRange) outer=\(scrollView.zoomScale) outerZooming=\(scrollView.isZooming) outerEnabled=\(scrollView.isScrollEnabled) outerRange=\(scrollView.minimumZoomScale)...\(scrollView.maximumZoomScale) applyingGeometry=\(isApplyingGeometry) zoomView=\(String(describing: zoomingView?.bounds)) transform=\(String(describing: zoomingView?.transform)) logical=\(effectiveZoomScale) nativeZooming=\(nativeScroll?.isZooming ?? false) visible=\(host.controller.contentVisibleFrame) renderPage=\(String(describing: viewport?.renderPageRect)) renderFrame=\(String(describing: viewport?.renderScreenFrame)) scrollBuffer=\(nativeViewportScrollOverscan) prefetchPages=\(prefetchPageIndices) owner=\(nativePaperPinchOwnerPageID?.uuidString ?? "none") paperPinch=\(host.nativePinchRecognizer?.state.rawValue ?? -1)/\(host.nativePinchRecognizer?.isEnabled ?? false) paperMonitor=\(host.nativePinchMonitor != nil) navScrolls=\(host.navigationScrollViews.count) notebookMonitor=\(notebookPinchDiagnosticMonitor != nil)"
+#if DEBUG
+        return summary + " lastZoomMutation=\(lastProgrammaticZoomMutationForTesting) layoutTransition=\(lastViewportLayoutTransitionForTesting) samples=[" + nativePinchDiagnosticSamples.suffix(48).joined(separator: " | ") + "]"
+#else
+        return summary
+#endif
+    }
+
+#if DEBUG
+    private func recordProgrammaticZoomMutationForTesting(_ event: String) {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["NOTATE_NATIVE_PINCH_DIAGNOSTICS"] == "1"
+            || environment["NOTATE_UI_TESTING"] == "1" else { return }
+        let callers = Thread.callStackSymbols.dropFirst(2).prefix(5).joined(separator: " <- ")
+        lastProgrammaticZoomMutationForTesting = "\(event) caller=\(callers) layout=\(lastViewportLayoutTransitionForTesting)"
+    }
+#endif
     private func nativePaperViewportDiagnostics(
         _ host: PageHost, viewport: CanvasNativeViewport
     ) -> String {
@@ -6848,6 +7880,8 @@ historyManager?.enableUndoRegistration()
             "paperBounds=\(host.controller.view.bounds), contentVisibleFrame=\(host.controller.contentVisibleFrame), " +
             "paperZoom=\(String(describing: nativePaperZoom(host))), " +
             "zoomRange=\(host.controller.zoomRange), " +
+            "rootBounds=\(view.bounds), outerFrame=\(scrollView.frame), outerBounds=\(scrollView.bounds), " +
+            "nativeFrame=\(String(describing: nativeScroll?.frame)), " +
             "nativeOffset=\(String(describing: nativeScroll?.contentOffset)), " +
             "nativeBounds=\(String(describing: nativeScroll?.bounds)), " +
             "nativeContentSize=\(String(describing: nativeScroll?.contentSize))"
@@ -6867,16 +7901,29 @@ historyManager?.enableUndoRegistration()
     private var savedNotebookProfileTask: Task<Void, Never>?
     private var didProfileSavedNotebook = false
     private func scheduleSavedNotebookProfileIfNeeded() {
-        guard !didProfileSavedNotebook, pages.count == 1_000, hasAppliedInitialViewport,
+        let arguments = Set(ProcessInfo.processInfo.arguments)
+        let isHandwritingStressFixture = arguments.contains("--ink-handwriting-stress")
+        let isSyntheticViewportBenchmark = arguments.contains("--ink-viewport-notebook")
+            && arguments.contains("--ink-viewport-benchmark")
+        let requestedPageCount = Int(ProcessInfo.processInfo.environment[
+            "NOTATE_INK_HANDWRITING_STRESS_PAGES"
+        ] ?? "") ?? 1_000
+        let expectedPageCount = min(1_000, max(1, requestedPageCount))
+        let pageCountMatchesFixture = isHandwritingStressFixture
+            ? (1...CanvasCoreResourceLimits.production.maximumPageCount).contains(pages.count)
+            : pages.count == expectedPageCount
+        guard !didProfileSavedNotebook, pageCountMatchesFixture, hasAppliedInitialViewport,
               !scrollView.bounds.isEmpty,
-              ProcessInfo.processInfo.arguments.contains("--ink-viewport-notebook"),
-              ProcessInfo.processInfo.arguments.contains("--ink-viewport-benchmark") else { return }
+              isHandwritingStressFixture || isSyntheticViewportBenchmark else { return }
         didProfileSavedNotebook = true
         savedNotebookProfileTask = Task { @MainActor [weak self] in
             guard let self else { return }
+            let previousIdleTimerState = UIApplication.shared.isIdleTimerDisabled
+            UIApplication.shared.isIdleTimerDisabled = true
             let initial = self.currentViewportState()
             let initialPage = self.focusedPageID
             defer {
+                UIApplication.shared.isIdleTimerDisabled = previousIdleTimerState
                 self.savedNotebookProfileTask = nil
                 if !self.hasStoppedViewportPresentation {
                     self.applyViewport(initial, focusedOn: initialPage)
@@ -6888,18 +7935,22 @@ historyManager?.enableUndoRegistration()
                     let direction: CanvasScrollDirection = ProcessInfo.processInfo.environment["NOTATE_INK_SCROLL_DIRECTION"] == "horizontal"
                         ? .horizontal : .vertical
                     self.setPageLayout(CanvasPageLayoutPreferences(scrollDirection: direction))
-                    self.scrollToPage(id: self.pages[200].id, animated: false)
+                    let anchorPageIndex = max(0, min(self.pages.count / 2 - 16, 200))
+                    let endPageIndex = min(anchorPageIndex + 32, self.pages.count - 1)
+                    self.scrollToPage(id: self.pages[anchorPageIndex].id, animated: false)
                     self.setZoomScale(CGFloat(requested))
                     self.flushNativeViewportUpdates()
                     let start = self.scrollView.contentOffset
                     let distance: CGFloat = direction == .vertical
-                        ? (self.pages[200].displaySize.height + 24) * self.effectiveZoomScale * 32
-                        : self.layoutPlan.pageFrame(at: 232).minX * self.effectiveZoomScale
-                            - self.layoutPlan.pageFrame(at: 200).minX * self.effectiveZoomScale
+                        ? (self.pages[anchorPageIndex].displaySize.height + 24) * self.effectiveZoomScale
+                            * CGFloat(endPageIndex - anchorPageIndex)
+                        : self.layoutPlan.pageFrame(at: endPageIndex).minX * self.effectiveZoomScale
+                            - self.layoutPlan.pageFrame(at: anchorPageIndex).minX * self.effectiveZoomScale
                     let report = try await CanvasInkViewportProfile.runFixedScroll(
                         direction: direction.rawValue, zoom: self.effectiveZoomScale, pageCount: self.pages.count,
                         idleEditorCount: { self.idleNativeControllers.count },
-                        viewportViolationCount: { self.nativeViewportViolationCountForProfiling }
+                        viewportViolationCount: { self.nativeViewportViolationCountForProfiling },
+                        viewportViolationDiagnostics: { self.nativeViewportViolationDiagnosticsForTesting }
                     ) { progress in
                         var offset = start
                         if direction == .vertical { offset.y += distance * progress }
@@ -6975,6 +8026,7 @@ historyManager?.enableUndoRegistration()
     var mountedPageIDsForTesting: [UUID] {
         pages.compactMap { hostsByPageID[$0.id] == nil ? nil : $0.id }
     }
+    var prefetchedPageIDsForTesting: Set<UUID> { nativePrefetchedPageIDs }
     var mountedPageHostCountForTesting: Int { hostsByPageID.count }
     var pendingMarkupPageCountForTesting: Int { pendingMarkupPageIDs.count }
     var idleNativeControllerCountForTesting: Int { idleNativeControllers.count }
@@ -7018,6 +8070,12 @@ historyManager?.enableUndoRegistration()
     func nativeGeometryApplicationCountForTesting(pageID: UUID) -> Int? {
         hostsByPageID[pageID]?.nativeGeometryApplicationCount
     }
+    func selectedMarkupFrameReadCountForTesting(pageID: UUID) -> Int {
+        hostsByPageID[pageID]?.selectedMarkupFrameReadCount ?? 0
+    }
+    func markupEqualityComparisonCountForTesting(pageID: UUID) -> Int {
+        markupEqualityComparisonCountsByPageID[pageID, default: 0]
+    }
     func nativePaperControllerForTesting(pageID: UUID) -> PaperMarkupViewController? {
         hostsByPageID[pageID]?.controller
     }
@@ -7046,6 +8104,16 @@ historyManager?.enableUndoRegistration()
     }
     func pageHostFrameForTesting(pageID: UUID) -> CGRect? {
         hostsByPageID[pageID]?.undoController.view.frame
+    }
+    func pageHostInteractionFrameForTesting(pageID: UUID) -> CGRect? {
+        guard let host = hostsByPageID[pageID] else { return nil }
+        return host.undoController.viewportInteractionFrameForTesting
+    }
+    func pageHostAcceptsInputForTesting(_ point: CGPoint, pageID: UUID) -> Bool? {
+        guard let host = hostsByPageID[pageID] else { return nil }
+        let localPoint = host.undoController.view.convert(point, from: view)
+        guard let frame = host.undoController.viewportInteractionFrameForTesting else { return true }
+        return frame.contains(localPoint)
     }
     func projectedPageFrameForTesting(pageID: UUID) -> CGRect? {
         guard let index = self.pageIndex(for: pageID) else { return nil }
@@ -7213,6 +8281,8 @@ extension PaperCanvasViewController: UIScrollViewDelegate {
     func viewForZooming(in scrollView: UIScrollView) -> UIView? { documentView }
 
     func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+        advanceNativeViewportGestureRevision()
+        lastNativeScrollOffset = scrollView.contentOffset
         nativeZoomAnchorPageID = nil
         isNativeDirectDrawingActive = false
         clearSettledInkPreviews()
@@ -7225,10 +8295,24 @@ extension PaperCanvasViewController: UIScrollViewDelegate {
     }
 
     func scrollViewWillBeginZooming(_ scrollView: UIScrollView, with view: UIView?) {
+        advanceNativeViewportGestureRevision()
+#if DEBUG
+        if ProcessInfo.processInfo.environment["NOTATE_NATIVE_PINCH_DIAGNOSTICS"] == "1",
+           let host = hostsByPageID[focusedPageID] {
+            recordNativePinchDiagnosticSample(
+                event: "outer-willBeginZooming-view=\(view.map { String(describing: type(of: $0)) } ?? "nil")",
+                nativeScale: nativePaperZoom(host) ?? effectiveZoomScale,
+                host: host,
+                force: true
+            )
+        }
+#endif
         isNativeDirectDrawingActive = false
         cancelProgrammaticNavigationForDirectInteraction()
         isDirectInteractionActive = false
-        if usesNativePageViewports { nativeZoomAnchorPageID = focusedPageID }
+        if usesNativePageViewports {
+            nativeZoomAnchorPageID = focusedPageID
+        }
         isNativeZoomInteractionActive = true
         usesHorizontalPageFit = false
         cancelProgrammaticFreeformZoomSettlement()
@@ -7239,6 +8323,7 @@ extension PaperCanvasViewController: UIScrollViewDelegate {
     }
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        updateNativeScrollDirection(from: scrollView)
         defer {
             if !usesNativePageViewports {
                 refreshRegionSelectionPresentation()
@@ -7275,6 +8360,20 @@ extension PaperCanvasViewController: UIScrollViewDelegate {
         } else {
             publishViewport()
         }
+    }
+
+    private func updateNativeScrollDirection(from scrollView: UIScrollView) {
+        let offset = scrollView.contentOffset
+        defer { lastNativeScrollOffset = offset }
+        guard usesNativePageViewports,
+              scrollView.isDragging || scrollView.isDecelerating,
+              let previous = lastNativeScrollOffset else { return }
+        let delta: CGFloat
+        switch pageLayout.scrollDirection {
+        case .vertical: delta = offset.y - previous.y
+        case .horizontal: delta = offset.x - previous.x
+        }
+        if abs(delta) > 0.5 { nativeScrollDirectionSign = delta >= 0 ? 1 : -1 }
     }
 
     func scrollViewWillEndDragging(
@@ -7349,10 +8448,34 @@ extension PaperCanvasViewController: UIScrollViewDelegate {
                 refreshTableAccessibilityElements()
             }
         }
+#if DEBUG
+        if ProcessInfo.processInfo.environment["NOTATE_NATIVE_PINCH_DIAGNOSTICS"] == "1",
+           let host = hostsByPageID[focusedPageID] {
+            recordNativePinchDiagnosticSample(
+                event: "outer-didZoom-applying=\(isApplyingGeometry)-transform=\(documentView.transform)",
+                nativeScale: nativePaperZoom(host) ?? effectiveZoomScale,
+                host: host,
+                force: true
+            )
+        }
+#endif
         guard isApplyingGeometry == false else { return }
-        isApplyingGeometry = true
-        updateContentInsets()
-        isApplyingGeometry = false
+#if DEBUG
+        if paperKitOwnsNativePinch,
+           let host = hostsByPageID[nativePaperPinchOwnerPageID ?? focusedPageID] {
+            recordNativePinchDiagnosticSample(
+                event: "notebook-didZoom",
+                nativeScale: nativePaperZoom(host) ?? effectiveZoomScale,
+                host: host,
+                force: false
+            )
+        }
+#endif
+        if !usesNativePageViewports {
+            isApplyingGeometry = true
+            updateContentInsets()
+            isApplyingGeometry = false
+        }
         guard hasAppliedInitialViewport else { return }
         guard settledEnvironment == currentViewportEnvironment else {
             view.setNeedsLayout()
@@ -7371,7 +8494,26 @@ extension PaperCanvasViewController: UIScrollViewDelegate {
         with view: UIView?,
         atScale scale: CGFloat
     ) {
+#if DEBUG
+        if ProcessInfo.processInfo.environment["NOTATE_NATIVE_PINCH_DIAGNOSTICS"] == "1",
+           let host = hostsByPageID[focusedPageID] {
+            recordNativePinchDiagnosticSample(
+                event: "outer-didEndZooming-scale=\(scale)-current=\(scrollView.zoomScale)",
+                nativeScale: nativePaperZoom(host) ?? effectiveZoomScale,
+                host: host,
+                force: true
+            )
+        }
+#endif
         isNativeZoomInteractionActive = false
+        if usesNativePageViewports {
+            // Allow UIKit to retain its native pinch projection. A manual
+            // contentOffset correction here competes with the native settle,
+            // especially when the minimum-zoom insets center a small sheet.
+            isApplyingGeometry = true
+            updateContentInsets()
+            isApplyingGeometry = false
+        }
         if documentMode == .paged,
             pageLayout.scrollDirection == .horizontal {
             usesHorizontalPageFit = abs(
@@ -7468,13 +8610,16 @@ extension PaperCanvasViewController: @MainActor PaperMarkupViewController.Delega
     func paperMarkupViewControllerDidChangeSelection(
         _ paperMarkupViewController: PaperMarkupViewController
     ) {
-        guard isReaderModeEnabled == false,
-            hasAppliedInitialViewport,
-            let pageID = pageIDByController[ObjectIdentifier(paperMarkupViewController)] else {
-            return
-        }
+        guard let pageID = pageIDByController[ObjectIdentifier(paperMarkupViewController)] else { return }
+        invalidateSelectedMarkupFrameForHitTesting(controller: paperMarkupViewController)
+        guard isReaderModeEnabled == false, hasAppliedInitialViewport else { return }
         guard pagesPreparingInsertionHistory.contains(pageID) == false else { return }
         setFocusedPage(pageID, fromDirectInteraction: true)
+        if usesNativePageViewports { flushNativeViewportUpdates() }
+        if let host = hostsByPageID[pageID], let pageIndex = self.pageIndex(for: pageID),
+           let viewport = host.nativeViewport {
+            updateNativeViewportHitTesting(host, pageIndex: pageIndex, viewport: viewport)
+        }
         publishUndoAvailability()
     }
 
@@ -7485,6 +8630,40 @@ extension PaperCanvasViewController: @MainActor PaperMarkupViewController.Delega
             let pageID = pageIDByController[ObjectIdentifier(paperMarkupViewController)],
             let host = hostsByPageID[pageID],
             host.isApplyingGeometry == false else { return }
+#if DEBUG
+        if paperKitOwnsNativePinch {
+            let nativeScroll = nativePaperScrollView(host)
+            recordNativePinchDiagnosticSample(
+                event: nativePaperPinchOwnerPageID == pageID ? "paper-delegate-owner" : "paper-delegate",
+                nativeScale: nativePaperZoom(host) ?? effectiveZoomScale,
+                host: host,
+                force: true
+            )
+            if nativeScroll?.isZooming == true, nativePaperPinchOwnerPageID == nil {
+                recordNativePinchDiagnosticSample(
+                    event: "paper-zooming-before-owner",
+                    nativeScale: nativePaperZoom(host) ?? effectiveZoomScale,
+                    host: host,
+                    force: true
+                )
+            }
+        }
+#endif
+        if paperKitOwnsNativePinch {
+            let nativePinchIsActive = nativePaperScrollView(host)?.isZooming == true
+            if nativePinchIsActive, nativePaperPinchOwnerPageID == nil {
+                // The PaperKit delegate can report its zoom before the pinch
+                // recognizer's target has observed `.began`. Do not reconcile
+                // or invent an anchor from this callback; the recognizer owns
+                // the gesture origin and will establish it on its next event.
+                return
+            }
+            if nativePaperPinchOwnerPageID == pageID {
+                nativePaperPinchLastUpdateTime = CACurrentMediaTime()
+                scheduleNativeViewportUpdate()
+                return
+            }
+        }
         lockPaperViewport(for: host)
     }
 }
